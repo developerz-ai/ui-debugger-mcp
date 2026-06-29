@@ -38,6 +38,12 @@ function fakeAdapter(found: Node | null): {
       calls.type.push({ target, text });
       calls.order.push('type');
     },
+    pressKey: async () => {
+      calls.order.push('pressKey');
+    },
+    scroll: async () => {
+      calls.order.push('scroll');
+    },
     readState: async () => [],
     screenshot: async () => {
       calls.order.push('screenshot');

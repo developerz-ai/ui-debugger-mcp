@@ -33,6 +33,8 @@ function fakeAdapter(returns: FakeReturns): { adapter: Adapter; rec: Recorder } 
     find: async () => null,
     click: async () => {},
     type: async () => {},
+    pressKey: async () => {},
+    scroll: async () => {},
     readState: async (opts: Query = {}) => {
       rec.readState = opts;
       return returns.nodes ?? [];

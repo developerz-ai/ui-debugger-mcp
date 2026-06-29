@@ -32,6 +32,7 @@ import type {
   Node,
   NodeRef,
   Query,
+  ScrollOptions,
   WaitOptions,
 } from '../contract.js';
 import type { CaptureSink } from './cdp.js';
@@ -382,6 +383,15 @@ export class BrowserAdapter implements Adapter {
       }
       await this.#page.keyboard.type(text);
     });
+  }
+
+  // Stub: real CDP key/wheel wiring lands next. Fail loud if routed here meanwhile.
+  async pressKey(key: string): Promise<void> {
+    throw new AdapterError(`browser.pressKey not implemented yet (key: ${key})`);
+  }
+
+  async scroll(opts: ScrollOptions): Promise<void> {
+    throw new AdapterError(`browser.scroll not implemented yet (direction: ${opts.direction})`);
   }
 
   async readState(opts: Query = {}): Promise<Node[]> {
