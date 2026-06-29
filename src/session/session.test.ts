@@ -6,7 +6,7 @@ import { AgentError } from '../errors.js';
 import type { Findings } from '../findings/schema.js';
 import { FindingsStore } from './findings-store.js';
 import { SessionManager } from './manager.js';
-import { Session, type SessionAdapter } from './session.js';
+import { type ReplayOutcome, Session, type SessionAdapter } from './session.js';
 import { sessionPaths, workspacePaths } from './workspace.js';
 
 /** Adapter stub that records how many times it was closed. */
@@ -628,7 +628,7 @@ test('replay runs after the verdict and its path is recorded in findings.evidenc
     findingsStore: store,
     replay: async () => {
       replayCalled = true;
-      return '/ws/sessions/s1/replay.mp4';
+      return { kind: 'rendered', path: '/ws/sessions/s1/replay.mp4' };
     },
   });
 
@@ -641,14 +641,14 @@ test('replay runs after the verdict and its path is recorded in findings.evidenc
   expect((await store.readFindings()).evidence).toBe('/ws/sessions/s1/replay.mp4');
 });
 
-test('replay returning null (no frames) leaves findings.evidence unset', async () => {
+test('replay skipped with no note (no frames) leaves findings.evidence and steps untouched', async () => {
   const store = makeStore();
   const session = new Session({
     id: 's1',
     story: 'x',
     adapter: new FakeAdapter(),
     findingsStore: store,
-    replay: async () => null,
+    replay: async () => ({ kind: 'skipped' }),
   });
 
   await session.start(async (ctx) => {
@@ -656,7 +656,37 @@ test('replay returning null (no frames) leaves findings.evidence unset', async (
   });
 
   expect(session.status).toBe('passed');
-  expect((await store.readFindings()).evidence).toBeUndefined();
+  const findings = await store.readFindings();
+  expect(findings.evidence).toBeUndefined();
+  expect(findings.steps).toEqual([]); // a silent skip adds no note
+});
+
+test('replay skipped with a note (e.g. ffmpeg absent) records a step but no evidence', async () => {
+  const store = makeStore();
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    replay: async () => ({ kind: 'skipped', note: "ffmpeg not found ('ffmpeg')" }),
+  });
+
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({
+      status: 'passed',
+      steps: [{ step: 'open', ok: true }],
+      bugs: [],
+      visual: [],
+    });
+  });
+
+  expect(session.status).toBe('passed'); // the verdict stands — a missing video never overturns it
+  const findings = await store.readFindings();
+  expect(findings.evidence).toBeUndefined(); // nothing was stitched
+  expect(findings.steps).toEqual([
+    { step: 'open', ok: true }, // the driver's trail is preserved
+    { step: 'replay video', ok: false, note: "ffmpeg not found ('ffmpeg')" },
+  ]);
 });
 
 test('a replay failure does not block teardown and never overturns the verdict (fail-soft)', async () => {
@@ -687,7 +717,7 @@ test('replay write-back preserves a summary written just before it', async () =>
     adapter: new FakeAdapter(),
     findingsStore: store,
     summarize: async () => 'one glitch on the login page',
-    replay: async () => '/ws/replay.mp4',
+    replay: async () => ({ kind: 'rendered', path: '/ws/replay.mp4' }),
   });
 
   await session.start(async (ctx) => {
@@ -706,7 +736,7 @@ test('replay records evidence under the terminal status, not a stale running rec
     story: 'x',
     adapter: new FakeAdapter(),
     findingsStore: store,
-    replay: async () => '/ws/replay.mp4',
+    replay: async () => ({ kind: 'rendered', path: '/ws/replay.mp4' }),
   });
 
   // Driver leaves the record on `running` — `#verdict()` settles `failed`.
@@ -732,7 +762,7 @@ test('close is not blocked by a hung replay (teardown wins the abort race)', asy
     findingsStore: store,
     replay: () => {
       enterReplay();
-      return new Promise<string | null>(() => undefined); // never settles — a hung ffmpeg
+      return new Promise<ReplayOutcome>(() => undefined); // never settles — a hung ffmpeg
     },
   });
 

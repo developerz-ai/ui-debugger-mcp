@@ -49,13 +49,23 @@ export interface SessionAdapter {
 export type SummarizeStep = (findings: Findings) => Promise<string>;
 
 /**
- * Post-verdict replay generator — stitches the run's ordered screenshots into a
- * captioned `replay.mp4` for PR evidence. Returns the video's path (recorded in
- * `findings.evidence`), or `null` when there were no frames to stitch. Bound to
- * ffmpeg + the session paths OUTSIDE the session, so the session stays tool- and
- * path-blind (the same shape as {@link SummarizeStep}).
+ * Outcome of the post-verdict replay attempt:
+ *  - `rendered` — the clip was stitched; `path` is recorded in `findings.evidence`.
+ *  - `skipped`  — no clip was produced. A `note` (when present) explains why — e.g.
+ *    ffmpeg is not installed — and the session surfaces it into the findings so a
+ *    reviewer knows the missing `replay.mp4` was expected, not silently dropped. No
+ *    `note` means there was simply nothing to stitch (no screenshots); skipped quietly.
  */
-export type ReplayStep = () => Promise<string | null>;
+export type ReplayOutcome = { kind: 'rendered'; path: string } | { kind: 'skipped'; note?: string };
+
+/**
+ * Post-verdict replay generator — stitches the run's ordered screenshots into a
+ * captioned `replay.mp4` for PR evidence, reporting its {@link ReplayOutcome}. Bound
+ * to ffmpeg + the session paths OUTSIDE the session, so the session stays tool- and
+ * path-blind (the same shape as {@link SummarizeStep}). It probes for ffmpeg and
+ * skips gracefully when absent — never crashing teardown.
+ */
+export type ReplayStep = () => Promise<ReplayOutcome>;
 
 /** Everything needed to construct a session. The loop is handed to `start()`, not the constructor. */
 export interface SessionOptions<A extends SessionAdapter> {
@@ -270,23 +280,44 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
    * after the verdict (and after the summary, so its write-back preserves the
    * summary). Best-effort and fail-soft: no frames, a missing ffmpeg, or any stitch
    * failure is swallowed so the replay never delays teardown or overturns the
-   * verdict. Writes back under the settled terminal `status`, never a stale `running`.
+   * verdict. A `skipped` outcome with a `note` (e.g. ffmpeg absent) is recorded as a
+   * step so the missing video is explained, not silent. Writes back under the settled
+   * terminal `status`, never a stale `running`.
    */
   async #ensureReplay(): Promise<void> {
     if (this.#replay === undefined) return;
     try {
-      const replayPath = await this.#replay();
-      if (replayPath === null) return; // no frames to stitch
+      const outcome = await this.#replay();
+      if (outcome.kind === 'skipped') {
+        if (outcome.note !== undefined) await this.#noteReplaySkipped(outcome.note);
+        return;
+      }
       const findings = await this.#findingsStore.tryReadFindings();
       if (findings === null) return;
       await this.#findingsStore.writeFindings({
         ...findings,
         status: this.#status,
-        evidence: replayPath,
+        evidence: outcome.path,
       });
     } catch {
       // Fail soft: replay is best-effort PR evidence; the verdict always stands.
     }
+  }
+
+  /**
+   * Record a skipped replay as a `failed` step in the findings so `get_findings`
+   * explains the absent `replay.mp4` (the loud `agent.log` line is written upstream
+   * in the replay step). Preserves the existing trail + summary; writes under the
+   * settled terminal `status`. Best-effort — wrapped by `#ensureReplay`'s catch.
+   */
+  async #noteReplaySkipped(note: string): Promise<void> {
+    const findings = await this.#findingsStore.tryReadFindings();
+    if (findings === null) return;
+    await this.#findingsStore.writeFindings({
+      ...findings,
+      status: this.#status,
+      steps: [...findings.steps, { step: 'replay video', ok: false, note }],
+    });
   }
 
   /**

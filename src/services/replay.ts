@@ -13,17 +13,21 @@
  * seam. {@link createReplayStep} binds the real `spawn('ffmpeg', …)` plus a resolved
  * caption font into the {@link ReplayStep} the session runs once the verdict settles.
  *
- * The session wraps the whole step fail-soft (a missing ffmpeg or font must never
- * block teardown), so this layer fails loud — a non-zero ffmpeg exit throws a
- * {@link ReplayError} — and the session decides to swallow it. When no caption font
- * is installed the stitch still runs, just without burned-in captions.
+ * ffmpeg is optional tooling, so {@link createReplayStep} probes for the binary
+ * ({@link ffmpegOnPath}) BEFORE stitching: absent, it skips cleanly with a note the
+ * session folds into the findings and a loud line in `agent.log` — never a crash.
+ * When ffmpeg IS present this layer fails loud — a non-zero exit throws a
+ * {@link ReplayError} — and the session decides to swallow it. The session wraps the
+ * whole step fail-soft (a missing ffmpeg or font must never block teardown). When no
+ * caption font is installed the stitch still runs, just without burned-in captions.
  */
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { ReplayError } from '../errors.js';
 import type { ScreenshotFrame } from '../session/findings-store.js';
-import type { ReplayStep } from '../session/session.js';
+import type { ReplayOutcome, ReplayStep } from '../session/session.js';
 
 /** One frame to stitch: the PNG path plus the caption burned onto it. */
 export interface ReplayFrame {
@@ -159,6 +163,18 @@ export function resolveFontFile(): string | undefined {
   return FONT_CANDIDATES.find((path) => existsSync(path));
 }
 
+/**
+ * True when the ffmpeg binary is resolvable: a path-like `bin` (absolute or relative)
+ * is checked directly; a bare command is searched across `PATH`. Pure and synchronous
+ * (no subprocess), so {@link createReplayStep} can probe before stitching and skip
+ * cleanly when ffmpeg is absent — never spawning a process that won't exist.
+ */
+export function ffmpegOnPath(bin: string): boolean {
+  if (bin.includes('/')) return existsSync(bin);
+  const dirs = (process.env.PATH ?? '').split(delimiter).filter((dir) => dir.length > 0);
+  return dirs.some((dir) => existsSync(join(dir, bin)));
+}
+
 /** The real encoder: spawn ffmpeg, resolve on exit 0, throw {@link ReplayError} otherwise. */
 function spawnFfmpeg(bin: string): ReplayEncoder {
   return (args) =>
@@ -189,15 +205,27 @@ export interface ReplayStepDeps {
   ffmpegBin?: string;
   /** Override stitch tunables (frame duration, canvas, fps). */
   render?: Partial<Omit<RenderConfig, 'fontFile'>>;
+  /** Loud breadcrumb sink (`agent.log`); defaults to a no-op. Surfaces an absent ffmpeg. */
+  log?: (line: string) => void;
+  /** Probe whether ffmpeg is installed; defaults to {@link ffmpegOnPath}. A seam for tests. */
+  hasFfmpeg?: (bin: string) => boolean;
 }
 
 /**
  * Bind {@link renderReplay} to the real ffmpeg spawn + a resolved caption font,
  * yielding the {@link ReplayStep} the session runs after the verdict settles. The
  * session stays tool- and path-blind; everything ffmpeg-shaped lives here.
+ *
+ * Probes for ffmpeg first (graceful when it is not installed): no frames → a silent
+ * skip; ffmpeg absent → a skip carrying a `note` the session records in the findings,
+ * plus a loud line in `agent.log` so the missing `replay.mp4` is never a mystery; a
+ * stitched clip → its path for `findings.evidence`.
  */
 export function createReplayStep(deps: ReplayStepDeps): ReplayStep {
-  const encode = spawnFfmpeg(deps.ffmpegBin ?? 'ffmpeg');
+  const bin = deps.ffmpegBin ?? 'ffmpeg';
+  const log = deps.log ?? (() => undefined);
+  const hasFfmpeg = deps.hasFfmpeg ?? ffmpegOnPath;
+  const encode = spawnFfmpeg(bin);
   const cfg: RenderConfig = {
     secondsPerFrame: deps.render?.secondsPerFrame ?? DEFAULTS.secondsPerFrame,
     width: deps.render?.width ?? DEFAULTS.width,
@@ -205,9 +233,16 @@ export function createReplayStep(deps: ReplayStepDeps): ReplayStep {
     fps: deps.render?.fps ?? DEFAULTS.fps,
     fontFile: resolveFontFile(),
   };
-  return async () => {
+  return async (): Promise<ReplayOutcome> => {
     const frames = await deps.screenshots.listScreenshots();
+    if (frames.length === 0) return { kind: 'skipped' }; // nothing to stitch
+    if (!hasFfmpeg(bin)) {
+      const note = `ffmpeg not found ('${bin}'); replay.mp4 was not generated — install ffmpeg to enable replay video`;
+      log(`replay: ${note}`);
+      return { kind: 'skipped', note };
+    }
     const replayFrames = frames.map((f) => ({ path: f.path, caption: f.label }));
-    return renderReplay(encode, replayFrames, deps.output, cfg);
+    const path = await renderReplay(encode, replayFrames, deps.output, cfg);
+    return path === null ? { kind: 'skipped' } : { kind: 'rendered', path };
   };
 }

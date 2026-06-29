@@ -1,6 +1,17 @@
 import { expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ReplayError } from '../errors.js';
-import { buildFfmpegArgs, type RenderConfig, type ReplayFrame, renderReplay } from './replay.js';
+import type { ScreenshotFrame } from '../session/findings-store.js';
+import {
+  buildFfmpegArgs,
+  createReplayStep,
+  ffmpegOnPath,
+  type RenderConfig,
+  type ReplayFrame,
+  renderReplay,
+} from './replay.js';
 
 const CFG: RenderConfig = {
   secondsPerFrame: 2,
@@ -111,4 +122,65 @@ test('renderReplay propagates an encoder failure (loud — the session decides t
       CFG,
     ),
   ).rejects.toThrow(ReplayError);
+});
+
+// --- ffmpegOnPath (binary detection) ----------------------------------------
+
+test('ffmpegOnPath resolves an existing absolute path and rejects a missing one', () => {
+  expect(ffmpegOnPath(process.execPath)).toBe(true); // the running binary exists
+  expect(ffmpegOnPath('/no/such/dir/ffmpeg')).toBe(false);
+});
+
+test('ffmpegOnPath finds a bare command on PATH and misses one that is absent', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ui-dbg-ffmpeg-'));
+  const savedPath = process.env.PATH;
+  try {
+    writeFileSync(join(dir, 'ffmpeg'), '');
+    process.env.PATH = dir;
+    expect(ffmpegOnPath('ffmpeg')).toBe(true);
+    expect(ffmpegOnPath('definitely-absent-binary')).toBe(false);
+  } finally {
+    process.env.PATH = savedPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- createReplayStep (graceful ffmpeg-absent handling) ---------------------
+
+const FRAME: ScreenshotFrame = { seq: 1, path: '/s/001-open.png', label: 'open' };
+
+test('createReplayStep skips silently when there are no frames (never probes ffmpeg)', async () => {
+  const logs: string[] = [];
+  let probed = false;
+  const step = createReplayStep({
+    screenshots: { listScreenshots: async () => [] },
+    output: '/out.mp4',
+    log: (line) => logs.push(line),
+    hasFfmpeg: () => {
+      probed = true;
+      return true;
+    },
+  });
+  expect(await step()).toEqual({ kind: 'skipped' });
+  expect(logs).toEqual([]); // a no-frame skip is quiet
+  expect(probed).toBe(false); // bails before the ffmpeg probe
+});
+
+test('createReplayStep skips with a note and logs loud when ffmpeg is absent', async () => {
+  const logs: string[] = [];
+  const step = createReplayStep({
+    screenshots: { listScreenshots: async () => [FRAME] },
+    output: '/out.mp4',
+    log: (line) => logs.push(line),
+    hasFfmpeg: () => false, // ffmpeg not installed — never spawns it
+  });
+  const outcome = await step();
+  expect(outcome.kind).toBe('skipped');
+  if (outcome.kind === 'skipped') {
+    expect(outcome.note).toContain('ffmpeg not found');
+    expect(outcome.note).toContain('install ffmpeg');
+  }
+  expect(logs).toHaveLength(1);
+  expect(logs[0]).toContain('replay:'); // surfaced loud in agent.log
+  expect(logs[0]).toContain('ffmpeg not found');
 });

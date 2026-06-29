@@ -229,7 +229,8 @@ export async function buildSession(
     summarize: createSummarize(models.summary),
     // Post-verdict seam: stitches the ordered screenshots into a captioned
     // `replay.mp4` (ffmpeg) and records its path in `findings.evidence` for the PR.
-    replay: createReplayStep({ screenshots: store, output: paths.replayMp4 }),
+    // `log` surfaces an absent ffmpeg loud in `agent.log`; the step skips, never crashes.
+    replay: createReplayStep({ screenshots: store, output: paths.replayMp4, log: logAgent }),
   });
 
   return {
