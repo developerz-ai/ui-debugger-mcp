@@ -201,7 +201,10 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
         return;
       }
       this.#status = await this.#verdict();
-      await this.#ensureSummary();
+      // Best-effort, non-blocking: race the summary against the abort signal so a
+      // hung summary model can never stall `close()` (which aborts, then awaits the
+      // run). A natural finish awaits it fully; teardown short-circuits the wait.
+      await this.#raceAbort(this.#ensureSummary());
     } catch (error) {
       this.#status = 'failed';
       // Aborted by `close()` — the teardown is the verdict; nothing to surface.
@@ -227,11 +230,38 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
     try {
       const findings = await this.#findingsStore.tryReadFindings();
       if (findings === null || hasText(findings.summary)) return;
-      const summary = await this.#summarize(findings);
+      // Summarize the terminal record: `#verdict()` may have settled `status` to a
+      // value the persisted findings don't yet carry (e.g. `failed` over a stale
+      // `running`), so the digest must reflect the final verdict, not the disk copy.
+      const terminalFindings = { ...findings, status: this.#status };
+      const summary = await this.#summarize(terminalFindings);
       if (!hasText(summary)) return;
-      await this.#findingsStore.writeFindings({ ...findings, status: this.#status, summary });
+      await this.#findingsStore.writeFindings({ ...terminalFindings, summary });
     } catch {
       // Fail soft: the verdict stands; the driver's own summary (if any) is the fallback.
+    }
+  }
+
+  /**
+   * Await `promise`, but stop waiting the moment the session aborts — so the
+   * best-effort summary can never keep `close()` (which aborts, then awaits the run)
+   * blocked on a hung model. The in-flight call is abandoned, not cancelled; the
+   * verdict already stands, so dropping the summary is the documented fail-soft.
+   */
+  async #raceAbort(promise: Promise<void>): Promise<void> {
+    const { signal } = this.#abort;
+    if (signal.aborted) return;
+    let onAbort: (() => void) | undefined;
+    try {
+      await Promise.race([
+        promise,
+        new Promise<void>((resolve) => {
+          onAbort = () => resolve();
+          signal.addEventListener('abort', onAbort, { once: true });
+        }),
+      ]);
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
     }
   }
 

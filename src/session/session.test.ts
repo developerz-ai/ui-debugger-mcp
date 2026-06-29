@@ -561,3 +561,57 @@ test('a summarize failure does not block teardown (fail-soft)', async () => {
   // Verdict stands; teardown was not blocked.
   expect(session.status).toBe('passed');
 });
+
+test('close is not blocked by a hung summary model (teardown wins the abort race)', async () => {
+  const store = makeStore();
+  let enterSummary: () => void = () => undefined;
+  const entered = new Promise<void>((resolve) => {
+    enterSummary = resolve;
+  });
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    summarize: () => {
+      enterSummary();
+      return new Promise<string>(() => undefined); // never settles — a hung model
+    },
+  });
+
+  session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'passed', steps: [], bugs: [], visual: [] });
+  });
+
+  await entered; // the run is now parked awaiting the hung summary
+  await session.close(); // must return — the abort short-circuits the summary wait
+
+  expect(session.status).toBe('passed'); // the verdict settled before the summary stalled
+  expect((await store.readFindings()).summary).toBeUndefined(); // hung summary never written
+});
+
+test('summarize digests the terminal status, not a stale running record', async () => {
+  const store = makeStore();
+  let digestedStatus: Findings['status'] | undefined;
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    summarize: async (findings) => {
+      digestedStatus = findings.status;
+      return 'run failed before login';
+    },
+  });
+
+  // Driver leaves the record on `running` (no terminal verdict) — `#verdict()` settles `failed`.
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'running', steps: [], bugs: [], visual: [] });
+  });
+
+  expect(session.status).toBe('failed');
+  expect(digestedStatus).toBe('failed'); // summarized the terminal verdict, not the stale `running`
+  const findings = await store.readFindings();
+  expect(findings.status).toBe('failed');
+  expect(findings.summary).toBe('run failed before login');
+});
