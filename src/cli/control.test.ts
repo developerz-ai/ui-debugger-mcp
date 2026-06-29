@@ -36,6 +36,7 @@ async function seedState(overrides: Partial<StateFile> = {}): Promise<string> {
     startedAt: '2026-06-29T00:00:00.000Z',
     updatedAt: '2026-06-29T00:00:00.000Z',
     sessionDir: join(ws.sessions, '1700000000000-0001'),
+    identity: { startTicks: 1 },
     ...overrides,
   };
   await writeState(ws.stateJson, state);

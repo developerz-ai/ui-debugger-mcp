@@ -16,6 +16,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { z } from 'zod';
+import { captureIdentity, ProcessIdentitySchema } from './process-identity.js';
 import { sessionPaths, type WorkspacePaths } from './workspace.js';
 
 /** `state.json` shape — the breadcrumb a separate CLI process reads. */
@@ -36,6 +37,8 @@ export const StateFileSchema = z.object({
   updatedAt: z.string(),
   /** Absolute path to the session dir (holds `findings.json`). */
   sessionDir: z.string(),
+  /** Process fingerprint — lets the CLI tell our live server from a recycled `pid`. */
+  identity: ProcessIdentitySchema,
 });
 
 export type StateFile = z.infer<typeof StateFileSchema>;
@@ -101,6 +104,7 @@ export class FileStatePort implements StatePort {
       startedAt: iso,
       updatedAt: iso,
       sessionDir: sessionPaths(this.#workspace, run.sessionId).root,
+      identity: captureIdentity(this.#pid),
     }).catch(() => undefined);
   }
 

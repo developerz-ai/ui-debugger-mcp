@@ -23,6 +23,7 @@ const SAMPLE: StateFile = {
   startedAt: '2026-06-29T00:00:00.000Z',
   updatedAt: '2026-06-29T00:00:00.000Z',
   sessionDir: '/ws/proj/sessions/1700000000000-0001',
+  identity: { startTicks: 987_654 },
 };
 
 test('writeState + readState round-trips', async () => {
