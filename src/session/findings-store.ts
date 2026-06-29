@@ -23,6 +23,16 @@ import type { SessionPaths } from './workspace.js';
 /** Append-only log channels backing `logs/<channel>.log`. */
 export type LogChannel = 'console' | 'network' | 'agent';
 
+/** One ordered screenshot frame — the raw material for the replay video. */
+export interface ScreenshotFrame {
+  /** The `NNN` sequence parsed from the filename (ascending = capture order). */
+  seq: number;
+  /** Absolute path to the PNG. */
+  path: string;
+  /** Step label de-slugged from the filename (`001-clicked-login.png` → `clicked login`). */
+  label: string;
+}
+
 /** Max slug length — keeps `NNN-<slug>.png` well under the 255-byte filename limit. */
 const SLUG_MAX = 60;
 
@@ -126,6 +136,34 @@ export class FindingsStore {
     );
     await writeFile(file, data);
     return file;
+  }
+
+  /**
+   * List saved screenshots as ordered frames (`NNN-<label>.png`), ascending by
+   * sequence — the capture order the replay video stitches. Returns `[]` when none
+   * were saved yet (or the dir is missing); files that don't match the pattern are
+   * skipped. Decodes the step label back from the filename slug.
+   */
+  async listScreenshots(): Promise<ScreenshotFrame[]> {
+    let entries: string[];
+    try {
+      entries = await readdir(this.#paths.screenshots);
+    } catch {
+      return [];
+    }
+    const frames: ScreenshotFrame[] = [];
+    for (const entry of entries) {
+      const match = /^(\d+)-(.*)\.png$/.exec(entry);
+      const digits = match?.[1];
+      const slug = match?.[2];
+      if (digits === undefined || slug === undefined) continue;
+      frames.push({
+        seq: Number(digits),
+        path: join(this.#paths.screenshots, entry),
+        label: slug.replace(/-+/g, ' ').trim() || 'step',
+      });
+    }
+    return frames.sort((a, b) => a.seq - b.seq);
   }
 
   /** Create `screenshots/` + `logs/` (and the session root) once; idempotent. */

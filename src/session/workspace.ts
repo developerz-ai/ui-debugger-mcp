@@ -46,6 +46,8 @@ export interface SessionPaths {
   storyMd: string;
   /** `<root>/screenshots/` */
   screenshots: string;
+  /** `<root>/replay.mp4` — ordered screenshots stitched into a captioned video. */
+  replayMp4: string;
   /** `<root>/findings.json` */
   findingsJson: string;
   /** `<root>/logs/` */
@@ -85,6 +87,7 @@ export function sessionPaths(workspace: WorkspacePaths, id: string): SessionPath
     root,
     storyMd: join(root, 'story.md'),
     screenshots: join(root, 'screenshots'),
+    replayMp4: join(root, 'replay.mp4'),
     findingsJson: join(root, 'findings.json'),
     logs: join(root, 'logs'),
   };

@@ -48,6 +48,15 @@ export interface SessionAdapter {
  */
 export type SummarizeStep = (findings: Findings) => Promise<string>;
 
+/**
+ * Post-verdict replay generator — stitches the run's ordered screenshots into a
+ * captioned `replay.mp4` for PR evidence. Returns the video's path (recorded in
+ * `findings.evidence`), or `null` when there were no frames to stitch. Bound to
+ * ffmpeg + the session paths OUTSIDE the session, so the session stays tool- and
+ * path-blind (the same shape as {@link SummarizeStep}).
+ */
+export type ReplayStep = () => Promise<string | null>;
+
 /** Everything needed to construct a session. The loop is handed to `start()`, not the constructor. */
 export interface SessionOptions<A extends SessionAdapter> {
   /** Stable session id (from `generateSessionId`). */
@@ -65,6 +74,12 @@ export interface SessionOptions<A extends SessionAdapter> {
    * driver left it empty. Omit to keep whatever summary the driver wrote.
    */
   summarize?: SummarizeStep;
+  /**
+   * Optional replay generator: stitches the ordered screenshots into a captioned
+   * `replay.mp4` after the verdict and records its path in `findings.evidence`.
+   * Omit to skip replay generation. Best-effort — the session wraps it fail-soft.
+   */
+  replay?: ReplayStep;
 }
 
 /** The lifecycle seams the session hands a {@link LoopRunner}: its inbox, progress sink, abort signal. */
@@ -100,6 +115,8 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
   readonly #findingsStore: FindingsStore;
   /** The summary actor, or `undefined` when no summarizer was wired (driver's summary stands). */
   readonly #summarize: SummarizeStep | undefined;
+  /** The replay generator, or `undefined` when none was wired (no `replay.mp4` is produced). */
+  readonly #replay: ReplayStep | undefined;
   readonly #inbox: string[] = [];
   readonly #abort = new AbortController();
   /** The background loop run, set once by `start()`; `null` until then. */
@@ -113,6 +130,7 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
     this.#adapter = options.adapter;
     this.#findingsStore = options.findingsStore;
     this.#summarize = options.summarize;
+    this.#replay = options.replay;
   }
 
   /** Current run status. `running` until the loop settles a verdict (`passed`/`failed`). */
@@ -205,6 +223,10 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
       // hung summary model can never stall `close()` (which aborts, then awaits the
       // run). A natural finish awaits it fully; teardown short-circuits the wait.
       await this.#raceAbort(this.#ensureSummary());
+      // Then stitch the ordered screenshots into a captioned replay.mp4, recording
+      // its path in findings.evidence — same best-effort, abort-raced contract, run
+      // after the summary so its write-back preserves it.
+      await this.#raceAbort(this.#ensureReplay());
     } catch (error) {
       this.#status = 'failed';
       // Aborted by `close()` — the teardown is the verdict; nothing to surface.
@@ -239,6 +261,31 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
       await this.#findingsStore.writeFindings({ ...terminalFindings, summary });
     } catch {
       // Fail soft: the verdict stands; the driver's own summary (if any) is the fallback.
+    }
+  }
+
+  /**
+   * Stitch the run's ordered screenshots into a captioned `replay.mp4` and record
+   * its path in `findings.evidence` — PR evidence the smart agent can attach. Runs
+   * after the verdict (and after the summary, so its write-back preserves the
+   * summary). Best-effort and fail-soft: no frames, a missing ffmpeg, or any stitch
+   * failure is swallowed so the replay never delays teardown or overturns the
+   * verdict. Writes back under the settled terminal `status`, never a stale `running`.
+   */
+  async #ensureReplay(): Promise<void> {
+    if (this.#replay === undefined) return;
+    try {
+      const replayPath = await this.#replay();
+      if (replayPath === null) return; // no frames to stitch
+      const findings = await this.#findingsStore.tryReadFindings();
+      if (findings === null) return;
+      await this.#findingsStore.writeFindings({
+        ...findings,
+        status: this.#status,
+        evidence: replayPath,
+      });
+    } catch {
+      // Fail soft: replay is best-effort PR evidence; the verdict always stands.
     }
   }
 

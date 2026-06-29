@@ -44,6 +44,7 @@ test('sessionPaths builds correct paths', () => {
   expect(sp.root).toBe('/tmp/ws/my-app/sessions/12345-0001');
   expect(sp.storyMd).toBe('/tmp/ws/my-app/sessions/12345-0001/story.md');
   expect(sp.screenshots).toBe('/tmp/ws/my-app/sessions/12345-0001/screenshots');
+  expect(sp.replayMp4).toBe('/tmp/ws/my-app/sessions/12345-0001/replay.mp4');
   expect(sp.findingsJson).toBe('/tmp/ws/my-app/sessions/12345-0001/findings.json');
   expect(sp.logs).toBe('/tmp/ws/my-app/sessions/12345-0001/logs');
 });

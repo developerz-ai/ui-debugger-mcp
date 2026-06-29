@@ -82,3 +82,11 @@ export class McpServerError extends UiDebuggerError {
     Object.setPrototypeOf(this, McpServerError.prototype);
   }
 }
+
+export class ReplayError extends UiDebuggerError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ReplayError';
+    Object.setPrototypeOf(this, ReplayError.prototype);
+  }
+}
