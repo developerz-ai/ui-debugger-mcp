@@ -212,7 +212,7 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
 
     const builder = makeSessionBuilder({
       config,
-      models: { driver: mockDriver, vision: mockVision },
+      models: { driver: mockDriver, vision: mockVision, summary: new MockLanguageModelV3() },
       workspace,
     });
 

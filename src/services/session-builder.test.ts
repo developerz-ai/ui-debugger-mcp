@@ -18,7 +18,11 @@ const CONFIG: ResolvedConfig = {
 function deps(): SessionBuilderDeps {
   return {
     config: CONFIG,
-    models: { driver: new MockLanguageModelV3(), vision: new MockLanguageModelV3() },
+    models: {
+      driver: new MockLanguageModelV3(),
+      vision: new MockLanguageModelV3(),
+      summary: new MockLanguageModelV3(),
+    },
     workspace: workspacePaths('/project/app', '/tmp/ui-dbg-builder-test'),
   };
 }

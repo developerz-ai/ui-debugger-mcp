@@ -49,7 +49,11 @@ async function main(): Promise<void> {
     const manager = new SessionManager<Session>();
     const builder = makeSessionBuilder({
       config,
-      models: { driver: roleModels.driver, vision: roleModels.vision },
+      models: {
+        driver: roleModels.driver,
+        vision: roleModels.vision,
+        summary: roleModels.summary,
+      },
       workspace,
     });
     const service = new DebugService({
