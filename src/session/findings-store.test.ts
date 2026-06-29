@@ -45,6 +45,36 @@ test('saveScreenshot caps a long label so the filename never overflows (ENAMETOO
   expect(file).not.toMatch(/-\.png$/); // no trailing dash before the extension
 });
 
+// --- listScreenshots --------------------------------------------------------
+
+test('listScreenshots returns [] when no frames were saved', async () => {
+  expect(await store.listScreenshots()).toEqual([]);
+});
+
+test('listScreenshots returns frames ordered by sequence with de-slugged labels', async () => {
+  await store.saveScreenshot('open home', new Uint8Array([1]));
+  await store.saveScreenshot('click "Save"', new Uint8Array([2]));
+  const frames = await store.listScreenshots();
+  expect(frames).toHaveLength(2);
+  expect(frames[0]?.seq).toBe(1);
+  expect(frames[0]?.label).toBe('open home');
+  expect(frames[0]?.path).toMatch(/screenshots\/001-open-home\.png$/);
+  expect(frames[1]?.seq).toBe(2);
+  expect(frames[1]?.label).toBe('click save');
+});
+
+test('listScreenshots ignores files that do not match NNN-<slug>.png', async () => {
+  await store.saveScreenshot('frame one', new Uint8Array([1]));
+  const ws = workspacePaths('/project/my-app', tmpDir);
+  const sp = sessionPaths(ws, 'test-session-001');
+  await import('node:fs/promises').then((fs) =>
+    fs.writeFile(join(sp.screenshots, 'notes.txt'), 'ignore me', 'utf8'),
+  );
+  const frames = await store.listScreenshots();
+  expect(frames).toHaveLength(1);
+  expect(frames[0]?.label).toBe('frame one');
+});
+
 // --- writeFindings / readFindings -------------------------------------------
 
 test('writeFindings returns the findings.json path', async () => {

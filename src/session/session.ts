@@ -48,6 +48,25 @@ export interface SessionAdapter {
  */
 export type SummarizeStep = (findings: Findings) => Promise<string>;
 
+/**
+ * Outcome of the post-verdict replay attempt:
+ *  - `rendered` — the clip was stitched; `path` is recorded in `findings.evidence`.
+ *  - `skipped`  — no clip was produced. A `note` (when present) explains why — e.g.
+ *    ffmpeg is not installed — and the session surfaces it into the findings so a
+ *    reviewer knows the missing `replay.mp4` was expected, not silently dropped. No
+ *    `note` means there was simply nothing to stitch (no screenshots); skipped quietly.
+ */
+export type ReplayOutcome = { kind: 'rendered'; path: string } | { kind: 'skipped'; note?: string };
+
+/**
+ * Post-verdict replay generator — stitches the run's ordered screenshots into a
+ * captioned `replay.mp4` for PR evidence, reporting its {@link ReplayOutcome}. Bound
+ * to ffmpeg + the session paths OUTSIDE the session, so the session stays tool- and
+ * path-blind (the same shape as {@link SummarizeStep}). It probes for ffmpeg and
+ * skips gracefully when absent — never crashing teardown.
+ */
+export type ReplayStep = () => Promise<ReplayOutcome>;
+
 /** Everything needed to construct a session. The loop is handed to `start()`, not the constructor. */
 export interface SessionOptions<A extends SessionAdapter> {
   /** Stable session id (from `generateSessionId`). */
@@ -65,6 +84,12 @@ export interface SessionOptions<A extends SessionAdapter> {
    * driver left it empty. Omit to keep whatever summary the driver wrote.
    */
   summarize?: SummarizeStep;
+  /**
+   * Optional replay generator: stitches the ordered screenshots into a captioned
+   * `replay.mp4` after the verdict and records its path in `findings.evidence`.
+   * Omit to skip replay generation. Best-effort — the session wraps it fail-soft.
+   */
+  replay?: ReplayStep;
 }
 
 /** The lifecycle seams the session hands a {@link LoopRunner}: its inbox, progress sink, abort signal. */
@@ -100,6 +125,8 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
   readonly #findingsStore: FindingsStore;
   /** The summary actor, or `undefined` when no summarizer was wired (driver's summary stands). */
   readonly #summarize: SummarizeStep | undefined;
+  /** The replay generator, or `undefined` when none was wired (no `replay.mp4` is produced). */
+  readonly #replay: ReplayStep | undefined;
   readonly #inbox: string[] = [];
   readonly #abort = new AbortController();
   /** The background loop run, set once by `start()`; `null` until then. */
@@ -113,6 +140,7 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
     this.#adapter = options.adapter;
     this.#findingsStore = options.findingsStore;
     this.#summarize = options.summarize;
+    this.#replay = options.replay;
   }
 
   /** Current run status. `running` until the loop settles a verdict (`passed`/`failed`). */
@@ -205,6 +233,10 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
       // hung summary model can never stall `close()` (which aborts, then awaits the
       // run). A natural finish awaits it fully; teardown short-circuits the wait.
       await this.#raceAbort(this.#ensureSummary());
+      // Then stitch the ordered screenshots into a captioned replay.mp4, recording
+      // its path in findings.evidence — same best-effort, abort-raced contract, run
+      // after the summary so its write-back preserves it.
+      await this.#raceAbort(this.#ensureReplay());
     } catch (error) {
       this.#status = 'failed';
       // Aborted by `close()` — the teardown is the verdict; nothing to surface.
@@ -240,6 +272,52 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
     } catch {
       // Fail soft: the verdict stands; the driver's own summary (if any) is the fallback.
     }
+  }
+
+  /**
+   * Stitch the run's ordered screenshots into a captioned `replay.mp4` and record
+   * its path in `findings.evidence` — PR evidence the smart agent can attach. Runs
+   * after the verdict (and after the summary, so its write-back preserves the
+   * summary). Best-effort and fail-soft: no frames, a missing ffmpeg, or any stitch
+   * failure is swallowed so the replay never delays teardown or overturns the
+   * verdict. A `skipped` outcome with a `note` (e.g. ffmpeg absent) is recorded as a
+   * step so the missing video is explained, not silent. Writes back under the settled
+   * terminal `status`, never a stale `running`.
+   */
+  async #ensureReplay(): Promise<void> {
+    if (this.#replay === undefined) return;
+    try {
+      const outcome = await this.#replay();
+      if (outcome.kind === 'skipped') {
+        if (outcome.note !== undefined) await this.#noteReplaySkipped(outcome.note);
+        return;
+      }
+      const findings = await this.#findingsStore.tryReadFindings();
+      if (findings === null) return;
+      await this.#findingsStore.writeFindings({
+        ...findings,
+        status: this.#status,
+        evidence: outcome.path,
+      });
+    } catch {
+      // Fail soft: replay is best-effort PR evidence; the verdict always stands.
+    }
+  }
+
+  /**
+   * Record a skipped replay as a `failed` step in the findings so `get_findings`
+   * explains the absent `replay.mp4` (the loud `agent.log` line is written upstream
+   * in the replay step). Preserves the existing trail + summary; writes under the
+   * settled terminal `status`. Best-effort — wrapped by `#ensureReplay`'s catch.
+   */
+  async #noteReplaySkipped(note: string): Promise<void> {
+    const findings = await this.#findingsStore.tryReadFindings();
+    if (findings === null) return;
+    await this.#findingsStore.writeFindings({
+      ...findings,
+      status: this.#status,
+      steps: [...findings.steps, { step: 'replay video', ok: false, note }],
+    });
   }
 
   /**

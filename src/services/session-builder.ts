@@ -29,6 +29,7 @@ import { AdapterError, TargetNotFoundError } from '../errors.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
 import { ensureSession, sessionPaths, type WorkspacePaths } from '../session/workspace.js';
+import { createReplayStep } from './replay.js';
 import { createSummarize } from './summarize.js';
 
 /** The three actors the belt + loop + post-verdict step bind to, resolved once and shared across runs. */
@@ -226,6 +227,10 @@ export async function buildSession(
     // Post-verdict seam: fills `findings.summary` over the summary model when the
     // driver left it empty (best-effort; the session wraps it fail-soft).
     summarize: createSummarize(models.summary),
+    // Post-verdict seam: stitches the ordered screenshots into a captioned
+    // `replay.mp4` (ffmpeg) and records its path in `findings.evidence` for the PR.
+    // `log` surfaces an absent ffmpeg loud in `agent.log`; the step skips, never crashes.
+    replay: createReplayStep({ screenshots: store, output: paths.replayMp4, log: logAgent }),
   });
 
   return {

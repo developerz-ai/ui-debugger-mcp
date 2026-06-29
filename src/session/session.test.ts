@@ -6,7 +6,7 @@ import { AgentError } from '../errors.js';
 import type { Findings } from '../findings/schema.js';
 import { FindingsStore } from './findings-store.js';
 import { SessionManager } from './manager.js';
-import { Session, type SessionAdapter } from './session.js';
+import { type ReplayOutcome, Session, type SessionAdapter } from './session.js';
 import { sessionPaths, workspacePaths } from './workspace.js';
 
 /** Adapter stub that records how many times it was closed. */
@@ -614,4 +614,182 @@ test('summarize digests the terminal status, not a stale running record', async 
   const findings = await store.readFindings();
   expect(findings.status).toBe('failed');
   expect(findings.summary).toBe('run failed before login');
+});
+
+// --- post-verdict replay -----------------------------------------------------
+
+test('replay runs after the verdict and its path is recorded in findings.evidence', async () => {
+  const store = makeStore();
+  let replayCalled = false;
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    replay: async () => {
+      replayCalled = true;
+      return { kind: 'rendered', path: '/ws/sessions/s1/replay.mp4' };
+    },
+  });
+
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'passed', steps: [], bugs: [], visual: [] });
+  });
+
+  expect(session.status).toBe('passed');
+  expect(replayCalled).toBe(true);
+  expect((await store.readFindings()).evidence).toBe('/ws/sessions/s1/replay.mp4');
+});
+
+test('replay skipped with no note (no frames) leaves findings.evidence and steps untouched', async () => {
+  const store = makeStore();
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    replay: async () => ({ kind: 'skipped' }),
+  });
+
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'passed', steps: [], bugs: [], visual: [] });
+  });
+
+  expect(session.status).toBe('passed');
+  const findings = await store.readFindings();
+  expect(findings.evidence).toBeUndefined();
+  expect(findings.steps).toEqual([]); // a silent skip adds no note
+});
+
+test('replay skipped with a note (e.g. ffmpeg absent) records a step but no evidence', async () => {
+  const store = makeStore();
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    replay: async () => ({ kind: 'skipped', note: "ffmpeg not found ('ffmpeg')" }),
+  });
+
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({
+      status: 'passed',
+      steps: [{ step: 'open', ok: true }],
+      bugs: [],
+      visual: [],
+    });
+  });
+
+  expect(session.status).toBe('passed'); // the verdict stands — a missing video never overturns it
+  const findings = await store.readFindings();
+  expect(findings.evidence).toBeUndefined(); // nothing was stitched
+  expect(findings.steps).toEqual([
+    { step: 'open', ok: true }, // the driver's trail is preserved
+    { step: 'replay video', ok: false, note: "ffmpeg not found ('ffmpeg')" },
+  ]);
+});
+
+test('a replay failure does not block teardown and never overturns the verdict (fail-soft)', async () => {
+  const store = makeStore();
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    replay: async () => {
+      throw new Error('ffmpeg not found');
+    },
+  });
+
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'passed', steps: [], bugs: [], visual: [] });
+  });
+
+  expect(session.status).toBe('passed');
+  expect((await store.readFindings()).evidence).toBeUndefined();
+});
+
+test('replay write-back preserves a summary written just before it', async () => {
+  const store = makeStore();
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    summarize: async () => 'one glitch on the login page',
+    replay: async () => ({ kind: 'rendered', path: '/ws/replay.mp4' }),
+  });
+
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'passed', steps: [], bugs: [], visual: [] });
+  });
+
+  const findings = await store.readFindings();
+  expect(findings.summary).toBe('one glitch on the login page');
+  expect(findings.evidence).toBe('/ws/replay.mp4');
+});
+
+test('replay records evidence under the terminal status, not a stale running record', async () => {
+  const store = makeStore();
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    replay: async () => ({ kind: 'rendered', path: '/ws/replay.mp4' }),
+  });
+
+  // Driver leaves the record on `running` — `#verdict()` settles `failed`.
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'running', steps: [], bugs: [], visual: [] });
+  });
+
+  const findings = await store.readFindings();
+  expect(findings.status).toBe('failed'); // settled terminal, not the stale `running`
+  expect(findings.evidence).toBe('/ws/replay.mp4');
+});
+
+test('close is not blocked by a hung replay (teardown wins the abort race)', async () => {
+  const store = makeStore();
+  let enterReplay: () => void = () => undefined;
+  const entered = new Promise<void>((resolve) => {
+    enterReplay = resolve;
+  });
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    replay: () => {
+      enterReplay();
+      return new Promise<ReplayOutcome>(() => undefined); // never settles — a hung ffmpeg
+    },
+  });
+
+  session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'passed', steps: [], bugs: [], visual: [] });
+  });
+
+  await entered; // the run is now parked awaiting the hung stitch
+  await session.close(); // must return — the abort short-circuits the replay wait
+
+  expect(session.status).toBe('passed');
+  expect((await store.readFindings()).evidence).toBeUndefined(); // hung replay never written
+});
+
+test('no evidence is recorded when no replay step is wired', async () => {
+  const store = makeStore();
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+  });
+
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'passed', steps: [], bugs: [], visual: [] });
+  });
+
+  expect(session.status).toBe('passed');
+  expect((await store.readFindings()).evidence).toBeUndefined();
 });
