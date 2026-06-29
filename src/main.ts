@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { resolveModels } from './agent/models.js';
 import { createOpenRouterProvider } from './agent/provider.js';
+import { runInit } from './cli/init.js';
 import { loadConfig } from './config/load.js';
 import { NAME, VERSION } from './index.js';
 import { startStdioServer } from './mcp/server.js';
@@ -12,6 +13,18 @@ import type { Session } from './session/session.js';
 import { ensureWorkspace, workspacePaths } from './session/workspace.js';
 
 async function main(): Promise<void> {
+  // Dispatch CLI subcommand before loading project config.
+  const [, , subcmd] = process.argv;
+  if (subcmd === 'init') {
+    try {
+      runInit();
+    } catch (err) {
+      console.error(`${NAME}: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+    return;
+  }
+
   try {
     // Load project config (cwd-keyed)
     const config = loadConfig();
