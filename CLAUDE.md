@@ -36,8 +36,9 @@ Smart agent fixes code, asks again. Loop until the UI works. No human clicking.
   router (OpenRouter default). Defaults: deepseek (text), glm (image).
   - `prompts/` — OUR system prompts (in-repo, versioned, tested). Provider-agnostic. Never rely on a 3rd-party model's defaults. Teaches the bits + why CDP.
 - `src/adapters/` — target control behind one shared contract.
-  - `browser/` — web via CDP (headless default).
-  - `desktop/` — X11/Wayland windows. Covers desktop app AND mobile emulator.
+  - `browser/` — web via CDP (headless default). ✅ shipped.
+  - `desktop/` — X11/Wayland windows. Covers desktop app AND mobile emulator. ⏳ pending.
+  - `android/` — ADB + uiautomator. ⏳ pending.
 - `src/session/` — cwd-keyed session, per-project workspace, state.
 - `src/config/` — load `.ui-debugger-mcp.json`, resolve model/targets.
 - `src/services/` — business logic. Thin handlers, logic here.
