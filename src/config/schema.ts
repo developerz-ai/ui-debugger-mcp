@@ -7,19 +7,19 @@
 import { z } from 'zod';
 
 /** Per-role model strings (OpenAI-compatible router; defaults: deepseek text, glm image). */
-export const ModelsSchema = z.object({
+export const ModelsSchema = z.strictObject({
   driver: z.string(), // fast guy — controls the target (blind, text)
   vision: z.string(), // vision guy — describes screenshots, judges looks
   summary: z.string().optional(), // optional — compress findings for the smart agent
 });
 
 /** Login bypass escape hatch — skips captcha only, not auth. */
-const DebugLoginSchema = z.object({
+const DebugLoginSchema = z.strictObject({
   param: z.string(), // query param name, e.g. "debug-ai" → `?debug-ai=true`
 });
 
 /** Web target — CDP-driven browser. Managed (default) unless `cdpUrl` attaches. */
-export const WebTargetSchema = z.object({
+export const WebTargetSchema = z.strictObject({
   adapter: z.literal('browser'),
   url: z.url(),
   headless: z.boolean(),
@@ -30,13 +30,13 @@ export const WebTargetSchema = z.object({
 });
 
 /** Desktop target — reserved (X11/Wayland adapter not yet driven). */
-const DesktopTargetSchema = z.object({
+const DesktopTargetSchema = z.strictObject({
   adapter: z.literal('desktop'),
   launch: z.string(),
 });
 
 /** Android target — reserved (ADB adapter not yet driven). */
-const AndroidTargetSchema = z.object({
+const AndroidTargetSchema = z.strictObject({
   adapter: z.literal('android'),
   avd: z.string(),
   emulatorPath: z.string().nullish(), // null = auto-detect from SDK (managed)
@@ -51,8 +51,8 @@ export const TargetSchema = z.discriminatedUnion('adapter', [
 ]);
 
 /** Top-level `.ui-debugger-mcp.json` shape. Targets keyed by name (web, desktop, mobile, …). */
-export const ConfigSchema = z.object({
-  models: ModelsSchema.optional(),
+export const ConfigSchema = z.strictObject({
+  models: ModelsSchema.partial().optional(),
   workspace: z.string().optional(),
   targets: z.record(z.string(), TargetSchema),
 });

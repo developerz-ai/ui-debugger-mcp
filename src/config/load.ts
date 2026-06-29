@@ -80,7 +80,16 @@ export function loadConfig(opts: LoadOptions = {}): ResolvedConfig {
     );
   }
 
-  const project = parseProject(readFileSync(path, 'utf8'));
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (e) {
+    throw new ConfigError(
+      `Failed to read \`${CONFIG_FILENAME}\`: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
+  const project = parseProject(raw);
 
   return {
     models: {
