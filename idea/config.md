@@ -13,15 +13,40 @@ reads it and spawns this server over stdio.
     "ui-debugger": {
       "command": "npx",
       "args": ["-y", "@developerz.ai/ui-debugger-mcp"],
-      "env": { "OPENROUTER_API_KEY": "sk-or-..." }
+      "env": {
+        "OPENAI_API_KEY": "sk-...",
+        "OPENAI_BASE_URL": "https://openrouter.ai/api/v1"
+      }
     }
   }
 }
 ```
 
-- Holds the **model API key** (the small agent's brain runs in-server).
+- Holds the **model API key + base URL** (the agent's brains run in-server).
+- Any **OpenAI-compatible router** — `OPENAI_BASE_URL` + `OPENAI_API_KEY`.
+  Default base URL: OpenRouter. Also works: z.ai, DeepSeek, or any
+  OpenAI-compatible endpoint. See *Providers* below.
 - Gitignored — never commit the key.
 - `bunx` works too.
+
+## Bootstrapping — `ui-debugger init`
+
+The `ui-debugger-mcp` bin has two modes: no args runs the stdio server; `init`
+scaffolds a project so you don't write config by hand.
+
+```bash
+npx @developerz.ai/ui-debugger-mcp init   # run in the project root
+```
+
+`init` (idempotent — won't clobber existing files):
+1. creates the workspace dir `./tmp/ui-debugger-mcp/`
+2. writes a starter `.ui-debugger-mcp.json` — deepseek/glm model defaults + a
+   `web` target stub (`http://localhost:3000`) — only if absent
+3. adds `tmp/` to `.gitignore`
+4. prints the `.mcp.json` snippet to paste (never writes your API key)
+
+Then edit targets/urls to match the app. The dir + config are all the server
+needs to start a session for that project.
 
 ## `.ui-debugger-mcp.json` — how to debug this app (committed)
 
@@ -30,9 +55,9 @@ Per-project. Lives in the repo, travels with it. Describes the app + targets.
 ```jsonc
 {
   "models": {                                    // per-role, swappable — see models.md
-    "driver": "openrouter/...",                  // fast text — controls (blind)
-    "vision": "openrouter/...",                  // multimodal — describes screenshots
-    "summary": "openrouter/..."                  // optional — compress findings
+    "driver": "deepseek/deepseek-v4-flash#uptime",  // fast guy — controls (blind, text)
+    "vision": "z-ai/glm-5v-turbo",                  // vision guy — describes screenshots
+    "summary": "deepseek/deepseek-v4-flash"         // optional — compress findings
   },
   "workspace": "./tmp/ui-debugger-mcp",
   "targets": {
@@ -87,8 +112,11 @@ Rules:
 
 1. message from the smart agent (overrides per session)
 2. `.ui-debugger-mcp.json` (project)
-3. env (`OPENROUTER_API_KEY`, base url)
-4. built-in defaults (managed + headless web, OpenRouter base url)
+3. env (`OPENAI_API_KEY`, `OPENAI_BASE_URL`)
+4. built-in defaults — managed + headless web, OpenRouter base url, and:
+   - `driver` → `deepseek/deepseek-v4-flash#uptime` (text)
+   - `vision` → `z-ai/glm-5v-turbo` (image)
+   - `summary` → `deepseek/deepseek-v4-flash` (text)
 
 All Zod-validated. Bad config fails fast and loud.
 
@@ -99,7 +127,25 @@ All Zod-validated. Bad config fails fast and loud.
   that opens the project debugs it the same way.
 - Matches the gold-standards rule: write project knowledge down, per project.
 
-## OpenRouter
+## Providers — OpenAI-compatible routers
 
-One key, any model. Use a cheap/fast model for the clicking grind; point at a
-stronger one for a tricky flow by editing `model`. No code change.
+We talk to **any OpenAI-compatible endpoint**: one `OPENAI_BASE_URL` +
+`OPENAI_API_KEY`. No vendor lock-in (same posture as `../ai-task-master`).
+
+- **OpenRouter** (default base url) — one key reaches every provider; model
+  strings are `provider/model`, with optional routing suffixes
+  (e.g. `deepseek/deepseek-v4-flash#uptime` — `#uptime` is OpenRouter routing,
+  passed through verbatim).
+- **z.ai, DeepSeek, OpenAI, local (vLLM/Ollama), …** — point `OPENAI_BASE_URL`
+  at their OpenAI-compatible URL and use that provider's model names.
+
+### Defaults (deepseek for text, glm for image)
+
+| Role | Default | Why |
+|------|---------|-----|
+| `driver`  | `deepseek/deepseek-v4-flash#uptime` | fast, cheap, text — the high-frequency click loop |
+| `vision`  | `z-ai/glm-5v-turbo` | multimodal — describes screenshots, judges looks |
+| `summary` | `deepseek/deepseek-v4-flash` | compress findings for the smart agent |
+
+Override any role in `.ui-debugger-mcp.json`. Cheap fast model drives; the
+vision model is spent only when eyes are needed. No code change to swap.

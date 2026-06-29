@@ -5,8 +5,8 @@ Three actors, plain terms: **the smart-ass, the fast guy, the vision guy.**
 | Nickname | Role | Where | Model | Sees pixels? |
 |----------|------|-------|-------|--------------|
 | **smart-ass** | the boss — sets goals, reads findings, **fixes the code**, loops | outside (Claude / caller) | the host's | via screenshots in findings |
-| **fast guy** | the **driver** — controls browser/desktop/android, runs the click loop | in-server | fast, text-only | **no — blind** |
-| **vision guy** | the **eyes** — describes screenshots, judges how it looks | in-server | multimodal | **yes** |
+| **fast guy** | the **driver** — controls browser/desktop/android, runs the click loop | in-server | `deepseek-v4-flash` (text) | **no — blind** |
+| **vision guy** | the **eyes** — describes screenshots, judges how it looks | in-server | `glm-5v-turbo` (image) | **yes** |
 
 The smart-ass talks to the in-server agent over MCP (a conversation). Inside,
 the fast guy drives blind and asks the vision guy for eyes when needed. Three
@@ -58,20 +58,23 @@ one does the moving and asks — *"is the cup to my left?"* — and acts on the 
   model **only when visual judgment is needed**.
 - **Specialisation.** Text model = great at protocols, selectors, logic. Vision
   model = great at describing pixels. Each does what it's best at.
-- **Swappable.** Both are OpenRouter models, set **per role** — pick a tiny fast
-  model to drive, a strong multimodal one to see.
+- **Swappable.** Both come from any **OpenAI-compatible router**, set **per
+  role** — pick a tiny fast model to drive, a strong multimodal one to see.
 
-## Config — model roles
+## Config — model roles (defaults: deepseek text, glm image)
 
 `.ui-debugger-mcp.json`:
 ```jsonc
 "models": {
-  "driver": "openrouter/...",   // fast, text-only — controls
-  "vision": "openrouter/...",   // multimodal — describes screenshots
-  "summary": "openrouter/..."   // optional — compress findings for the smart agent
+  "driver":  "deepseek/deepseek-v4-flash#uptime",  // fast guy — text, controls
+  "vision":  "z-ai/glm-5v-turbo",                  // vision guy — image, describes
+  "summary": "deepseek/deepseek-v4-flash"          // optional — compress findings
 }
 ```
-(Capability-based assignment, same idea as `../ai-task-master`'s model roles.)
+Defaults if omitted: **deepseek for text** (driver + summary), **glm for image**
+(vision). Capability-based assignment, same idea as `../ai-task-master`'s roles.
+Provider = any OpenAI-compatible endpoint (`OPENAI_BASE_URL` + `OPENAI_API_KEY`);
+OpenRouter is the default — see [`config.md`](config.md#providers--openai-compatible-routers).
 
 ## The `look` tool — the cooperation seam
 

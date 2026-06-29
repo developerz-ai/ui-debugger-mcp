@@ -4,7 +4,8 @@
       "command": "npx",
       "args": ["-y", "@developerz.ai/ui-debugger-mcp"],
       "env": {
-        "OPENROUTER_API_KEY": "sk-or-..."
+        "OPENAI_API_KEY": "sk-...",
+        "OPENAI_BASE_URL": "https://openrouter.ai/api/v1"
       }
     }
   }

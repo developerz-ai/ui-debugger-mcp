@@ -1,8 +1,8 @@
 {
   "models": {
-    "driver": "openrouter/anthropic/claude-haiku-4-5",
-    "vision": "openrouter/anthropic/claude-sonnet-4-6",
-    "summary": "openrouter/anthropic/claude-haiku-4-5"
+    "driver": "deepseek/deepseek-v4-flash#uptime",
+    "vision": "z-ai/glm-5v-turbo",
+    "summary": "deepseek/deepseek-v4-flash"
   },
   "workspace": "./tmp/ui-debugger-mcp",
   "targets": {

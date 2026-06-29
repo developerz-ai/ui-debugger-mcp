@@ -111,8 +111,9 @@ the contract is implemented per protocol below.
 ## System prompts — we own them, provider-agnostic
 
 The debug agent's behavior comes from **our** system prompts, checked into this
-repo — **not** from whatever a 3rd-party model does by default. OpenRouter lets
-the model swap freely; the prompt must make any competent model behave the same.
+repo — **not** from whatever a 3rd-party model does by default. Any
+OpenAI-compatible router lets the model swap freely; the prompt must make any
+competent model behave the same.
 
 - **In-repo, versioned, tested.** Prompts live under `src/agent/prompts/`
   (e.g. `debug-agent.md`, per-target addenda). Treated as code: reviewed,
@@ -124,8 +125,8 @@ the model swap freely; the prompt must make any competent model behave the same.
 - **Composed, not monolithic.** Base debug-agent prompt + target addendum
   (web/desktop/android specifics) + the session's `story` + `criteria`. Same
   composition pattern as `../ai-task-master` subagents.
-- **Provider-agnostic.** No vendor-specific tricks. Swap Claude↔GLM↔Llama via
-  OpenRouter and the prompt still drives the same loop.
+- **Provider-agnostic.** No vendor-specific tricks. Swap deepseek↔GLM↔Llama via
+  any OpenAI-compatible router and the prompt still drives the same loop.
 
 This is what makes the debugger reliable across model choices instead of
 inheriting some provider's unstated behavior.

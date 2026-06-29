@@ -1,6 +1,7 @@
 # UI Debugger MCP
 
-Bun · TypeScript · Vercel AI SDK · OpenRouter. MCP server that debugs UIs autonomously.
+Bun · TypeScript · Vercel AI SDK · OpenAI-compatible router (OpenRouter default).
+MCP server that debugs UIs autonomously.
 
 A smart agent hands a goal (a "story") to a small fast agent inside this server.
 The small agent drives browser/desktop, gathers evidence, reports findings.
@@ -31,7 +32,8 @@ Smart agent fixes code, asks again. Loop until the UI works. No human clicking.
 - `src/main.ts` — boot stdio MCP server.
 - `src/mcp/` — MCP server, tool defs (few fat tools, NOT one-per-action).
 - `src/agent/` — debug agent (Vercel AI SDK loop). The **fast guy** (driver) +
-  the **vision guy** (eyes via `look`). Models per role via OpenRouter.
+  the **vision guy** (eyes via `look`). Models per role via OpenAI-compatible
+  router (OpenRouter default). Defaults: deepseek (text), glm (image).
   - `prompts/` — OUR system prompts (in-repo, versioned, tested). Provider-agnostic. Never rely on a 3rd-party model's defaults. Teaches the bits + why CDP.
 - `src/adapters/` — target control behind one shared contract.
   - `browser/` — web via CDP (headless default).
@@ -69,13 +71,19 @@ Two tool layers (see `idea/mcp-tools.md`): outer = few conversational MCP tools
 SQL-like, heavily parameterized (`query`/`fields`/`filters`), one `act` not six.
 `look` = the eyes: sends a screenshot to the **vision guy** for visual judgment.
 
+## CLI (bin: `ui-debugger-mcp`)
+- no args → run the stdio MCP server (default).
+- `init` → scaffold a project: create `./tmp/ui-debugger-mcp/`, write a starter
+  `.ui-debugger-mcp.json` (deepseek/glm defaults + `web` stub) if absent, add
+  `tmp/` to `.gitignore`, print the `.mcp.json` snippet. Never writes the API key.
+
 ## Config split
-- `.mcp.json` — how to LAUNCH server (command, model API key). Gitignored. Secret.
-- `.ui-debugger-mcp.json` — how to DEBUG this app (model, targets, urls). Committed.
+- `.mcp.json` — how to LAUNCH server (command, model API key + base url). Gitignored. Secret.
+- `.ui-debugger-mcp.json` — how to DEBUG this app (models, targets, urls). Committed.
 
 `.ui-debugger-mcp.json` shape:
 ```
-models:  { driver, vision, summary? }   per-role, OpenRouter — see idea/models.md
+models:  { driver, vision, summary? }   per-role; defaults: deepseek (text), glm (image)
 targets:
   web:     { adapter: "browser", url, headless, debugLogin, executablePath, profile, cdpUrl }
   desktop: { adapter: "desktop", launch }

@@ -34,17 +34,54 @@ high-level and delegates the whole clicking loop to the small agent.
 | Smart model cost | high (chatty) | low (high-level) |
 | Output | raw page state | structured findings + evidence |
 
+## Architecture — the three actors
+
+Picture a **boss**, a **fast blind driver**, and a **describer with eyes**:
+
+```
+   ┌─────────────┐   MCP conversation    ┌──────────────────────────────────────┐
+   │  smart-ass  │  start_debug ───────▶ │        UI Debugger MCP server         │
+   │  (Claude)   │  send_message (live)  │                                       │
+   │             │ ◀─────── get_findings │   ┌────────────┐     ┌────────────┐   │
+   │ sets goals  │                       │   │  fast guy  │ look│ vision guy │   │
+   │ fixes code  │                       │   │  (driver)  │────▶│  (eyes)    │   │
+   │ loops       │                       │   │ deepseek   │◀────│  glm 5v    │   │
+   └─────────────┘                       │   │ text·blind │ desc│ image      │   │
+          ▲                              │   └─────┬──────┘     └────────────┘   │
+          │ "works + looks nice"         │     observe / act (SQL-like)          │
+          │ findings + screenshots       │         │ shared adapter contract     │
+          └──────────────────────────────│─────────┼─────────────────────────────│
+                                          └─────────┼─────────────────────────────┘
+                                                    ▼
+                              ┌──────────────┬──────────────┬──────────────┐
+                              │  web (CDP)   │ desktop      │ android      │
+                              │  browser     │ X11/Wayland  │ ADB          │
+                              └──────────────┴──────────────┴──────────────┘
+```
+
+- **smart-ass** — the boss (Claude/caller). Sends a goal, reads findings, **fixes
+  the code**, loops. Stays high-level — never clicks.
+- **fast guy** — the driver. Fast, cheap, **text-only and blind**. Runs the
+  click loop on structure (DOM / a11y tree / view hierarchy). Default: deepseek.
+- **vision guy** — the eyes. **Multimodal**. The driver calls `look` to ask
+  *"does this look right? is the button centred?"* and gets a description back.
+  Default: glm. Spent only when visual judgment is needed.
+
+One goal: **the UI works *and* looks nice.** Full design in [`idea/`](idea/).
+
 ## Targets
 
 One project can expose several debug targets. `tesote.ai` has all three:
 
-| Target  | How it's driven              | Where it runs |
-|---------|------------------------------|---------------|
-| web     | Chrome DevTools Protocol (CDP), headless by default | browser |
-| desktop | X11 / Wayland window control | the Linux desktop |
-| mobile  | X11 / Wayland (emulator window) | the Linux desktop |
+| Target  | Protocol / how it's driven                       | Reads |
+|---------|--------------------------------------------------|-------|
+| web     | **CDP** (Chrome DevTools Protocol), headless by default | DOM |
+| desktop | **X11 / Wayland** input + AT-SPI                 | a11y tree / vision |
+| mobile  | **ADB** (uiautomator + screencap), Android       | view hierarchy / vision |
 
-Two adapters (browser + desktop) cover all three. Linux first, adapter-based.
+Three adapters, one shared contract. Each runs **managed** (server launches the
+target) or **attach** (connect to a running one via `cdpUrl` / `adbSerial`).
+Linux first. iOS is out of scope on Linux (macOS-only tooling).
 
 ## Setup
 
@@ -56,17 +93,35 @@ Install like any local MCP server — one entry in your `.mcp.json`:
     "ui-debugger": {
       "command": "npx",
       "args": ["-y", "@developerz.ai/ui-debugger-mcp"],
-      "env": { "OPENROUTER_API_KEY": "sk-or-..." }
+      "env": {
+        "OPENAI_API_KEY": "sk-...",
+        "OPENAI_BASE_URL": "https://openrouter.ai/api/v1"
+      }
     }
   }
 }
 ```
 
 Then add a per-project `.ui-debugger-mcp.json` describing the app to debug
-(model, targets, urls). See [`idea/config.md`](idea/config.md).
+(models, targets, urls). The fastest way is the `init` command:
+
+```bash
+npx @developerz.ai/ui-debugger-mcp init   # in your project root
+```
+
+**`ui-debugger init`** scaffolds a project for debugging (described in
+[`idea/config.md`](idea/config.md)):
+
+- creates the workspace dir `./tmp/ui-debugger-mcp/`
+- writes a starter `.ui-debugger-mcp.json` (default deepseek/glm models, a `web`
+  target stub) if one doesn't already exist
+- adds `tmp/` to `.gitignore`
+- prints the `.mcp.json` snippet to paste (it never writes your API key)
+
+Config files:
 
 - `.mcp.json` → **how to launch** the server (command + secret key). Gitignored.
-- `.ui-debugger-mcp.json` → **how to debug this app** (model, targets). Committed.
+- `.ui-debugger-mcp.json` → **how to debug this app** (models, targets). Committed.
 
 The server reads the **current directory** to pick the project session — open it
 in your repo and it debugs that repo.
@@ -74,9 +129,10 @@ in your repo and it debugs that repo.
 ## Stack
 
 - **Bun** + **TypeScript** (ships as npm, runs via `npx`/`bunx`)
-- **Vercel AI SDK** — the small agent's loop
-- **OpenRouter** — swap models freely (fast/cheap for clicking, smart for tricky flows)
-- **CDP** for web, **X11/Wayland** for desktop/mobile
+- **Vercel AI SDK** — the agent loop (fast driver + vision describer)
+- **Any OpenAI-compatible router** (OpenRouter default) — swap models per role.
+  Defaults: **deepseek** (text) drives, **glm** (image) sees.
+- **CDP** for web, **X11/Wayland** for desktop, **ADB** for Android
 - stdio MCP transport
 
 ## Status

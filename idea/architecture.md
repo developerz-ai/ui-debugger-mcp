@@ -11,7 +11,8 @@
  │                                                │
  │  MCP layer  — few fat tools                     │
  │  Session    — keyed by cwd, one at a time       │
- │  Debug agent — Vercel AI SDK loop, OpenRouter   │  ← the small fast model
+ │  Debug agent — Vercel AI SDK loop               │  ← fast guy (text) + vision guy (image)
+ │    OpenAI-compatible router (OpenRouter default) │
  │  Adapters                                       │
  │    browser (CDP) ── web                          │
  │    desktop (x11/wayland) ── desktop app, mobile  │
@@ -35,7 +36,7 @@
 
 ## Why the brain is inside the server
 
-The small agent's model runs **inside** this server (its own OpenRouter key),
+The agent's models run **inside** this server (its own OpenAI-compatible key),
 not in the caller. So:
 - The smart agent sends **intent** ("log in, check checkout"), not keystrokes.
 - The small agent burns its own (cheap) tokens on the clicking grind.
@@ -69,5 +70,6 @@ profiles — out of scope for now.
 
 - Bun + TypeScript, ships as npm (`npx`/`bunx`), stdio MCP.
 - Vercel AI SDK for the agent loop (pattern from `../ai-task-master`).
-- OpenRouter so the model is swappable.
+- Any OpenAI-compatible router (OpenRouter default) so models are swappable.
+  Defaults: deepseek (text) for driver/summary, glm (image) for vision.
 - Zod at every boundary. Biome. Files ≤ 500 LOC. Custom errors.
