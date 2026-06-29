@@ -3,6 +3,7 @@ import {
   AdapterError,
   AgentError,
   ConfigError,
+  FindingsError,
   ProviderError,
   SessionBusyError,
   SessionNotFoundError,
@@ -71,6 +72,14 @@ test('ProviderError: message, name, instanceof chain', () => {
   expect(e.message).toBe('provider down');
   expect(e.name).toBe('ProviderError');
   expect(e instanceof ProviderError).toBe(true);
+  expect(e instanceof UiDebuggerError).toBe(true);
+});
+
+test('FindingsError: message, name, instanceof chain', () => {
+  const e = new FindingsError('findings invalid');
+  expect(e.message).toBe('findings invalid');
+  expect(e.name).toBe('FindingsError');
+  expect(e instanceof FindingsError).toBe(true);
   expect(e instanceof UiDebuggerError).toBe(true);
 });
 
