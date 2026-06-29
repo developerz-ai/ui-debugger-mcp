@@ -141,7 +141,7 @@ in your repo and it debugs that repo.
 
 ## Status
 
-Early. This repo currently holds the design only — see [`idea/`](idea/).
+Web target shipped. Desktop and Android adapters are pending — see [`idea/`](idea/) for design.
 
 ## Docs
 
