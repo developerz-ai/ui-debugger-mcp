@@ -10,7 +10,8 @@ const CONFIG: ResolvedConfig = {
   workspace: './tmp/ui-debugger-mcp',
   targets: {
     web: { adapter: 'browser', url: 'http://localhost:3000', headless: true },
-    screen: { adapter: 'desktop', launch: 'myapp' },
+    screen: { adapter: 'desktop', launch: 'myapp', window: { title: 'My App' } },
+    phone: { adapter: 'android', avd: 'pixel' },
   },
   provider: { apiKey: 'sk-test', baseUrl: 'https://openrouter.ai/api/v1' },
 };
@@ -33,8 +34,19 @@ test('buildSession rejects an unknown target before touching disk or the browser
   );
 });
 
+test('buildSession wires a desktop target (addendum + adapter) without launching', async () => {
+  const built = await buildSession(deps(), {
+    id: 'd1',
+    target: 'screen',
+    goal: 'open the settings dialog',
+  });
+  expect(built.session).toBeDefined();
+  expect(typeof built.open).toBe('function');
+  expect(typeof built.run).toBe('function');
+});
+
 test('buildSession rejects an unimplemented adapter (no prompt addendum)', async () => {
-  await expect(buildSession(deps(), { id: 's1', target: 'screen', goal: 'x' })).rejects.toThrow(
+  await expect(buildSession(deps(), { id: 's1', target: 'phone', goal: 'x' })).rejects.toThrow(
     AdapterError,
   );
 });

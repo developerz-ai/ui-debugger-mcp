@@ -272,7 +272,7 @@ function describeTarget(name: string, target: Target): TargetInfo {
     name,
     adapter: target.adapter,
     mode: isAttach(target) ? 'attach' : 'managed',
-    operational: target.adapter === 'browser',
+    operational: target.adapter === 'browser' || target.adapter === 'desktop',
   };
   if (target.adapter === 'browser') {
     return { ...base, url: target.url, headless: target.headless };

@@ -24,6 +24,7 @@ const CONFIG: ResolvedConfig = {
   workspace: './tmp/ui-debugger-mcp',
   targets: {
     web: { adapter: 'browser', url: 'http://localhost:3000', headless: true },
+    screen: { adapter: 'desktop', launch: 'myapp' },
     phone: { adapter: 'android', avd: 'pixel', adbSerial: 'emulator-5554' },
   },
   provider: { apiKey: 'sk-test', baseUrl: 'https://openrouter.ai/api/v1' },
@@ -248,6 +249,12 @@ test('describe lists every configured target with mode + operational flags', () 
     operational: true,
     url: 'http://localhost:3000',
     headless: true,
+  });
+  expect(result.targets.find((t) => t.name === 'screen')).toEqual({
+    name: 'screen',
+    adapter: 'desktop',
+    mode: 'managed',
+    operational: true,
   });
   expect(result.targets.find((t) => t.name === 'phone')).toEqual({
     name: 'phone',
