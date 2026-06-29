@@ -1,0 +1,53 @@
+/**
+ * Adapter factory — resolve a target name to a concrete Adapter implementation.
+ *
+ * Maps config targets (`web`, `desktop`, `mobile`, …) to their adapter protocols
+ * (CDP browser, X11-Wayland, ADB). Throws {@link TargetNotFoundError} if the target
+ * name doesn't exist in the config; throws {@link AdapterError} for unimplemented
+ * adapters (desktop/android not yet wired). Only `browser` (CDP) is operational.
+ */
+
+import type { Config } from '../config/schema.js';
+import { AdapterError, TargetNotFoundError } from '../errors.js';
+import { BrowserAdapter, type BrowserAdapterInit } from './browser/browser-adapter.js';
+import type { Adapter } from './contract.js';
+
+/**
+ * Create an adapter for a named target from the resolved config.
+ *
+ * @param targetName — the key in config.targets (e.g., "web")
+ * @param config — the resolved `.ui-debugger-mcp.json` config
+ * @param profileDir — absolute path to persistent profile dir (for managed browser adapter)
+ * @param onLog — optional sink for streaming console/network logs to findings store
+ * @returns the wired Adapter instance
+ * @throws TargetNotFoundError if targetName doesn't exist in config.targets
+ * @throws AdapterError if the adapter type is not yet implemented
+ */
+export async function createAdapter(
+  targetName: string,
+  config: Config,
+  profileDir: string,
+  onLog?: BrowserAdapterInit['onLog'],
+): Promise<Adapter> {
+  const target = config.targets[targetName];
+
+  if (!target) {
+    throw new TargetNotFoundError(`target "${targetName}" not found in config.targets`);
+  }
+
+  switch (target.adapter) {
+    case 'browser':
+      return BrowserAdapter.create({ config: target, profileDir, onLog });
+
+    case 'desktop':
+      throw new AdapterError('desktop adapter not implemented');
+
+    case 'android':
+      throw new AdapterError('android adapter not implemented');
+
+    default: {
+      const unreachable: never = target;
+      throw new AdapterError(`unknown adapter type: ${unreachable}`);
+    }
+  }
+}
