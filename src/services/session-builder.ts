@@ -29,13 +29,16 @@ import { AdapterError, TargetNotFoundError } from '../errors.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
 import { ensureSession, sessionPaths, type WorkspacePaths } from '../session/workspace.js';
+import { createSummarize } from './summarize.js';
 
-/** The two actors the belt + loop bind to, resolved once and shared across runs. */
+/** The three actors the belt + loop + post-verdict step bind to, resolved once and shared across runs. */
 export interface BuilderModels {
   /** fast guy — the blind text driver running the click loop. */
   driver: LanguageModel;
   /** vision guy — the multimodal eyes `look` calls through. */
   vision: LanguageModel;
+  /** summary guy — condenses the terminal findings into one paragraph for the smart agent. */
+  summary: LanguageModel;
 }
 
 /** What the builder needs that does not change between runs. */
@@ -220,6 +223,9 @@ export async function buildSession(
     criteria,
     adapter,
     findingsStore: store,
+    // Post-verdict seam: fills `findings.summary` over the summary model when the
+    // driver left it empty (best-effort; the session wraps it fail-soft).
+    summarize: createSummarize(models.summary),
   });
 
   return {

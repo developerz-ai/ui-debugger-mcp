@@ -40,6 +40,14 @@ export interface SessionAdapter {
   close(): Promise<void>;
 }
 
+/**
+ * Post-verdict findings condenser — the summary actor. Given the run's terminal
+ * findings, returns one actionable paragraph for the smart agent. Bound to the
+ * summary model OUTSIDE the session (so the session stays model-blind); the session
+ * invokes it only when the driver left `findings.summary` empty.
+ */
+export type SummarizeStep = (findings: Findings) => Promise<string>;
+
 /** Everything needed to construct a session. The loop is handed to `start()`, not the constructor. */
 export interface SessionOptions<A extends SessionAdapter> {
   /** Stable session id (from `generateSessionId`). */
@@ -52,6 +60,11 @@ export interface SessionOptions<A extends SessionAdapter> {
   adapter: A;
   /** On-disk evidence locker for this session. */
   findingsStore: FindingsStore;
+  /**
+   * Optional summary actor: fills `findings.summary` after the verdict when the
+   * driver left it empty. Omit to keep whatever summary the driver wrote.
+   */
+  summarize?: SummarizeStep;
 }
 
 /** The lifecycle seams the session hands a {@link LoopRunner}: its inbox, progress sink, abort signal. */
@@ -85,6 +98,8 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
 
   readonly #adapter: A;
   readonly #findingsStore: FindingsStore;
+  /** The summary actor, or `undefined` when no summarizer was wired (driver's summary stands). */
+  readonly #summarize: SummarizeStep | undefined;
   readonly #inbox: string[] = [];
   readonly #abort = new AbortController();
   /** The background loop run, set once by `start()`; `null` until then. */
@@ -97,6 +112,7 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
     this.criteria = options.criteria;
     this.#adapter = options.adapter;
     this.#findingsStore = options.findingsStore;
+    this.#summarize = options.summarize;
   }
 
   /** Current run status. `running` until the loop settles a verdict (`passed`/`failed`). */
@@ -185,6 +201,10 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
         return;
       }
       this.#status = await this.#verdict();
+      // Best-effort, non-blocking: race the summary against the abort signal so a
+      // hung summary model can never stall `close()` (which aborts, then awaits the
+      // run). A natural finish awaits it fully; teardown short-circuits the wait.
+      await this.#raceAbort(this.#ensureSummary());
     } catch (error) {
       this.#status = 'failed';
       // Aborted by `close()` — the teardown is the verdict; nothing to surface.
@@ -196,6 +216,53 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
   /** Hand the loop every pending message and clear the queue (the `LoopInbox` seam over `#inbox`). */
   #drainInbox(): readonly string[] {
     return this.#inbox.splice(0, this.#inbox.length);
+  }
+
+  /**
+   * Fill `findings.summary` with the summary actor's paragraph when the driver left
+   * it empty (and a summarizer is wired). Best-effort and non-blocking: any failure
+   * is swallowed so a missing summary never delays teardown — the verdict already
+   * stands and `get_findings` falls back to the driver's own summary (if any). Writes
+   * back under the settled terminal `status`, never a stale `running`.
+   */
+  async #ensureSummary(): Promise<void> {
+    if (this.#summarize === undefined) return;
+    try {
+      const findings = await this.#findingsStore.tryReadFindings();
+      if (findings === null || hasText(findings.summary)) return;
+      // Summarize the terminal record: `#verdict()` may have settled `status` to a
+      // value the persisted findings don't yet carry (e.g. `failed` over a stale
+      // `running`), so the digest must reflect the final verdict, not the disk copy.
+      const terminalFindings = { ...findings, status: this.#status };
+      const summary = await this.#summarize(terminalFindings);
+      if (!hasText(summary)) return;
+      await this.#findingsStore.writeFindings({ ...terminalFindings, summary });
+    } catch {
+      // Fail soft: the verdict stands; the driver's own summary (if any) is the fallback.
+    }
+  }
+
+  /**
+   * Await `promise`, but stop waiting the moment the session aborts — so the
+   * best-effort summary can never keep `close()` (which aborts, then awaits the run)
+   * blocked on a hung model. The in-flight call is abandoned, not cancelled; the
+   * verdict already stands, so dropping the summary is the documented fail-soft.
+   */
+  async #raceAbort(promise: Promise<void>): Promise<void> {
+    const { signal } = this.#abort;
+    if (signal.aborted) return;
+    let onAbort: (() => void) | undefined;
+    try {
+      await Promise.race([
+        promise,
+        new Promise<void>((resolve) => {
+          onAbort = () => resolve();
+          signal.addEventListener('abort', onAbort, { once: true });
+        }),
+      ]);
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    }
   }
 
   /** The terminal verdict the `report` step wrote; `failed` if the run ended without one. */
@@ -259,4 +326,9 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
 function toAgentError(error: unknown): AgentError {
   if (error instanceof AgentError) return error;
   return new AgentError(error instanceof Error ? error.message : String(error));
+}
+
+/** True when `value` is a non-blank string (a real summary, not absent or whitespace). */
+function hasText(value: string | undefined): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
 }
