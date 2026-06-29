@@ -14,3 +14,7 @@ pnpm-lock.yaml
 
 # Claude Code runtime
 .claude/scheduled_tasks.lock
+
+# task-master tooling
+.claude-task-master/
+.ai-task-master/
