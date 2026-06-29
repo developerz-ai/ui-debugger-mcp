@@ -42,8 +42,8 @@ import { ensureWorkspace, workspacePaths } from './session/workspace.js';
 // ---------------------------------------------------------------------------
 
 function findChrome(): string | null {
-  if (process.env['SKIP_BROWSER_TESTS']) return null;
-  const envPath = process.env['CHROMIUM_PATH'];
+  if (process.env.SKIP_BROWSER_TESTS) return null;
+  const envPath = process.env.CHROMIUM_PATH;
   if (envPath && existsSync(envPath)) return envPath;
   try {
     const p = chromium.executablePath();
@@ -133,6 +133,7 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
 
   // Build once; serve throughout the suite.
   beforeAll(() => {
+    if (!CHROME) return; // suite is skipped; skip side-effectful setup too
     // Build the dummy app if dist/ is absent (or always in CI).
     if (!existsSync(join(DIST_DIR, 'index.html'))) {
       execSync('bun run build', {
@@ -149,7 +150,7 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
   });
 
   afterAll(() => {
-    fixtureServer.stop(true);
+    fixtureServer?.stop(true);
   });
 
   // Fresh workspace + MCP server per test.

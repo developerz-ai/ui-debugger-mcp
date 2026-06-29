@@ -36,8 +36,8 @@ import { ensureWorkspace, workspacePaths } from './session/workspace.js';
 // ---------------------------------------------------------------------------
 
 function findChrome(): string | null {
-  if (process.env['SKIP_BROWSER_TESTS']) return null;
-  const envPath = process.env['CHROMIUM_PATH'];
+  if (process.env.SKIP_BROWSER_TESTS) return null;
+  const envPath = process.env.CHROMIUM_PATH;
   if (envPath && existsSync(envPath)) return envPath;
   try {
     const p = chromium.executablePath();
