@@ -106,16 +106,16 @@ export function loadConfig(opts: LoadOptions = {}): ResolvedConfig {
 /**
  * Resolve just the workspace dir for a project — no provider creds required.
  * Backs the `status` / `stop` CLI, which read `state.json` but need no API key.
- * Falls back to {@link DEFAULT_WORKSPACE} when the config is absent or unreadable.
+ *
+ * Falls back to {@link DEFAULT_WORKSPACE} only when the config file is ABSENT. A
+ * present-but-invalid config surfaces its `ConfigError` (fail loud, no silent
+ * fallback) — otherwise a typo anywhere in the file would silently point `status`/
+ * `stop` at the default workspace and report "no run" for a custom-workspace run.
  */
 export function loadWorkspaceDir(cwd: string = process.cwd()): string {
   const path = join(cwd, CONFIG_FILENAME);
   if (!existsSync(path)) return DEFAULT_WORKSPACE;
-  try {
-    return parseProject(readFileSync(path, 'utf8')).workspace ?? DEFAULT_WORKSPACE;
-  } catch {
-    return DEFAULT_WORKSPACE;
-  }
+  return parseProject(readFileSync(path, 'utf8')).workspace ?? DEFAULT_WORKSPACE;
 }
 
 /** Parse JSON + Zod-validate the raw file contents into a typed config. */

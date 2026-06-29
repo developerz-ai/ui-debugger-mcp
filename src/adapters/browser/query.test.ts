@@ -25,7 +25,16 @@ test('keeps real CSS selectors as CSS', () => {
   expect(normalizeQuery('button.add')).toBe('button.add');
   expect(normalizeQuery('[data-id="3"]')).toBe('[data-id="3"]');
   expect(normalizeQuery('nav > a')).toBe('nav > a');
+  expect(normalizeQuery('div > .foo')).toBe('div > .foo');
   expect(normalizeQuery('button:has-text("x")')).toBe('button:has-text("x")');
+});
+
+test('does not misclassify labels as role= or CSS (narrowed heuristics)', () => {
+  // First token is not an ARIA role → a quoted label, not role=
+  expect(normalizeQuery('Sale "50% off"')).toBe('text=Sale "50% off"');
+  // A combinator not flanked by simple selectors on both sides stays text
+  expect(normalizeQuery('Next >')).toBe('text=Next >');
+  expect(normalizeQuery('A ~ B')).toBe('text=A ~ B');
 });
 
 test('falls back to the text engine for plain visible text', () => {

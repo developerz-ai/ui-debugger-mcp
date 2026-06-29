@@ -8,9 +8,9 @@ DOM / CSS / console / network.
 Dev server: `cd dummy/web && bun run dev` → http://127.0.0.1:5179
 (host `127.0.0.1`, fixed port `5179`, `strictPort: true`).
 
-Note on duplicates: React 18 `StrictMode` double-invokes effects/handlers in dev,
-so some console errors appear twice. That is expected dev behavior, not a separate
-bug.
+Note on duplicates: React 18 `StrictMode` re-runs mount effects/remounts in dev,
+so the initial `/api/featured` request and its console error may appear twice.
+Click-handler errors should still appear once per click.
 
 ---
 

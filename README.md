@@ -113,7 +113,7 @@ Then add a per-project `.ui-debugger-mcp.json` describing the app to debug
 npx @developerz.ai/ui-debugger-mcp init   # in your project root
 ```
 
-**`ui-debugger init`** scaffolds a project for debugging (described in
+**`ui-debugger-mcp init`** scaffolds a project for debugging (described in
 [`docs/idea/config.md`](docs/idea/config.md)):
 
 - creates the workspace dir `./tmp/ui-debugger-mcp/`

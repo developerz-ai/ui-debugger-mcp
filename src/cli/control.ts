@@ -18,7 +18,7 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { loadWorkspaceDir } from '../config/load.js';
 import { FindingsSchema } from '../findings/schema.js';
-import { markStatus, readState, type StateFile } from '../session/state-file.js';
+import { markStatus, readState } from '../session/state-file.js';
 import { resolveProject, workspacePaths } from '../session/workspace.js';
 
 /** Whether `pid` is a live process this user can see (`kill(pid, 0)`). */
@@ -90,9 +90,19 @@ export async function runStop(cwd = process.cwd()): Promise<void> {
   }
 
   if (isAlive(state.pid)) {
-    signalStop(state);
+    const signaled = signalStop(state.pid);
+    if (!signaled.ok) {
+      // The signal failed for a reason other than the process already being gone
+      // (e.g. EPERM). Teardown did NOT happen — don't lie by marking it stopped.
+      console.error(
+        `ui-debugger-mcp: failed to signal server (pid ${state.pid}): ${signaled.reason}. Run '${state.sessionId}' left as-is.`,
+      );
+      process.exitCode = 1;
+      return;
+    }
     await markStatus(stateJson, 'stopped');
-    console.log(`ui-debugger-mcp: stopping run '${state.sessionId}' (SIGTERM → pid ${state.pid}).`);
+    const how = signaled.gone ? `pid ${state.pid} already exited` : `SIGTERM → pid ${state.pid}`;
+    console.log(`ui-debugger-mcp: stopping run '${state.sessionId}' (${how}).`);
     return;
   }
 
@@ -102,12 +112,22 @@ export async function runStop(cwd = process.cwd()): Promise<void> {
   );
 }
 
-/** Send SIGTERM to the recorded server pid (best-effort — a dead pid is fine). */
-function signalStop(state: StateFile): void {
+/** Outcome of signalling the server: `ok` false means teardown was NOT initiated. */
+type SignalResult = { ok: true; gone: boolean } | { ok: false; reason: string };
+
+/**
+ * SIGTERM the recorded server pid. Only the `ESRCH` race (the pid vanished between
+ * the liveness check and here — teardown already happened) is treated as benign
+ * (`gone`); any other failure surfaces so the caller never reports a false stop.
+ */
+function signalStop(pid: number): SignalResult {
   try {
-    process.kill(state.pid, 'SIGTERM');
-  } catch {
-    // Already gone between the liveness check and here — the mark-stopped still stands.
+    process.kill(pid, 'SIGTERM');
+    return { ok: true, gone: false };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return { ok: true, gone: true };
+    return { ok: false, reason: code ?? (err instanceof Error ? err.message : String(err)) };
   }
 }
 

@@ -164,8 +164,21 @@ export async function buildSession(
     criteria: splitCriteria(criteria),
   });
 
+  const appendAgentLog = (line: string): Promise<string> =>
+    store.appendLog('agent', `${new Date().toISOString()} ${line}`);
+  // High-frequency, fire-and-forget: the agent's own log sink + per-step tool logs.
   const logAgent = (line: string) => {
-    void store.appendLog('agent', `${new Date().toISOString()} ${line}`).catch(() => undefined);
+    void appendAgentLog(line).catch(() => undefined);
+  };
+  // Run-lifecycle breadcrumbs (start/end/error) are AWAITED: on the crash path the
+  // process can exit before a fire-and-forget write flushes, losing the very failure
+  // we're trying to diagnose. A logging error here is swallowed, never masking the run.
+  const flushAgentLog = async (line: string): Promise<void> => {
+    try {
+      await appendAgentLog(line);
+    } catch {
+      // best-effort: logging must never break or mask the run
+    }
   };
 
   const run: LoopRunner = async ({ inbox, progress, signal }) => {
@@ -182,16 +195,21 @@ export async function buildSession(
       progress,
       log: logAgent,
     });
-    logAgent(`run start: target=${target} goal=${JSON.stringify(goal)}`);
+    await flushAgentLog(`run start: target=${target} goal=${JSON.stringify(goal)}`);
     try {
       const result = await runDebugLoop({ agent, abortSignal: signal });
-      logAgent('run end: loop resolved (driver reported or step cap reached)');
+      await flushAgentLog('run end: loop resolved (driver reported or step cap reached)');
       return result;
     } catch (err) {
-      // Surface the real failure to disk before the session folds it into `failed` —
-      // otherwise a crashed run leaves no trace anywhere (agent.log was empty).
-      logAgent(`run error: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`);
-      if (err instanceof Error && err.stack) logAgent(err.stack.split('\n').slice(0, 8).join('\n'));
+      // Surface the real failure to disk BEFORE the session folds it into `failed` —
+      // awaited, so a crash that exits the process can't race past the flush and leave
+      // agent.log empty (the exact case this trace is here to diagnose).
+      await flushAgentLog(
+        `run error: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`,
+      );
+      if (err instanceof Error && err.stack) {
+        await flushAgentLog(err.stack.split('\n').slice(0, 8).join('\n'));
+      }
       throw err;
     }
   };

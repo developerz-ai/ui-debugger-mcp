@@ -57,6 +57,13 @@ test('markStatus flips status + updatedAt in place, leaving identity intact', as
   expect(after?.sessionId).toBe(SAMPLE.sessionId);
 });
 
+test('markStatus preserves a terminal stopped when a later shutdown marks ended', async () => {
+  const path = join(dir, 'state.json');
+  await writeState(path, { ...SAMPLE, status: 'stopped' });
+  await markStatus(path, 'ended');
+  expect((await readState(path))?.status).toBe('stopped');
+});
+
 test('markStatus is a no-op when there is no state file', async () => {
   const path = join(dir, 'state.json');
   await markStatus(path, 'stopped');

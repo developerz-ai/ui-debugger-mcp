@@ -140,11 +140,17 @@ function baseSelector(node: Node): string | null {
  * Attach a copy-paste `target` to each tree node, disambiguating duplicates with
  * `>> nth=` in document order — so the agent never has to invent a selector (the
  * #1 cause of wasted steps: a blind model guessing CSS that does not resolve).
+ *
+ * A `scoped` read (`within`/`filters`) returns a *subset*, so the `nth=` index —
+ * and even a bare role/text selector — can resolve a different element when `act`
+ * replays it with an unscoped `find`. In that case we emit no `target`: better the
+ * agent falls back (visible text / `role "name"`) than act on the wrong node.
  */
-function withTargets(nodes: Node[], fields?: readonly NodeField[]): TreeNode[] {
+function withTargets(nodes: Node[], fields?: readonly NodeField[], scoped = false): TreeNode[] {
   const seen = new Map<string, number>();
   return nodes.map((node) => {
     const projected: TreeNode = fields && fields.length > 0 ? pick(node, fields) : { ...node };
+    if (scoped) return projected;
     const base = baseSelector(node);
     if (!base) return projected;
     const k = seen.get(base) ?? 0;
@@ -171,7 +177,8 @@ export async function runObserve(adapter: Adapter, input: ObserveInput): Promise
   switch (kind) {
     case 'tree': {
       const nodes = await adapter.readState({ query, filters, limit, within });
-      const projected = withTargets(nodes, fields);
+      const scoped = within !== undefined || filters !== undefined;
+      const projected = withTargets(nodes, fields, scoped);
       return { kind, count: projected.length, nodes: projected };
     }
     case 'screenshot': {

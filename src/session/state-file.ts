@@ -109,7 +109,13 @@ export class FileStatePort implements StatePort {
   }
 }
 
-/** Flip the recorded status (`ended`/`stopped`) in place, if a state file exists. */
+/**
+ * Flip the recorded status (`ended`/`stopped`) in place, if a state file exists.
+ *
+ * `stopped` is terminal and wins: a CLI `stop` records it first, then the server's
+ * SIGTERM path calls `clear()` → `markStatus(..., 'ended')`. Preserve the existing
+ * `stopped` here so `status` keeps reporting the true terminal state after a stop.
+ */
 export async function markStatus(
   path: string,
   status: 'ended' | 'stopped',
@@ -117,5 +123,6 @@ export async function markStatus(
 ): Promise<void> {
   const prior = await readState(path);
   if (!prior) return;
-  await writeState(path, { ...prior, status, updatedAt: now.toISOString() });
+  const nextStatus = prior.status === 'stopped' ? 'stopped' : status;
+  await writeState(path, { ...prior, status: nextStatus, updatedAt: now.toISOString() });
 }

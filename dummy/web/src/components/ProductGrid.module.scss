@@ -20,6 +20,7 @@
 .grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
+
   // BUG: inconsistent spacing -- big horizontal gap, almost none vertical,
   // and the negative margin pulls the second row up so cards overlap slightly.
   column-gap: 2.5rem;

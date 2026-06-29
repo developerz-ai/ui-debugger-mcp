@@ -101,6 +101,20 @@ test('tree → non-ARIA named node falls back to a text target', async () => {
   expect((res as { nodes: Array<{ target?: string }> }).nodes[0]?.target).toBe('text=Hello');
 });
 
+test('tree scoped by within or filters → omits target (unscoped replay could miss)', async () => {
+  const scoped = await runObserve(fakeAdapter({ nodes: [sampleNode] }).adapter, {
+    kind: 'tree',
+    within: 'main',
+  });
+  expect((scoped as { nodes: Array<{ target?: string }> }).nodes[0]?.target).toBeUndefined();
+
+  const filtered = await runObserve(fakeAdapter({ nodes: [sampleNode] }).adapter, {
+    kind: 'tree',
+    filters: { visible_eq: true },
+  });
+  expect((filtered as { nodes: Array<{ target?: string }> }).nodes[0]?.target).toBeUndefined();
+});
+
 test('tree forwards query/filters/limit/within to the adapter', async () => {
   const { adapter, rec } = fakeAdapter({ nodes: [] });
   await runObserve(adapter, {

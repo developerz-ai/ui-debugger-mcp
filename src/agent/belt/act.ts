@@ -138,8 +138,10 @@ async function performAct(adapter: Adapter, input: ActInput): Promise<string> {
       return `click ${describeNode(node)}`;
     }
     case 'type': {
-      const node = await resolve(adapter, required(input.target, 'target', 'type'));
+      // Validate `text` before resolving the target: a stale selector must not mask
+      // the real `requires 'text'` failure, nor cost an unnecessary `find()`.
       const text = required(input.text, 'text', 'type');
+      const node = await resolve(adapter, required(input.target, 'target', 'type'));
       await adapter.type(node, text);
       return `type ${text.length} chars into ${describeNode(node)}`;
     }

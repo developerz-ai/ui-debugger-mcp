@@ -17,14 +17,52 @@
 /** Selector engines (and XPath) Playwright already understands — passed through verbatim. */
 const ENGINE_PREFIX = /^(css|text|role|id|data-testid|xpath|internal:[a-z-]+)=/i;
 
+/**
+ * ARIA roles Playwright's `role=` engine accepts — the allow-list that gates the
+ * `role "name"` shorthand. A first token outside this set is an ordinary label,
+ * not a role (so `Sale "50% off"` stays text, never `role=sale`), and falls through
+ * to the plain-text engine. Mirrors the role set `observe` uses to build targets.
+ */
+const ARIA_ROLES = new Set([
+  'button',
+  'link',
+  'checkbox',
+  'radio',
+  'textbox',
+  'combobox',
+  'slider',
+  'heading',
+  'img',
+  'navigation',
+  'main',
+  'form',
+  'list',
+  'listitem',
+  'tab',
+  'menuitem',
+  'switch',
+  'dialog',
+  'banner',
+  'contentinfo',
+  'region',
+  'article',
+  'search',
+  'table',
+]);
+
 /** `role "Accessible Name"` (or single quotes / smart quotes), e.g. `button "Add to cart"`. */
 const ROLE_NAME = /^([a-zA-Z][\w-]*)\s+["'“”](.+?)["'”“]$/;
 
 /**
- * CSS-ish: starts with `.`/`#`/`[`/`*`, a `tag` followed by `.`/`#`/`[`/`:`, or
- * contains a combinator (`>`,`~`) or a structural pseudo (`:has`,`:nth`,`::`).
+ * CSS-ish, kept deliberately narrow so ordinary labels are not misread as selectors:
+ *  - starts with `.`/`#`/`[`/`*`,
+ *  - a `tag` immediately followed by `.`/`#`/`[`/`:` (e.g. `div.card`, `a:hover`),
+ *  - a combinator (`>`/`~`) flanked by simple selectors on BOTH sides — a tag or a
+ *    `.`/`#`/`[`/`*` token — so `nav > a` is CSS while `Next >` and `A ~ B` stay text,
+ *  - or a structural pseudo (`:has(`, `:nth-`, `::`).
  */
-const CSS_LIKE = /^[.#[*]|^[a-zA-Z][\w-]*[.#:[]|[>~]|:has\(|:nth-|::/;
+const CSS_LIKE =
+  /^[.#[*]|^[a-zA-Z][\w-]*[.#:[]|(?:[a-z][\w-]*|[.#][\w-]+|\*|\])\s*[>~]\s*(?:[a-z][\w-]*|[.#[*])|:has\(|:nth-|::/;
 
 /**
  * Turn an agent-supplied target into a Playwright-resolvable selector string.
@@ -41,7 +79,7 @@ export function normalizeQuery(raw: string): string {
   if (ENGINE_PREFIX.test(q) || q.startsWith('//') || q.startsWith('(//')) return q;
 
   const roleName = ROLE_NAME.exec(q);
-  if (roleName?.[1] && roleName[2]) {
+  if (roleName?.[1] && roleName[2] && ARIA_ROLES.has(roleName[1].toLowerCase())) {
     return `role=${roleName[1].toLowerCase()}[name=${JSON.stringify(roleName[2])} i]`;
   }
 
