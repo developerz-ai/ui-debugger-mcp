@@ -104,9 +104,9 @@ export function scrollSwipe(
     case 'up':
       return { x1: cx, y1: cy - half, x2: cx, y2: cy + half };
     case 'left':
-      return { x1: cx + half, y1: cy, x2: cx - half, y2: cy };
-    case 'right':
       return { x1: cx - half, y1: cy, x2: cx + half, y2: cy };
+    case 'right':
+      return { x1: cx + half, y1: cy, x2: cx - half, y2: cy };
     default: {
       const unreachable: never = direction;
       throw new AdapterError(`unknown scroll direction: ${JSON.stringify(unreachable)}`);
