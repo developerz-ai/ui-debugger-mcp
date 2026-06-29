@@ -36,6 +36,7 @@ async function seedState(overrides: Partial<StateFile> = {}): Promise<string> {
     startedAt: '2026-06-29T00:00:00.000Z',
     updatedAt: '2026-06-29T00:00:00.000Z',
     sessionDir: join(ws.sessions, '1700000000000-0001'),
+    identity: { startTicks: 1 },
     ...overrides,
   };
   await writeState(ws.stateJson, state);
@@ -66,4 +67,25 @@ test('stop on a dead server marks the run stopped', async () => {
   await runStop(cwd);
   expect(logs.join('\n')).toContain('not running');
   expect((await readState(stateJson))?.status).toBe('stopped');
+});
+
+test('stop with a stale PID marks run stopped without signaling', async () => {
+  // Requires /proc — Linux-only. On other platforms verifyIdentity returns 'unverifiable'
+  // and would fall back to isAlive(process.pid) = true, then try to SIGTERM us.
+  if (process.platform !== 'linux') return;
+
+  // Use our own PID (alive) but a wrong startTicks (1) so verifyIdentity returns 'stale'.
+  const stateJson = await seedState({ pid: process.pid, identity: { startTicks: 1 } });
+  await runStop(cwd);
+  const out = logs.join('\n');
+  expect(out).toContain('without signaling');
+  expect((await readState(stateJson))?.status).toBe('stopped');
+});
+
+test('status shows PID-reused line when identity is stale', async () => {
+  if (process.platform !== 'linux') return;
+
+  await seedState({ pid: process.pid, identity: { startTicks: 1 } });
+  await runStatus(cwd);
+  expect(logs.join('\n')).toContain('PID reused');
 });

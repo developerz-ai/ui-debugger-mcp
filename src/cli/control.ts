@@ -18,6 +18,8 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { loadWorkspaceDir } from '../config/load.js';
 import { FindingsSchema } from '../findings/schema.js';
+import type { IdentityCheck, ProcessIdentity } from '../session/process-identity.js';
+import { verifyIdentity } from '../session/process-identity.js';
 import { markStatus, readState } from '../session/state-file.js';
 import { resolveProject, workspacePaths } from '../session/workspace.js';
 
@@ -30,6 +32,27 @@ function isAlive(pid: number): boolean {
     // EPERM = the process exists but is owned by another user — still "alive".
     return (err as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+/**
+ * Is the recorded server *genuinely* still alive — not an unrelated process that
+ * inherited a recycled PID? A verified `match` is alive; a `stale` PID (recycled)
+ * or a `gone` PID is dead. When the identity can't be verified (non-Linux), fall
+ * back to a bare liveness probe — best effort, same as before this guard existed.
+ */
+function serverAlive(pid: number, check: IdentityCheck): boolean {
+  if (check === 'match') return true;
+  if (check === 'stale' || check === 'gone') return false;
+  return isAlive(pid);
+}
+
+/** Resolve the recorded run's liveness, guarding against PID reuse. */
+function checkServer(
+  pid: number,
+  identity: ProcessIdentity,
+): { check: IdentityCheck; alive: boolean } {
+  const check = verifyIdentity(pid, identity);
+  return { check, alive: serverAlive(pid, check) };
 }
 
 /** Read + validate a session's `findings.json`; `null` when absent/malformed. */
@@ -60,7 +83,7 @@ export async function runStatus(cwd = process.cwd()): Promise<void> {
     return;
   }
 
-  const alive = isAlive(state.pid);
+  const { check, alive } = checkServer(state.pid, state.identity);
   const findings = await readFindings(state.sessionDir);
   // Server up + nothing settled yet → trust findings' live status; else the recorded terminal.
   const verdict =
@@ -68,12 +91,15 @@ export async function runStatus(cwd = process.cwd()): Promise<void> {
   const counts = findings
     ? `${findings.bugs.length} bugs, ${findings.visual.length} visual, ${findings.steps.length} steps`
     : 'no findings yet';
+  // A recycled PID owns a different process now — say so rather than imply our server lives.
+  const serverState =
+    check === 'stale' ? 'not running (PID reused)' : alive ? 'running' : 'not running';
 
   console.log(`ui-debugger-mcp — ${project}`);
   console.log(`  run:      ${state.sessionId}`);
   console.log(`  target:   ${state.target}`);
   console.log(`  goal:     ${truncate(state.goal, 72)}`);
-  console.log(`  server:   pid ${state.pid} — ${alive ? 'running' : 'not running'}`);
+  console.log(`  server:   pid ${state.pid} — ${serverState}`);
   console.log(`  status:   ${verdict}`);
   console.log(`  findings: ${counts}`);
   console.log(`  started:  ${state.startedAt}`);
@@ -89,7 +115,20 @@ export async function runStop(cwd = process.cwd()): Promise<void> {
     return;
   }
 
-  if (isAlive(state.pid)) {
+  const { check, alive } = checkServer(state.pid, state.identity);
+
+  // The recorded PID is alive but now owns an *unrelated* process (it was recycled
+  // after our server died). Signaling it would kill an innocent process — don't.
+  // Our server is provably gone, so mark the run stopped without ever signaling.
+  if (check === 'stale') {
+    await markStatus(stateJson, 'stopped');
+    console.log(
+      `ui-debugger-mcp: server (pid ${state.pid}) is gone — its PID was reused by an unrelated process; marked run '${state.sessionId}' stopped without signaling.`,
+    );
+    return;
+  }
+
+  if (alive) {
     const signaled = signalStop(state.pid);
     if (!signaled.ok) {
       // The signal failed for a reason other than the process already being gone
