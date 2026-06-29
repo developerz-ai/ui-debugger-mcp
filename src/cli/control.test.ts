@@ -68,3 +68,24 @@ test('stop on a dead server marks the run stopped', async () => {
   expect(logs.join('\n')).toContain('not running');
   expect((await readState(stateJson))?.status).toBe('stopped');
 });
+
+test('stop with a stale PID marks run stopped without signaling', async () => {
+  // Requires /proc — Linux-only. On other platforms verifyIdentity returns 'unverifiable'
+  // and would fall back to isAlive(process.pid) = true, then try to SIGTERM us.
+  if (process.platform !== 'linux') return;
+
+  // Use our own PID (alive) but a wrong startTicks (1) so verifyIdentity returns 'stale'.
+  const stateJson = await seedState({ pid: process.pid, identity: { startTicks: 1 } });
+  await runStop(cwd);
+  const out = logs.join('\n');
+  expect(out).toContain('without signaling');
+  expect((await readState(stateJson))?.status).toBe('stopped');
+});
+
+test('status shows PID-reused line when identity is stale', async () => {
+  if (process.platform !== 'linux') return;
+
+  await seedState({ pid: process.pid, identity: { startTicks: 1 } });
+  await runStatus(cwd);
+  expect(logs.join('\n')).toContain('PID reused');
+});
