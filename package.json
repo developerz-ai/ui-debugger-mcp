@@ -1,6 +1,6 @@
 {
   "name": "@developerz.ai/ui-debugger-mcp",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Autonomous UI debugging MCP server. Give a goal; a fast agent drives the browser/desktop, finds bugs + visual issues, and reports back.",
   "license": "MIT",
   "type": "module",
@@ -37,6 +37,13 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write ."
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ai": "^6.0.214",
+    "@openrouter/ai-sdk-provider": "^2.10.0",
+    "zod": "^4.4.3",
+    "playwright-core": "^1.61.1"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.15",
