@@ -90,6 +90,7 @@ Early. This repo currently holds the design only — see [`idea/`](idea/).
 - [`idea/adapters.md`](idea/adapters.md) — adapter contract + targets
 - [`idea/desktop-control.md`](idea/desktop-control.md) — Linux control tooling (X11/Wayland/mobile)
 - [`idea/agent-loop.md`](idea/agent-loop.md) — the story → findings loop
+- [`idea/mcp-tools.md`](idea/mcp-tools.md) — two tool layers, SQL-like params, in-repo prompts
 - [`idea/config.md`](idea/config.md) — config files
 - [`idea/workspace.md`](idea/workspace.md) — per-project space + logs
 - [`CLAUDE.md`](CLAUDE.md) — instructions for AI agents working on this repo

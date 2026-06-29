@@ -26,6 +26,7 @@ Smart agent fixes code, asks again. Loop until the UI works. No human clicking.
 - `src/main.ts` — boot stdio MCP server.
 - `src/mcp/` — MCP server, tool defs (few fat tools, NOT one-per-action).
 - `src/agent/` — small debug agent (Vercel AI SDK loop, OpenRouter model).
+  - `prompts/` — OUR system prompts (in-repo, versioned, tested). Provider-agnostic. Never rely on a 3rd-party model's defaults.
 - `src/adapters/` — target control behind one shared contract.
   - `browser/` — web via CDP (headless default).
   - `desktop/` — X11/Wayland windows. Covers desktop app AND mobile emulator.
@@ -56,6 +57,10 @@ A **conversation**, not a remote control. Small agent owns the clicking loop.
 
 Never ship click/type/screenshot as separate tools. That floods context.
 Findings carry BOTH functional bugs AND visual/UX feedback ("how it looks").
+
+Two tool layers (see `idea/mcp-tools.md`): outer = few conversational MCP tools
+(smart Claude). Inner = the debug agent's belt (`observe`/`act`/`report`),
+SQL-like, heavily parameterized (`query`/`fields`/`filters`), one `act` not six.
 
 ## Config split
 - `.mcp.json` — how to LAUNCH server (command, model API key). Gitignored. Secret.
@@ -121,5 +126,6 @@ Web → DOM. Desktop/mobile → a11y tree, fall back to vision/screenshots.
 - `idea/adapters.md` — adapter contract + targets.
 - `idea/desktop-control.md` — Linux tooling: X11/Wayland input, screenshots, AT-SPI, mobile.
 - `idea/agent-loop.md` — story → findings loop.
+- `idea/mcp-tools.md` — two tool layers, SQL-like params, in-repo system prompts.
 - `idea/config.md` — `.mcp.json` + `.ui-debugger-mcp.json`.
 - `idea/workspace.md` — per-project space + logs.
