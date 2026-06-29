@@ -1,5 +1,12 @@
 import { expect, test } from 'bun:test';
-import type { Adapter, Node, NodeRef, Query, WaitOptions } from '../../adapters/contract.js';
+import type {
+  Adapter,
+  Node,
+  NodeRef,
+  Query,
+  ScrollOptions,
+  WaitOptions,
+} from '../../adapters/contract.js';
 import { AdapterError, AgentError } from '../../errors.js';
 import { ActInputSchema, createActTool, runAct, type StepRecorder } from './act.js';
 
@@ -8,6 +15,8 @@ interface AdapterCalls {
   find: Query[];
   click: NodeRef[];
   type: Array<{ target: NodeRef; text: string }>;
+  pressKey: string[];
+  scroll: ScrollOptions[];
   open: string[];
   waitFor: WaitOptions[];
   order: string[];
@@ -20,7 +29,16 @@ function fakeAdapter(found: Node | null): {
   png: Uint8Array;
 } {
   const png = new Uint8Array([1, 2, 3, 4]);
-  const calls: AdapterCalls = { find: [], click: [], type: [], open: [], waitFor: [], order: [] };
+  const calls: AdapterCalls = {
+    find: [],
+    click: [],
+    type: [],
+    pressKey: [],
+    scroll: [],
+    open: [],
+    waitFor: [],
+    order: [],
+  };
   const adapter: Adapter = {
     open: async (target) => {
       calls.open.push(target);
@@ -38,10 +56,12 @@ function fakeAdapter(found: Node | null): {
       calls.type.push({ target, text });
       calls.order.push('type');
     },
-    pressKey: async () => {
+    pressKey: async (key) => {
+      calls.pressKey.push(key);
       calls.order.push('pressKey');
     },
-    scroll: async () => {
+    scroll: async (opts) => {
+      calls.scroll.push(opts);
       calls.order.push('scroll');
     },
     readState: async () => [],
@@ -164,20 +184,49 @@ test('click with no match → throws AgentError, never clicks or records', async
   expect(rec.logs).toEqual([]);
 });
 
-test('key → throws AgentError (no contract verb yet)', async () => {
-  const { adapter } = fakeAdapter(button);
+test('key → pressKey(key), no find, label is the key', async () => {
+  const { adapter, calls } = fakeAdapter(button);
   const { recorder } = fakeRecorder();
-  await expect(runAct(adapter, recorder, { action: 'key', key: 'Enter' })).rejects.toThrow(
-    AgentError,
-  );
+  const res = await runAct(adapter, recorder, { action: 'key', key: 'Control+A' });
+  expect(calls.pressKey).toEqual(['Control+A']);
+  expect(calls.find).toEqual([]);
+  expect(res.action).toBe('key');
+  expect(res.label).toBe('key Control+A');
 });
 
-test('scroll → throws AgentError (no contract verb yet)', async () => {
-  const { adapter } = fakeAdapter(button);
+test('scroll → scroll(direction), target maps to within, amount in label', async () => {
+  const { adapter, calls } = fakeAdapter(button);
   const { recorder } = fakeRecorder();
-  await expect(runAct(adapter, recorder, { action: 'scroll', direction: 'down' })).rejects.toThrow(
-    AgentError,
-  );
+  const res = await runAct(adapter, recorder, {
+    action: 'scroll',
+    direction: 'down',
+    amount: 300,
+    target: '#list',
+  });
+  expect(calls.scroll).toEqual([{ direction: 'down', amount: 300, within: '#list' }]);
+  expect(res.label).toBe('scroll down 300px');
+});
+
+test('scroll without amount/target → viewport scroll, label omits px', async () => {
+  const { adapter, calls } = fakeAdapter(null);
+  const { recorder } = fakeRecorder();
+  const res = await runAct(adapter, recorder, { action: 'scroll', direction: 'up' });
+  expect(calls.scroll).toEqual([{ direction: 'up', amount: undefined, within: undefined }]);
+  expect(res.label).toBe('scroll up');
+});
+
+test('key without key → throws AgentError, never presses', async () => {
+  const { adapter, calls } = fakeAdapter(button);
+  const { recorder } = fakeRecorder();
+  await expect(runAct(adapter, recorder, { action: 'key' })).rejects.toThrow(AgentError);
+  expect(calls.pressKey).toEqual([]);
+});
+
+test('scroll without direction → throws AgentError, never scrolls', async () => {
+  const { adapter, calls } = fakeAdapter(button);
+  const { recorder } = fakeRecorder();
+  await expect(runAct(adapter, recorder, { action: 'scroll' })).rejects.toThrow(AgentError);
+  expect(calls.scroll).toEqual([]);
 });
 
 test('adapter errors propagate (fail loud, no swallow)', async () => {

@@ -11,8 +11,8 @@
  *   - `type`     → `find` + `type`    (resolve the field, then type into it)
  *   - `navigate` → `open`             (go to a URL / window / activity)
  *   - `wait`     → `waitFor`          (block on a node / network idle / timeout)
- *   - `key` · `scroll` — declared so the driver's API is stable, but the contract
- *     has no key-press / scroll verb yet; they fail loud until one lands.
+ *   - `key`      → `pressKey`         (press a key / chord on the focused element)
+ *   - `scroll`   → `scroll`           (wheel the viewport, or a `target`-scoped region)
  *
  * Click/type resolve their target through `find` FIRST (not the selector overload
  * baked into `click`/`type`) for two reasons: fail loud with a clear "no element
@@ -51,7 +51,7 @@ export const ActInputSchema = z.object({
     .string()
     .optional()
     .describe(
-      'what to act on — CSS, role+name (button "Save"), or visible text (web); navigate: URL/window/activity; wait: selector to await',
+      'what to act on — CSS, role+name (button "Save"), or visible text (web); navigate: URL/window/activity; wait: selector to await; scroll: region to scroll within (optional)',
     ),
   text: z.string().optional().describe('text to type (action=type)'),
   key: z
@@ -121,8 +121,12 @@ function describeWait(query?: string, networkIdle?: boolean, timeout?: number): 
   return parts.length > 0 ? parts.join(' + ') : 'next frame';
 }
 
-/** Require an operand the flat schema can't enforce per-action; fail loud when omitted. */
-function required(value: string | undefined, field: string, action: string): string {
+/**
+ * Require an operand the flat schema can't enforce per-action; fail loud when
+ * omitted. Generic over `T extends string` so it preserves narrow unions (e.g.
+ * `scroll`'s `direction` enum) instead of widening them back to `string`.
+ */
+function required<T extends string>(value: T | undefined, field: string, action: string): T {
   if (value === undefined || value === '') {
     throw new AgentError(`act '${action}' requires '${field}'`);
   }
@@ -158,14 +162,16 @@ async function performAct(adapter: Adapter, input: ActInput): Promise<string> {
       });
       return `wait for ${describeWait(input.target, input.networkIdle, input.timeout)}`;
     }
-    case 'key':
-      throw new AgentError(
-        "act 'key' is not supported yet: the adapter contract has no key-press verb",
-      );
-    case 'scroll':
-      throw new AgentError(
-        "act 'scroll' is not supported yet: the adapter contract has no scroll verb",
-      );
+    case 'key': {
+      const key = required(input.key, 'key', 'key');
+      await adapter.pressKey(key);
+      return `key ${key}`;
+    }
+    case 'scroll': {
+      const direction = required(input.direction, 'direction', 'scroll');
+      await adapter.scroll({ direction, amount: input.amount, within: input.target });
+      return `scroll ${direction}${input.amount !== undefined ? ` ${input.amount}px` : ''}`;
+    }
     default: {
       const unreachable: never = input.action;
       throw new AgentError(`unknown act action: ${JSON.stringify(unreachable)}`);
