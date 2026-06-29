@@ -189,13 +189,33 @@ test('schema rejects an unknown action', () => {
   expect(ActInputSchema.safeParse({ action: 'hover', target: '#x' }).success).toBe(false);
 });
 
-test('schema requires text for type', () => {
-  expect(ActInputSchema.safeParse({ action: 'type', target: '#x' }).success).toBe(false);
-  expect(ActInputSchema.safeParse({ action: 'type', target: '#x', text: 'hi' }).success).toBe(true);
-});
-
 test('schema accepts a minimal click', () => {
   expect(ActInputSchema.safeParse({ action: 'click', target: '#x' }).success).toBe(true);
+});
+
+// The flat schema can't encode per-action requirements, so `runAct` enforces them.
+test('type without text → throws AgentError (flat schema, runtime guard)', async () => {
+  const { adapter, calls } = fakeAdapter(button);
+  const { recorder } = fakeRecorder();
+  await expect(runAct(adapter, recorder, { action: 'type', target: '#x' })).rejects.toThrow(
+    AgentError,
+  );
+  // never typed, never recorded
+  expect(calls.type).toEqual([]);
+});
+
+test('click without target → throws AgentError before any find', async () => {
+  const { adapter, calls } = fakeAdapter(button);
+  const { recorder } = fakeRecorder();
+  await expect(runAct(adapter, recorder, { action: 'click' })).rejects.toThrow(AgentError);
+  expect(calls.find).toEqual([]);
+});
+
+test('navigate without target → throws AgentError', async () => {
+  const { adapter, calls } = fakeAdapter(null);
+  const { recorder } = fakeRecorder();
+  await expect(runAct(adapter, recorder, { action: 'navigate' })).rejects.toThrow(AgentError);
+  expect(calls.open).toEqual([]);
 });
 
 test('createActTool exposes a described tool with an input schema', () => {

@@ -48,15 +48,15 @@ If the target has \`?debug-ai=true\` support (the app's captcha bypass gate),
 append it to the login URL before navigating. This skips captcha only — not auth.
 The app must have \`ALLOW_AI_DEBUG_LOGIN=true\` set in its environment.
 
-### Selectors — priority order
+### Selectors — use the node's \`target\`, don't invent one
 
-Prefer stable, semantic selectors:
-1. ARIA role + accessible name: \`role=button[name="Submit"]\`
-2. \`data-testid\` attribute
-3. Semantic HTML (\`h1\`, \`nav\`, \`main\`)
-4. CSS class (last resort; fragile)
+Every node from \`observe({kind:"tree"})\` carries a ready-to-use \`target\` string
+(e.g. \`role=button[name="Add to cart" i]\`, with \`>> nth=N\` when names repeat).
+To act on an element, COPY its \`target\` verbatim into \`act({action, target})\`.
+Do NOT hand-craft a selector — guessed CSS like \`button[name="..."]\` will not resolve.
 
-Avoid XPath and positional selectors — they break on minor DOM changes.
+If a node has no \`target\` (unnamed, non-semantic), you may pass its visible text
+as \`target\` (plain text resolves), or \`role "name"\`. Avoid XPath and positional CSS.
 
 ### Console + network — watch always
 

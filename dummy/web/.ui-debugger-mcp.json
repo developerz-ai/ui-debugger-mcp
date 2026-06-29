@@ -1,0 +1,15 @@
+{
+  "models": {
+    "driver": "glm-5.2",
+    "vision": "glm-5.2",
+    "summary": "glm-5.2"
+  },
+  "workspace": "./tmp/ui-debugger-mcp",
+  "targets": {
+    "web": {
+      "adapter": "browser",
+      "url": "http://127.0.0.1:5179",
+      "headless": true
+    }
+  }
+}

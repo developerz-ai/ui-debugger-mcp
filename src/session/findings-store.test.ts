@@ -29,6 +29,22 @@ afterEach(async () => {
   await rm(tmpDir, { recursive: true, force: true });
 });
 
+// --- saveScreenshot ---------------------------------------------------------
+
+test('saveScreenshot writes a NNN-<slug>.png frame and returns its path', async () => {
+  const path = await store.saveScreenshot('click button "Save"', new Uint8Array([1, 2, 3]));
+  expect(path).toMatch(/screenshots\/001-click-button-save\.png$/);
+});
+
+test('saveScreenshot caps a long label so the filename never overflows (ENAMETOOLONG)', async () => {
+  const longLabel = 'Describe the overall page layout and visual quality '.repeat(10);
+  const path = await store.saveScreenshot(longLabel, new Uint8Array([1]));
+  const file = path.split('/').pop() ?? '';
+  expect(file.length).toBeLessThanOrEqual(255);
+  expect(file).toMatch(/^001-[a-z0-9-]+\.png$/);
+  expect(file).not.toMatch(/-\.png$/); // no trailing dash before the extension
+});
+
 // --- writeFindings / readFindings -------------------------------------------
 
 test('writeFindings returns the findings.json path', async () => {

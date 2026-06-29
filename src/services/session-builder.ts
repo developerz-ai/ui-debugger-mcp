@@ -14,7 +14,7 @@
  * seam; swapping the driver model or the target never touches the service.
  */
 
-import type { LanguageModel } from 'ai';
+import type { LanguageModel, Tool } from 'ai';
 import type { CaptureSink } from '../adapters/browser/cdp.js';
 import { createAdapter } from '../adapters/factory.js';
 import { createActTool } from '../agent/belt/act.js';
@@ -75,6 +75,40 @@ export function makeSessionBuilder(deps: SessionBuilderDeps): SessionBuilder {
   return (params) => buildSession(deps, params);
 }
 
+/** Compact one-line JSON of a tool input for the agent log (truncated, never throws). */
+function compactInput(input: unknown): string {
+  try {
+    const s = JSON.stringify(input);
+    return s.length > 200 ? `${s.slice(0, 199)}…` : s;
+  } catch {
+    return String(input);
+  }
+}
+
+/**
+ * Wrap a belt tool so every call records its input to `logs/agent.log`, and any
+ * thrown error is logged before it propagates — otherwise a belt failure (e.g. a
+ * selector that resolves nothing) is invisible: the SDK feeds it back to the model
+ * as a tool-error and the run just churns. The wrapper is transparent: same
+ * input/output, it only observes.
+ */
+function withToolLog(name: string, t: Tool, log: (line: string) => void): Tool {
+  const original = t.execute;
+  if (!original) return t;
+  return {
+    ...t,
+    execute: async (input, options) => {
+      log(`${name} ${compactInput(input)}`);
+      try {
+        return await original(input, options);
+      } catch (err) {
+        log(`${name} ERROR ${err instanceof Error ? err.message : String(err)}`);
+        throw err;
+      }
+    },
+  };
+}
+
 /** Map a config adapter kind to its prompt addendum target. Only browser/web ships today. */
 function addendumTarget(adapter: Target['adapter']): TargetName {
   if (adapter === 'browser') return 'web';
@@ -130,20 +164,36 @@ export async function buildSession(
     criteria: splitCriteria(criteria),
   });
 
-  const run: LoopRunner = ({ inbox, progress, signal }) => {
+  const logAgent = (line: string) => {
+    void store.appendLog('agent', `${new Date().toISOString()} ${line}`).catch(() => undefined);
+  };
+
+  const run: LoopRunner = async ({ inbox, progress, signal }) => {
     const agent = createDebugAgent({
       model: models.driver,
       tools: {
-        observe: createObserveTool(adapter),
-        act: createActTool(adapter, store),
-        look: createLookTool(adapter, models.vision, store),
-        report: createReportTool(store),
+        observe: withToolLog('observe', createObserveTool(adapter), logAgent),
+        act: withToolLog('act', createActTool(adapter, store), logAgent),
+        look: withToolLog('look', createLookTool(adapter, models.vision, store), logAgent),
+        report: withToolLog('report', createReportTool(store), logAgent),
       },
       instructions,
       inbox,
       progress,
+      log: logAgent,
     });
-    return runDebugLoop({ agent, abortSignal: signal });
+    logAgent(`run start: target=${target} goal=${JSON.stringify(goal)}`);
+    try {
+      const result = await runDebugLoop({ agent, abortSignal: signal });
+      logAgent('run end: loop resolved (driver reported or step cap reached)');
+      return result;
+    } catch (err) {
+      // Surface the real failure to disk before the session folds it into `failed` —
+      // otherwise a crashed run leaves no trace anywhere (agent.log was empty).
+      logAgent(`run error: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`);
+      if (err instanceof Error && err.stack) logAgent(err.stack.split('\n').slice(0, 8).join('\n'));
+      throw err;
+    }
   };
 
   const session = new Session<SessionAdapter>({

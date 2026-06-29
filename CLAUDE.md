@@ -7,7 +7,7 @@ A smart agent hands a goal (a "story") to a small fast agent inside this server.
 The small agent drives browser/desktop, gathers evidence, reports findings.
 Smart agent fixes code, asks again. Loop until the UI works. No human clicking.
 
-**Goal: stuff WORKS + LOOKS NICE.** Three actors cooperate (`idea/models.md`):
+**Goal: stuff WORKS + LOOKS NICE.** Three actors cooperate (`docs/idea/models.md`):
 - **smart agent** — the boss (Claude/caller): sets goals, fixes code, loops.
 - **fast guy** — the driver (fast, text-only, blind): controls the target.
 - **vision guy** — the eyes (multimodal): describes screenshots, judges looks.
@@ -58,7 +58,8 @@ start/stop it). Managed picks the binary via `executablePath`/`emulatorPath`.
 
 ## MCP tools (few, fat — not playwright-mcp)
 A **conversation**, not a remote control. Small agent owns the clicking loop.
-- `start_debug` — open a session with a goal `{ target, goal, criteria? }`.
+- `start_debug` — open a session with a goal `{ target, goal, criteria?, timeout? }`
+  (`timeout` seconds; always capped — default 300s — so a run never hangs forever).
 - `send_message` — talk to the small agent **mid-run** (add work, redirect, answer).
 - `get_findings` — poll status + structured findings (functional + visual) + evidence.
 - `describe` — list targets/config for this project (lazy schema).
@@ -67,7 +68,7 @@ A **conversation**, not a remote control. Small agent owns the clicking loop.
 Never ship click/type/screenshot as separate tools. That floods context.
 Findings carry BOTH functional bugs AND visual/UX feedback ("how it looks").
 
-Two tool layers (see `idea/mcp-tools.md`): outer = few conversational MCP tools
+Two tool layers (see `docs/idea/mcp-tools.md`): outer = few conversational MCP tools
 (smart Claude). Inner = the debug agent's belt (`observe`/`act`/`look`/`report`),
 SQL-like, heavily parameterized (`query`/`fields`/`filters`), one `act` not six.
 `look` = the eyes: sends a screenshot to the **vision guy** for visual judgment.
@@ -77,6 +78,15 @@ SQL-like, heavily parameterized (`query`/`fields`/`filters`), one `act` not six.
 - `init` → scaffold a project: create `./tmp/ui-debugger-mcp/`, write a starter
   `.ui-debugger-mcp.json` (deepseek/glm defaults + `web` stub) if absent, add
   `tmp/` to `.gitignore`, print the `.mcp.json` snippet. Never writes the API key.
+- `status` → print the active run for this cwd: session id, target, goal, server
+  pid (+ alive?), verdict, finding counts. Reads `state.json` + the session's
+  `findings.json`; no API key needed.
+- `stop` → tear the active run down: SIGTERM the recorded server pid (graceful —
+  the server ends the run, closes the browser, frees the profile), mark `stopped`.
+
+The server drops `<workspace>/state.json` (pid + active session) on start so these
+out-of-band commands work from a separate process; SIGTERM/SIGINT also end the run
+cleanly. One run per project (cwd), so no run selector is needed.
 
 ## Config split
 - `.mcp.json` — how to LAUNCH server (command, model API key + base url). Gitignored. Secret.
@@ -138,12 +148,12 @@ Browser and desktop behind one interface so the agent loop is adapter-blind:
 Web → DOM. Desktop/mobile → a11y tree, fall back to vision/screenshots.
 
 ## See also
-- `idea/overview.md` — the problem + the idea.
-- `idea/architecture.md` — full system design.
-- `idea/adapters.md` — adapter contract + targets.
-- `idea/desktop-control.md` — Linux tooling: X11/Wayland input, screenshots, AT-SPI, mobile.
-- `idea/agent-loop.md` — story → findings loop.
-- `idea/mcp-tools.md` — two tool layers, SQL-like params, in-repo system prompts.
-- `idea/models.md` — the three actors (smart agent / fast guy / vision guy), `look`, why CDP.
-- `idea/config.md` — `.mcp.json` + `.ui-debugger-mcp.json`.
-- `idea/workspace.md` — per-project space + logs.
+- `docs/idea/overview.md` — the problem + the idea.
+- `docs/idea/architecture.md` — full system design.
+- `docs/idea/adapters.md` — adapter contract + targets.
+- `docs/idea/desktop-control.md` — Linux tooling: X11/Wayland input, screenshots, AT-SPI, mobile.
+- `docs/idea/agent-loop.md` — story → findings loop.
+- `docs/idea/mcp-tools.md` — two tool layers, SQL-like params, in-repo system prompts.
+- `docs/idea/models.md` — the three actors (smart agent / fast guy / vision guy), `look`, why CDP.
+- `docs/idea/config.md` — `.mcp.json` + `.ui-debugger-mcp.json`.
+- `docs/idea/workspace.md` — per-project space + logs.

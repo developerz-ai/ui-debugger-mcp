@@ -20,14 +20,20 @@ import { SessionBusyError, SessionNotFoundError, TargetNotFoundError } from '../
 import type { Findings } from '../findings/schema.js';
 import type { SessionManager } from '../session/manager.js';
 import type { Session, SnapshotField } from '../session/session.js';
+import { noopStatePort, type StatePort } from '../session/state-file.js';
 import { generateSessionId } from '../session/workspace.js';
 import type { SessionBuilder } from './session-builder.js';
+
+/** Default wall-clock cap on a debug run before it auto-ends (overridable per run). */
+export const DEFAULT_SESSION_TIMEOUT_MS = 300_000;
 
 /** `start_debug` input — open a run for a configured target. */
 export interface StartInput {
   target: string;
   goal: string;
   criteria?: string;
+  /** Wall-clock cap (ms) before the run auto-ends; defaults to {@link DEFAULT_SESSION_TIMEOUT_MS}. */
+  timeoutMs?: number;
 }
 
 /** `start_debug` output — the id to poll/redirect/end the run by. */
@@ -104,6 +110,10 @@ export interface DebugServiceDeps {
   cwd: string;
   /** Seam to the heavy session assembly; injected so `start` stays testable. */
   build: SessionBuilder;
+  /** Cross-process run breadcrumb (`state.json`) for the CLI; defaults to a no-op. */
+  state?: StatePort;
+  /** Default wall-clock cap (ms) for a run; defaults to {@link DEFAULT_SESSION_TIMEOUT_MS}. */
+  defaultTimeoutMs?: number;
   /** Injected clock (epoch ms) for session ids; defaults to `Date.now`. */
   now?: () => number;
 }
@@ -113,13 +123,19 @@ export class DebugService implements DebugApi {
   readonly #config: ResolvedConfig;
   readonly #cwd: string;
   readonly #build: SessionBuilder;
+  readonly #state: StatePort;
+  readonly #defaultTimeoutMs: number;
   readonly #now: () => number;
+  /** Live wall-clock timer for the active run; cleared when the run ends. */
+  #timer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(deps: DebugServiceDeps) {
     this.#manager = deps.manager;
     this.#config = deps.config;
     this.#cwd = deps.cwd;
     this.#build = deps.build;
+    this.#state = deps.state ?? noopStatePort;
+    this.#defaultTimeoutMs = deps.defaultTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
     this.#now = deps.now ?? (() => Date.now());
   }
 
@@ -129,7 +145,7 @@ export class DebugService implements DebugApi {
    * already active for this cwd ({@link SessionBusyError}); never leaks a launched
    * browser — a lost lock race or a failed `open` tears the session back down.
    */
-  async start({ target, goal, criteria }: StartInput): Promise<StartResult> {
+  async start({ target, goal, criteria, timeoutMs }: StartInput): Promise<StartResult> {
     const cwd = this.#cwd;
     if (this.#manager.has(cwd)) {
       throw new SessionBusyError(
@@ -156,7 +172,26 @@ export class DebugService implements DebugApi {
       throw err;
     }
 
+    await this.#state.record({ sessionId: id, target, goal });
+    this.#armTimeout(timeoutMs ?? this.#defaultTimeoutMs);
     return { session_id: id };
+  }
+
+  /** Arm the wall-clock cap: auto-end the run when it fires (replaces any prior timer). */
+  #armTimeout(ms: number): void {
+    this.#clearTimeout();
+    this.#timer = setTimeout(() => {
+      this.#timer = undefined;
+      void this.endActive().catch(() => undefined);
+    }, ms);
+  }
+
+  /** Cancel the active run's wall-clock timer, if any. */
+  #clearTimeout(): void {
+    if (this.#timer !== undefined) {
+      clearTimeout(this.#timer);
+      this.#timer = undefined;
+    }
   }
 
   /** Queue a mid-run instruction for the active run's driver. */
@@ -194,8 +229,22 @@ export class DebugService implements DebugApi {
   /** End the active run: abort the loop, close the adapter, free the profile lock. */
   async end({ session_id }: EndInput): Promise<Ack> {
     this.#require(session_id);
+    this.#clearTimeout();
     await this.#manager.end(this.#cwd);
+    await this.#state.clear();
     return { ok: true, session_id };
+  }
+
+  /**
+   * End whatever run is active for this cwd, if any — the graceful-shutdown path
+   * for a SIGTERM/SIGINT, a CLI `stop`, or the wall-clock timeout firing. No-op
+   * when nothing is running.
+   */
+  async endActive(): Promise<void> {
+    this.#clearTimeout();
+    if (!this.#manager.has(this.#cwd)) return;
+    await this.#manager.end(this.#cwd);
+    await this.#state.clear();
   }
 
   /** Resolve the active session for this cwd, asserting its id matches the caller's. */

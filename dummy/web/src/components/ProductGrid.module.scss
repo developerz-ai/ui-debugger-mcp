@@ -1,0 +1,35 @@
+@use "../styles/vars" as *;
+
+.section {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 3.5rem 2rem;
+}
+
+.heading {
+  // BUG: fixed narrow width + nowrap forces the heading to overflow its box.
+  width: 320px;
+  white-space: nowrap;
+  overflow: visible;
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: $color-text;
+  margin: 0 0 2rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  // BUG: inconsistent spacing -- big horizontal gap, almost none vertical,
+  // and the negative margin pulls the second row up so cards overlap slightly.
+  column-gap: 2.5rem;
+  row-gap: 2px;
+
+  > *:nth-child(3) {
+    margin-top: -14px;
+  }
+
+  @media (max-width: 900px) {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

@@ -23,12 +23,21 @@ import type { SessionPaths } from './workspace.js';
 /** Append-only log channels backing `logs/<channel>.log`. */
 export type LogChannel = 'console' | 'network' | 'agent';
 
-/** Make a label filesystem-safe for a screenshot name; `step` if it empties out. */
+/** Max slug length — keeps `NNN-<slug>.png` well under the 255-byte filename limit. */
+const SLUG_MAX = 60;
+
+/**
+ * Make a label filesystem-safe for a screenshot name; `step` if it empties out.
+ * Capped at {@link SLUG_MAX} chars — a long `look` question must never overflow the
+ * filename limit (`ENAMETOOLONG`) and sink the screenshot write.
+ */
 function slug(label: string): string {
   const s = label
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+    .replace(/^-+|-+$/g, '')
+    .slice(0, SLUG_MAX)
+    .replace(/-+$/g, '');
   return s || 'step';
 }
 

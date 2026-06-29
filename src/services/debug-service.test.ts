@@ -135,6 +135,65 @@ test('start tears the session down and frees the lock when open fails', async ()
   expect(log.adapters[0]?.closeCalls).toBe(1);
 });
 
+// --- timeout ----------------------------------------------------------------
+
+/** Resolve after `ms` — let an armed wall-clock timer fire. */
+const tick = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+test('a run auto-ends when its wall-clock timeout fires (frees the lock + closes the adapter)', async () => {
+  const { build, log } = fakeBuilder();
+  const svc = new DebugService({
+    manager,
+    config: CONFIG,
+    cwd: CWD,
+    build,
+    now: () => NOW,
+    defaultTimeoutMs: 20,
+  });
+
+  await svc.start({ target: 'web', goal: 'x' });
+  expect(manager.has(CWD)).toBe(true);
+
+  await tick(60);
+  expect(manager.has(CWD)).toBe(false);
+  expect(log.adapters[0]?.closeCalls).toBe(1);
+});
+
+test('a per-run timeout overrides the default', async () => {
+  const { build } = fakeBuilder();
+  const svc = new DebugService({
+    manager,
+    config: CONFIG,
+    cwd: CWD,
+    build,
+    now: () => NOW,
+    defaultTimeoutMs: 10_000,
+  });
+
+  await svc.start({ target: 'web', goal: 'x', timeoutMs: 20 });
+  await tick(60);
+  expect(manager.has(CWD)).toBe(false);
+});
+
+test('ending a run cancels its timeout (no auto-end fires afterward)', async () => {
+  const { build, log } = fakeBuilder();
+  const svc = new DebugService({
+    manager,
+    config: CONFIG,
+    cwd: CWD,
+    build,
+    now: () => NOW,
+    defaultTimeoutMs: 20,
+  });
+
+  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
+  await svc.end({ session_id });
+  expect(log.adapters[0]?.closeCalls).toBe(1); // closed exactly once, by end()
+
+  await tick(60); // the (now-cancelled) timer would have fired here
+  expect(log.adapters[0]?.closeCalls).toBe(1); // still once — timeout did not re-close
+});
+
 // --- send -------------------------------------------------------------------
 
 test('send queues a mid-run message on the active session', async () => {

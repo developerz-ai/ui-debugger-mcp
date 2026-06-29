@@ -1,0 +1,66 @@
+@use "../styles/vars" as *;
+
+.card {
+  display: flex;
+  flex-direction: column;
+  background: $color-surface;
+  border: 1px solid $color-border;
+  border-radius: 12px;
+  padding: 1rem;
+  overflow: hidden;
+}
+
+.media {
+  width: 100%;
+  height: 180px;
+  border-radius: 8px;
+  background: #f3f4f6;
+  overflow: hidden;
+  margin-bottom: 0.9rem;
+}
+
+.image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: $color-text;
+  margin: 0 0 0.4rem;
+}
+
+.description {
+  font-size: 0.9rem;
+  color: $color-text-muted;
+  line-height: 1.4;
+  margin: 0 0 1rem;
+  flex: 1;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.price {
+  // BUG: very light gray price on white surface -> ~2:1 contrast, hard to read.
+  color: #cfcfcf;
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.add {
+  background: $color-accent;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  // BUG: tiny touch target + no hover state.
+  padding: 3px 8px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}

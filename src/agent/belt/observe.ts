@@ -84,12 +84,75 @@ export const ObserveInputSchema = z.object({
 
 export type ObserveInput = z.infer<typeof ObserveInputSchema>;
 
+/** A tree node projected for the agent, plus a ready-to-use `target` selector for `act`. */
+export type TreeNode = Partial<Node> & { target?: string };
+
 /** Structured `observe` result, discriminated on `kind` (mirrors the input channel). */
 export type ObserveResult =
-  | { kind: 'tree'; count: number; nodes: Partial<Node>[] }
+  | { kind: 'tree'; count: number; nodes: TreeNode[] }
   | { kind: 'screenshot'; encoding: 'png'; bytes: number; data: string }
   | { kind: 'console'; count: number; entries: ConsoleEntry[] }
   | { kind: 'network'; count: number; entries: NetworkEntry[] };
+
+/** ARIA roles Playwright's `role=` engine accepts (others fall back to a text selector). */
+const ARIA_ROLES = new Set([
+  'button',
+  'link',
+  'checkbox',
+  'radio',
+  'textbox',
+  'combobox',
+  'slider',
+  'heading',
+  'img',
+  'navigation',
+  'main',
+  'form',
+  'list',
+  'listitem',
+  'tab',
+  'menuitem',
+  'switch',
+  'dialog',
+  'banner',
+  'contentinfo',
+  'region',
+  'article',
+  'search',
+  'table',
+]);
+
+/**
+ * The base selector for a node the agent can paste straight into `act`'s `target`.
+ * Role + accessible name when the role is ARIA-addressable, else the visible text.
+ * `null` for an unnamed, non-semantic node (the agent targets those by other means).
+ */
+function baseSelector(node: Node): string | null {
+  const name = node.name.trim();
+  if (node.role && ARIA_ROLES.has(node.role) && name) {
+    return `role=${node.role}[name=${JSON.stringify(name)} i]`;
+  }
+  if (name) return `text=${name}`;
+  return null;
+}
+
+/**
+ * Attach a copy-paste `target` to each tree node, disambiguating duplicates with
+ * `>> nth=` in document order — so the agent never has to invent a selector (the
+ * #1 cause of wasted steps: a blind model guessing CSS that does not resolve).
+ */
+function withTargets(nodes: Node[], fields?: readonly NodeField[]): TreeNode[] {
+  const seen = new Map<string, number>();
+  return nodes.map((node) => {
+    const projected: TreeNode = fields && fields.length > 0 ? pick(node, fields) : { ...node };
+    const base = baseSelector(node);
+    if (!base) return projected;
+    const k = seen.get(base) ?? 0;
+    seen.set(base, k + 1);
+    projected.target = k === 0 ? base : `${base} >> nth=${k}`;
+    return projected;
+  });
+}
 
 /** Pick a subset of keys off an object (a typed `SELECT cols`) for the `fields` projection. */
 function pick<T, K extends keyof T>(obj: T, keys: readonly K[]): Pick<T, K> {
@@ -108,8 +171,7 @@ export async function runObserve(adapter: Adapter, input: ObserveInput): Promise
   switch (kind) {
     case 'tree': {
       const nodes = await adapter.readState({ query, filters, limit, within });
-      const projected: Partial<Node>[] =
-        fields && fields.length > 0 ? nodes.map((node) => pick(node, fields)) : nodes;
+      const projected = withTargets(nodes, fields);
       return { kind, count: projected.length, nodes: projected };
     }
     case 'screenshot': {

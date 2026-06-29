@@ -1,0 +1,44 @@
+@use "../styles/vars" as *;
+
+.hero {
+  // near-white background
+  background: #fdfdfd;
+  padding: 5rem 2rem;
+  text-align: center;
+}
+
+.inner {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.title {
+  font-size: 2.6rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: $color-text;
+  margin: 0 0 1rem;
+}
+
+.subtitle {
+  // BUG: white text on a near-white background -> invisible.
+  color: #ffffff;
+  font-size: 1.15rem;
+  line-height: 1.6;
+  margin: 0 0 2rem;
+}
+
+.cta {
+  background: $color-accent;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.85rem 1.6rem;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+
+  &:hover {
+    background: $color-accent-dark;
+  }
+}
