@@ -67,11 +67,11 @@ Picture a **boss**, a **fast blind driver**, and a **describer with eyes**:
   *"does this look right? is the button centred?"* and gets a description back.
   Default: glm. Spent only when visual judgment is needed.
 
-One goal: **the UI works *and* looks nice.** Full design in [`idea/`](idea/).
+One goal: **the UI works *and* looks nice.** Full design in [`docs/idea/`](docs/idea/).
 
 Every run keeps its screenshots and stitches them into a short **captioned
 replay video** — Claude attaches it to the PR so a reviewer sees the flow working
-in ~10 seconds ([`idea/workspace.md`](idea/workspace.md#pr-replay-video)).
+in ~10 seconds ([`docs/idea/workspace.md`](docs/idea/workspace.md#pr-replay-video)).
 
 ## Targets
 
@@ -113,8 +113,8 @@ Then add a per-project `.ui-debugger-mcp.json` describing the app to debug
 npx @developerz.ai/ui-debugger-mcp init   # in your project root
 ```
 
-**`ui-debugger init`** scaffolds a project for debugging (described in
-[`idea/config.md`](idea/config.md)):
+**`ui-debugger-mcp init`** scaffolds a project for debugging (described in
+[`docs/idea/config.md`](docs/idea/config.md)):
 
 - creates the workspace dir `./tmp/ui-debugger-mcp/`
 - writes a starter `.ui-debugger-mcp.json` (default deepseek/glm models, a `web`
@@ -130,6 +130,44 @@ Config files:
 The server reads the **current directory** to pick the project session — open it
 in your repo and it debugs that repo.
 
+## Using it
+
+It's a **conversation**, not a remote control — five fat tools, not one-per-click:
+
+| Tool | What it does |
+|------|--------------|
+| `start_debug` | Open a run: `{ target, goal, criteria?, timeout? }`. The small agent drives autonomously. Returns `{ session_id }`. |
+| `get_findings` | Poll status + structured findings (functional bugs + visual issues) + evidence. Long-poll with `wait`. |
+| `send_message` | Talk to the running agent mid-flight — add work, redirect, or answer a question. |
+| `describe` | List the configured targets + models for this project. |
+| `end_session` | Close the run, free the browser/profile. |
+
+A run is **always time-capped**: `start_debug`'s `timeout` (seconds) overrides the
+default 300s, so a session can never hang forever — it auto-ends and frees the
+profile lock when the cap fires.
+
+Typical loop from a smart agent:
+
+```text
+start_debug { target: "web", goal: "log in and add item 3 to the cart" }
+→ poll get_findings (wait) until status is passed | failed
+→ read bugs[] + visual[] + summary, fix the code, start_debug again
+```
+
+You can also drive it **headless** from a script with `claude -p` — see
+[`docs/claude/SKILL.md`](docs/claude/SKILL.md) for the CLI recipe (MCP config,
+allowed tools, output formats).
+
+### CLI — check or stop a run
+
+The `ui-debugger-mcp` binary doubles as a control CLI for the active run
+(reads `state.json`, no API key needed):
+
+```bash
+ui-debugger-mcp status   # which run is active, server pid, verdict, finding counts
+ui-debugger-mcp stop     # gracefully end the run (frees the browser + profile)
+```
+
 ## Stack
 
 - **Bun** + **TypeScript** (ships as npm, runs via `npx`/`bunx`)
@@ -141,19 +179,20 @@ in your repo and it debugs that repo.
 
 ## Status
 
-Web target shipped. Desktop and Android adapters are pending — see [`idea/`](idea/) for design.
+Web target shipped. Desktop and Android adapters are pending — see [`docs/idea/`](docs/idea/) for design.
 
 ## Docs
 
-- [`idea/overview.md`](idea/overview.md) — problem + idea
-- [`idea/architecture.md`](idea/architecture.md) — system design
-- [`idea/adapters.md`](idea/adapters.md) — adapter contract + targets
-- [`idea/desktop-control.md`](idea/desktop-control.md) — Linux control tooling (X11/Wayland/mobile)
-- [`idea/agent-loop.md`](idea/agent-loop.md) — the story → findings loop
-- [`idea/mcp-tools.md`](idea/mcp-tools.md) — two tool layers, SQL-like params, in-repo prompts
-- [`idea/models.md`](idea/models.md) — the three actors (smart agent / fast guy / vision guy)
-- [`idea/config.md`](idea/config.md) — config files
-- [`idea/workspace.md`](idea/workspace.md) — per-project space + logs
+- [`docs/idea/overview.md`](docs/idea/overview.md) — problem + idea
+- [`docs/idea/architecture.md`](docs/idea/architecture.md) — system design
+- [`docs/idea/adapters.md`](docs/idea/adapters.md) — adapter contract + targets
+- [`docs/idea/desktop-control.md`](docs/idea/desktop-control.md) — Linux control tooling (X11/Wayland/mobile)
+- [`docs/idea/agent-loop.md`](docs/idea/agent-loop.md) — the story → findings loop
+- [`docs/idea/mcp-tools.md`](docs/idea/mcp-tools.md) — two tool layers, SQL-like params, in-repo prompts
+- [`docs/idea/models.md`](docs/idea/models.md) — the three actors (smart agent / fast guy / vision guy)
+- [`docs/idea/config.md`](docs/idea/config.md) — config files
+- [`docs/idea/workspace.md`](docs/idea/workspace.md) — per-project space + logs
+- [`docs/claude/SKILL.md`](docs/claude/SKILL.md) — driving `claude` as a headless CLI tool (generic)
 - [`CLAUDE.md`](CLAUDE.md) — instructions for AI agents working on this repo
 
 ## Credits / influences

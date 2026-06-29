@@ -6,6 +6,8 @@ import type { Findings, Step } from '../findings/schema.js';
 import { createReportTool } from './belt/report.js';
 import {
   type BeltTools,
+  BUDGET_WARN,
+  budgetNudge,
   createDebugAgent,
   DEFAULT_MAX_STEPS,
   drainInboxIntoStep,
@@ -16,6 +18,18 @@ import {
   runDebugLoop,
   stepTrailFrom,
 } from './loop.js';
+
+test('budgetNudge stays silent while there is ample budget', () => {
+  expect(budgetNudge(0, 30)).toBeNull();
+  expect(budgetNudge(30 - BUDGET_WARN - 1, 30)).toBeNull();
+});
+
+test('budgetNudge warns as the cap nears, and hard-stops on the last step', () => {
+  expect(budgetNudge(30 - BUDGET_WARN, 30)).toContain('budget almost spent');
+  const last = budgetNudge(29, 30);
+  expect(last).toContain('final step');
+  expect(last).toContain('report');
+});
 
 /** A belt of four no-op tools — enough to construct the agent without driving it. */
 function fakeBelt(): BeltTools {

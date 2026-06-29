@@ -1,8 +1,10 @@
 /**
  * `act` — the driver's write tool (inner belt).
  *
- * One verb, six intents, picked by a `z.discriminatedUnion('action', …)`. Each
- * routes through the shared {@link Adapter} contract so the loop stays
+ * One verb, six intents, picked by an `action` enum on a flat input object (a
+ * discriminated union renders as a JSON-Schema `anyOf` that some tool-calling
+ * models can't fill — see {@link ActInputSchema}). Each intent routes through the
+ * shared {@link Adapter} contract so the loop stays
  * adapter-blind — the same `act({ action: 'click', target })` drives web (CDP),
  * desktop (X11/Wayland) or android (ADB):
  *   - `click`    → `find` + `click`   (resolve the node, then click it)
@@ -28,69 +30,50 @@ import type { Adapter, Node } from '../../adapters/contract.js';
 import { AgentError } from '../../errors.js';
 import type { LogChannel } from '../../session/findings-store.js';
 
-/** Click a resolved node. */
-const ClickAction = z.object({
-  action: z.literal('click'),
-  target: z
-    .string()
-    .describe(
-      'selector to click: CSS/role/text (web), a11y role+name (desktop), id/text (android)',
-    ),
-});
+/** The six action verbs `act` routes to the shared contract. */
+export const ACT_ACTIONS = ['click', 'type', 'key', 'scroll', 'navigate', 'wait'] as const;
 
-/** Type text into a resolved field. */
-const TypeAction = z.object({
-  action: z.literal('type'),
-  target: z.string().describe('selector for the field to type into'),
-  text: z.string().describe('the text to type into the field'),
-});
-
-/** Press a key or chord (reserved — no contract verb yet). */
-const KeyAction = z.object({
-  action: z.literal('key'),
-  key: z.string().describe('key or chord to press, e.g. Enter | Tab | Escape | Control+A'),
+/**
+ * `act` input — ONE flat object the driver fills per call: `action` picks the
+ * verb, the rest are its (optional) operands, validated per-action in
+ * {@link performAct}.
+ *
+ * Flat on purpose. A `z.discriminatedUnion('action', …)` renders as a JSON-Schema
+ * `anyOf`, which several tool-calling models — including our default driver
+ * (glm) — fail to populate: they emit the call with empty `{}` args and the run
+ * churns without ever acting. A single flat object with an enum discriminant is
+ * filled reliably, at the cost of moving "click needs a target", "type needs
+ * text" out of the schema and into a loud runtime check.
+ */
+export const ActInputSchema = z.object({
+  action: z.enum(ACT_ACTIONS).describe('what to do: click | type | key | scroll | navigate | wait'),
   target: z
     .string()
     .optional()
-    .describe('selector to focus before the keypress (omit for the active element)'),
-});
-
-/** Scroll a region or the viewport (reserved — no contract verb yet). */
-const ScrollAction = z.object({
-  action: z.literal('scroll'),
-  direction: z.enum(['up', 'down', 'left', 'right']).describe('scroll direction'),
-  target: z.string().optional().describe('selector to scroll within (omit for the viewport)'),
-  amount: z
+    .describe(
+      'what to act on — CSS, role+name (button "Save"), or visible text (web); navigate: URL/window/activity; wait: selector to await',
+    ),
+  text: z.string().optional().describe('text to type (action=type)'),
+  key: z
+    .string()
+    .optional()
+    .describe('key or chord to press (action=key), e.g. Enter | Tab | Escape | Control+A'),
+  direction: z
+    .enum(['up', 'down', 'left', 'right'])
+    .optional()
+    .describe('scroll direction (action=scroll)'),
+  amount: z.number().int().positive().optional().describe('pixels to scroll (action=scroll)'),
+  networkIdle: z
+    .boolean()
+    .optional()
+    .describe('wait until in-flight requests settle (action=wait, web)'),
+  timeout: z
     .number()
     .int()
     .positive()
     .optional()
-    .describe('pixels to scroll (adapter default if omitted)'),
+    .describe('hard cap in ms; throws on expiry (action=wait)'),
 });
-
-/** Go to a URL / window / activity. */
-const NavigateAction = z.object({
-  action: z.literal('navigate'),
-  target: z.string().describe('where to go: URL (web), window (desktop), activity (android)'),
-});
-
-/** Block until a node appears / network settles / timeout. */
-const WaitAction = z.object({
-  action: z.literal('wait'),
-  target: z.string().optional().describe('wait until a node matching this selector appears'),
-  networkIdle: z.boolean().optional().describe('wait until in-flight requests settle (web)'),
-  timeout: z.number().int().positive().optional().describe('hard cap in ms; throws on expiry'),
-});
-
-/** `act` input — a discriminated union on `action`; the agent picks one intent per call. */
-export const ActInputSchema = z.discriminatedUnion('action', [
-  ClickAction,
-  TypeAction,
-  KeyAction,
-  ScrollAction,
-  NavigateAction,
-  WaitAction,
-]);
 
 export type ActInput = z.infer<typeof ActInputSchema>;
 
@@ -138,22 +121,34 @@ function describeWait(query?: string, networkIdle?: boolean, timeout?: number): 
   return parts.length > 0 ? parts.join(' + ') : 'next frame';
 }
 
+/** Require an operand the flat schema can't enforce per-action; fail loud when omitted. */
+function required(value: string | undefined, field: string, action: string): string {
+  if (value === undefined || value === '') {
+    throw new AgentError(`act '${action}' requires '${field}'`);
+  }
+  return value;
+}
+
 /** Perform one action against the contract and return its target-derived step label. */
 async function performAct(adapter: Adapter, input: ActInput): Promise<string> {
   switch (input.action) {
     case 'click': {
-      const node = await resolve(adapter, input.target);
+      const node = await resolve(adapter, required(input.target, 'target', 'click'));
       await adapter.click(node);
       return `click ${describeNode(node)}`;
     }
     case 'type': {
-      const node = await resolve(adapter, input.target);
-      await adapter.type(node, input.text);
-      return `type ${input.text.length} chars into ${describeNode(node)}`;
+      // Validate `text` before resolving the target: a stale selector must not mask
+      // the real `requires 'text'` failure, nor cost an unnecessary `find()`.
+      const text = required(input.text, 'text', 'type');
+      const node = await resolve(adapter, required(input.target, 'target', 'type'));
+      await adapter.type(node, text);
+      return `type ${text.length} chars into ${describeNode(node)}`;
     }
     case 'navigate': {
-      await adapter.open(input.target);
-      return `navigate to ${input.target}`;
+      const target = required(input.target, 'target', 'navigate');
+      await adapter.open(target);
+      return `navigate to ${target}`;
     }
     case 'wait': {
       await adapter.waitFor({
@@ -172,7 +167,7 @@ async function performAct(adapter: Adapter, input: ActInput): Promise<string> {
         "act 'scroll' is not supported yet: the adapter contract has no scroll verb",
       );
     default: {
-      const unreachable: never = input;
+      const unreachable: never = input.action;
       throw new AgentError(`unknown act action: ${JSON.stringify(unreachable)}`);
     }
   }

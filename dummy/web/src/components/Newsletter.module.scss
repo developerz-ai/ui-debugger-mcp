@@ -1,0 +1,45 @@
+@use "../styles/vars" as *;
+
+.newsletter {
+  background: $color-surface-alt;
+  padding: 4rem 2rem;
+  text-align: center;
+}
+
+.heading {
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: $color-text;
+  margin: 0 0 0.5rem;
+}
+
+.copy {
+  color: $color-text-muted;
+  margin: 0 0 1.5rem;
+}
+
+.form {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+.input {
+  flex: 1;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid $color-border;
+  border-radius: 6px;
+  font-size: 0.95rem;
+}
+
+.submit {
+  background: $color-text;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 0.7rem 1.3rem;
+  font-weight: 600;
+  cursor: pointer;
+}

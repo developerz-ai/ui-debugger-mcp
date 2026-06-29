@@ -45,9 +45,24 @@ export function startDebugTool(service: DebugApi): McpTool {
               .describe(
                 'Optional explicit pass/fail rules, one per line. Omit to let the agent judge.',
               ),
+            timeout: z
+              .number()
+              .int()
+              .positive()
+              .max(2_147_483)
+              .optional()
+              .describe(
+                'Wall-clock cap in SECONDS before the run auto-ends (frees the browser/profile). Omit for the default (300s). Max 2_147_483 (Node timer ceiling once × 1000).',
+              ),
           },
         },
-        async (args) => toToolResult(await service.start(args)),
+        async ({ timeout, ...rest }) =>
+          toToolResult(
+            await service.start({
+              ...rest,
+              ...(timeout !== undefined && { timeoutMs: timeout * 1000 }),
+            }),
+          ),
       );
     },
   };

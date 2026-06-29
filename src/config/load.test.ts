@@ -8,6 +8,7 @@ import {
   DEFAULT_MODELS,
   DEFAULT_WORKSPACE,
   loadConfig,
+  loadWorkspaceDir,
   OPENROUTER_BASE_URL,
 } from './load.js';
 
@@ -83,4 +84,15 @@ test('invalid JSON throws ConfigError', () => {
 test('schema-invalid config throws ConfigError', () => {
   const bad = { targets: { web: { adapter: 'browser', url: 'not-a-url', headless: true } } };
   expect(() => loadConfig({ cwd: tmpProject(bad), env: key })).toThrow(ConfigError);
+});
+
+test('loadWorkspaceDir falls back to the default only when the config file is absent', () => {
+  expect(loadWorkspaceDir(tmpProject())).toBe(DEFAULT_WORKSPACE);
+  expect(loadWorkspaceDir(tmpProject({ ...minimal, workspace: './ws' }))).toBe('./ws');
+});
+
+test('loadWorkspaceDir surfaces ConfigError on an invalid config (no silent default)', () => {
+  expect(() => loadWorkspaceDir(tmpProject('{ not json'))).toThrow(ConfigError);
+  const bad = { targets: { web: { adapter: 'browser', url: 'not-a-url', headless: true } } };
+  expect(() => loadWorkspaceDir(tmpProject(bad))).toThrow(ConfigError);
 });

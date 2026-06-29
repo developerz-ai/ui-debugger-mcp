@@ -8,7 +8,8 @@
       "!**/node_modules",
       "!**/*.tsbuildinfo",
       "!**/coverage",
-      "!**/tmp"
+      "!**/tmp",
+      "!dummy"
     ]
   },
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },

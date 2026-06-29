@@ -61,7 +61,7 @@ export interface ProgressWriter {
 /** The slice of a finished step the running flush reads — `act` results carry the trail. */
 export interface FinishedStep {
   /** Tools called this step; a `report` call marks the terminal step (verdict owned elsewhere). */
-  toolCalls: ReadonlyArray<{ toolName: string }>;
+  toolCalls: ReadonlyArray<{ toolName: string; input?: unknown }>;
   /** Tool results this step; `act` outputs become step-trail entries. */
   toolResults: ReadonlyArray<{ toolName: string; output: unknown }>;
 }
@@ -87,6 +87,24 @@ export function drainInboxIntoStep(
       .join('\n')}\nFold these in, then continue.`,
   };
   return { messages: [...messages, injected] };
+}
+
+/** Steps left at or below which the driver is nudged to wrap up and `report`. */
+export const BUDGET_WARN = 6;
+
+/**
+ * A step-budget reminder folded into the turn as the run nears its cap — so the
+ * driver converges on `report` instead of churning to the hard `stepCountIs` stop
+ * (which leaves an empty, verdict-less `failed` run). `null` while there is ample
+ * budget. `stepNumber` is the 0-based index of the step about to run.
+ */
+export function budgetNudge(stepNumber: number, maxSteps: number): string | null {
+  const remaining = maxSteps - stepNumber;
+  if (remaining > BUDGET_WARN) return null;
+  if (remaining <= 1) {
+    return 'This is your final step. Call `report` NOW with every bug and visual issue you have found so far — do not act again.';
+  }
+  return `Step budget almost spent: ~${remaining} of ${maxSteps} steps left. Finish exploring and call \`report\` soon with all findings; an unreported run is wasted.`;
 }
 
 /** Lift a finished step's `act` results into ordered step-trail entries (each with its frame). */
@@ -130,8 +148,52 @@ export interface DebugAgentOptions {
   inbox: LoopInbox;
   /** Where the running step trail is flushed after each step. */
   progress: ProgressWriter;
+  /** Optional sink for a human-readable step trail (`logs/agent.log`). */
+  log?: AgentLog;
   /** Step safety cap; defaults to {@link DEFAULT_MAX_STEPS}. */
   maxSteps?: number;
+}
+
+/** Agent-log seam: one line per step (tool calls + any tool error), best-effort. */
+export type AgentLog = (line: string) => void;
+
+/** Summarize a finished step for `logs/agent.log`: the tools it called (+ input) + any error text. */
+export function describeStep(step: FinishedStep, index: number): string {
+  const calls =
+    step.toolCalls
+      .map((c) => (c.input !== undefined ? `${c.toolName}(${compactArg(c.input)})` : c.toolName))
+      .join(', ') || '(no tool call)';
+  const errors = step.toolResults
+    .filter((r) => isErrorOutput(r.output))
+    .map((r) => `${r.toolName}: ${errorText(r.output)}`);
+  const tail = errors.length > 0 ? ` — ERROR ${errors.join('; ')}` : '';
+  return `step ${index}: ${calls}${tail}`;
+}
+
+/** Compact one-line JSON of a tool-call input for the step log (truncated, never throws). */
+function compactArg(input: unknown): string {
+  try {
+    const s = JSON.stringify(input);
+    return s.length > 160 ? `${s.slice(0, 159)}…` : s;
+  } catch {
+    return String(input);
+  }
+}
+
+/** Whether a tool result output looks like an error envelope (`{ error: ... }` / Error). */
+function isErrorOutput(output: unknown): boolean {
+  if (output instanceof Error) return true;
+  return typeof output === 'object' && output !== null && 'error' in output;
+}
+
+/** Pull a short error string out of a tool result output. */
+function errorText(output: unknown): string {
+  if (output instanceof Error) return output.message;
+  if (typeof output === 'object' && output !== null && 'error' in output) {
+    const e = (output as { error: unknown }).error;
+    return e instanceof Error ? e.message : String(e);
+  }
+  return String(output);
 }
 
 /**
@@ -141,15 +203,32 @@ export interface DebugAgentOptions {
  * trail (skipping the `report` step, which writes the final verdict itself).
  */
 export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<never, BeltTools> {
-  const { model, tools, instructions, inbox, progress, maxSteps = DEFAULT_MAX_STEPS } = options;
+  const {
+    model,
+    tools,
+    instructions,
+    inbox,
+    progress,
+    log,
+    maxSteps = DEFAULT_MAX_STEPS,
+  } = options;
   const trail: Step[] = [];
+  let stepIndex = 0;
   return new ToolLoopAgent<never, BeltTools>({
     model,
     tools,
     instructions,
     stopWhen: [stepCountIs(maxSteps), hasToolCall('report')],
-    prepareStep: ({ messages }) => drainInboxIntoStep(inbox, messages),
+    prepareStep: ({ messages, stepNumber }) => {
+      const withInbox = drainInboxIntoStep(inbox, messages);
+      const nudge = budgetNudge(stepNumber, maxSteps);
+      if (!nudge) return withInbox;
+      const base = 'messages' in withInbox ? withInbox.messages : messages;
+      return { messages: [...base, { role: 'user', content: nudge }] };
+    },
     onStepFinish: async (step) => {
+      stepIndex += 1;
+      log?.(describeStep(step, stepIndex));
       const findings = progressForStep(step, trail);
       if (findings) await progress.writeFindings(findings);
     },

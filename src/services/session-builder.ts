@@ -14,7 +14,7 @@
  * seam; swapping the driver model or the target never touches the service.
  */
 
-import type { LanguageModel } from 'ai';
+import type { LanguageModel, Tool } from 'ai';
 import type { CaptureSink } from '../adapters/browser/cdp.js';
 import { createAdapter } from '../adapters/factory.js';
 import { createActTool } from '../agent/belt/act.js';
@@ -75,6 +75,40 @@ export function makeSessionBuilder(deps: SessionBuilderDeps): SessionBuilder {
   return (params) => buildSession(deps, params);
 }
 
+/** Compact one-line JSON of a tool input for the agent log (truncated, never throws). */
+function compactInput(input: unknown): string {
+  try {
+    const s = JSON.stringify(input);
+    return s.length > 200 ? `${s.slice(0, 199)}…` : s;
+  } catch {
+    return String(input);
+  }
+}
+
+/**
+ * Wrap a belt tool so every call records its input to `logs/agent.log`, and any
+ * thrown error is logged before it propagates — otherwise a belt failure (e.g. a
+ * selector that resolves nothing) is invisible: the SDK feeds it back to the model
+ * as a tool-error and the run just churns. The wrapper is transparent: same
+ * input/output, it only observes.
+ */
+function withToolLog(name: string, t: Tool, log: (line: string) => void): Tool {
+  const original = t.execute;
+  if (!original) return t;
+  return {
+    ...t,
+    execute: async (input, options) => {
+      log(`${name} ${compactInput(input)}`);
+      try {
+        return await original(input, options);
+      } catch (err) {
+        log(`${name} ERROR ${err instanceof Error ? err.message : String(err)}`);
+        throw err;
+      }
+    },
+  };
+}
+
 /** Map a config adapter kind to its prompt addendum target. Only browser/web ships today. */
 function addendumTarget(adapter: Target['adapter']): TargetName {
   if (adapter === 'browser') return 'web';
@@ -130,20 +164,54 @@ export async function buildSession(
     criteria: splitCriteria(criteria),
   });
 
-  const run: LoopRunner = ({ inbox, progress, signal }) => {
+  const appendAgentLog = (line: string): Promise<string> =>
+    store.appendLog('agent', `${new Date().toISOString()} ${line}`);
+  // High-frequency, fire-and-forget: the agent's own log sink + per-step tool logs.
+  const logAgent = (line: string) => {
+    void appendAgentLog(line).catch(() => undefined);
+  };
+  // Run-lifecycle breadcrumbs (start/end/error) are AWAITED: on the crash path the
+  // process can exit before a fire-and-forget write flushes, losing the very failure
+  // we're trying to diagnose. A logging error here is swallowed, never masking the run.
+  const flushAgentLog = async (line: string): Promise<void> => {
+    try {
+      await appendAgentLog(line);
+    } catch {
+      // best-effort: logging must never break or mask the run
+    }
+  };
+
+  const run: LoopRunner = async ({ inbox, progress, signal }) => {
     const agent = createDebugAgent({
       model: models.driver,
       tools: {
-        observe: createObserveTool(adapter),
-        act: createActTool(adapter, store),
-        look: createLookTool(adapter, models.vision, store),
-        report: createReportTool(store),
+        observe: withToolLog('observe', createObserveTool(adapter), logAgent),
+        act: withToolLog('act', createActTool(adapter, store), logAgent),
+        look: withToolLog('look', createLookTool(adapter, models.vision, store), logAgent),
+        report: withToolLog('report', createReportTool(store), logAgent),
       },
       instructions,
       inbox,
       progress,
+      log: logAgent,
     });
-    return runDebugLoop({ agent, abortSignal: signal });
+    await flushAgentLog(`run start: target=${target} goal=${JSON.stringify(goal)}`);
+    try {
+      const result = await runDebugLoop({ agent, abortSignal: signal });
+      await flushAgentLog('run end: loop resolved (driver reported or step cap reached)');
+      return result;
+    } catch (err) {
+      // Surface the real failure to disk BEFORE the session folds it into `failed` —
+      // awaited, so a crash that exits the process can't race past the flush and leave
+      // agent.log empty (the exact case this trace is here to diagnose).
+      await flushAgentLog(
+        `run error: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`,
+      );
+      if (err instanceof Error && err.stack) {
+        await flushAgentLog(err.stack.split('\n').slice(0, 8).join('\n'));
+      }
+      throw err;
+    }
   };
 
   const session = new Session<SessionAdapter>({

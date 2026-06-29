@@ -36,6 +36,7 @@ import type {
 } from '../contract.js';
 import type { CaptureSink } from './cdp.js';
 import { CdpCapture } from './cdp.js';
+import { normalizeQuery } from './query.js';
 
 /** System Chrome channel used when no explicit `executablePath` is configured. */
 const DEFAULT_CHANNEL = 'chrome';
@@ -360,7 +361,7 @@ export class BrowserAdapter implements Adapter {
   async click(target: NodeRef): Promise<void> {
     await this.#run('click', async () => {
       if (typeof target === 'string') {
-        await this.#page.locator(target).first().click();
+        await this.#page.locator(normalizeQuery(target)).first().click();
         return;
       }
       const { x, y, width, height } = target.bounds;
@@ -374,7 +375,7 @@ export class BrowserAdapter implements Adapter {
     // than `fill()` so it appends like the coordinate path instead of replacing.
     await this.#run('type', async () => {
       if (typeof target === 'string') {
-        await this.#page.locator(target).first().click();
+        await this.#page.locator(normalizeQuery(target)).first().click();
       } else {
         const { x, y, width, height } = target.bounds;
         await this.#page.mouse.click(x + width / 2, y + height / 2);
@@ -401,7 +402,7 @@ export class BrowserAdapter implements Adapter {
     await this.#run('waitFor', async () => {
       if (opts.query) {
         await this.#page
-          .locator(opts.query)
+          .locator(normalizeQuery(opts.query))
           .first()
           .waitFor({ state: 'visible', timeout: opts.timeout });
       }
@@ -435,8 +436,13 @@ export class BrowserAdapter implements Adapter {
 
   /** Build, scope, filter, and cap the normalized node list shared by `find`/`readState`. */
   async #collect(opts: Query, defaultLimit?: number): Promise<Node[]> {
-    const selector = opts.query ?? DEFAULT_SELECTOR;
-    const scope = typeof opts.within === 'string' ? this.#page.locator(opts.within) : this.#page;
+    // Agent queries are role+name / plain text (what the tree shows), not raw CSS —
+    // normalize them onto a Playwright engine; an absent query reads the default set.
+    const selector = opts.query ? normalizeQuery(opts.query) : DEFAULT_SELECTOR;
+    const scope =
+      typeof opts.within === 'string'
+        ? this.#page.locator(normalizeQuery(opts.within))
+        : this.#page;
     let nodes = await scope.locator(selector).evaluateAll<RawNode[]>(NODE_EXTRACTOR);
 
     if (opts.within && typeof opts.within !== 'string') {

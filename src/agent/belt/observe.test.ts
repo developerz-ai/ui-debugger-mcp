@@ -62,16 +62,57 @@ const sampleNode: Node = {
   enabled: true,
 };
 
-test('tree → routes to readState, returns nodes + count', async () => {
+test('tree → routes to readState, returns nodes + count + a ready target', async () => {
   const { adapter } = fakeAdapter({ nodes: [sampleNode] });
   const res = await runObserve(adapter, { kind: 'tree' });
-  expect(res).toEqual({ kind: 'tree', count: 1, nodes: [sampleNode] });
+  expect(res).toEqual({
+    kind: 'tree',
+    count: 1,
+    nodes: [{ ...sampleNode, target: 'role=button[name="Save" i]' }],
+  });
 });
 
-test('tree fields → projects only the requested columns', async () => {
+test('tree fields → projects only the requested columns, still attaches a target', async () => {
   const { adapter } = fakeAdapter({ nodes: [sampleNode] });
   const res = await runObserve(adapter, { kind: 'tree', fields: ['role', 'name'] });
-  expect(res).toEqual({ kind: 'tree', count: 1, nodes: [{ role: 'button', name: 'Save' }] });
+  expect(res).toEqual({
+    kind: 'tree',
+    count: 1,
+    nodes: [{ role: 'button', name: 'Save', target: 'role=button[name="Save" i]' }],
+  });
+});
+
+test('tree → disambiguates repeated role+name with >> nth in document order', async () => {
+  const dup: Node = { ...sampleNode, name: 'Add to cart' };
+  const { adapter } = fakeAdapter({ nodes: [dup, dup, dup] });
+  const res = await runObserve(adapter, { kind: 'tree', fields: ['name'] });
+  const targets = (res as { nodes: Array<{ target?: string }> }).nodes.map((n) => n.target);
+  expect(targets).toEqual([
+    'role=button[name="Add to cart" i]',
+    'role=button[name="Add to cart" i] >> nth=1',
+    'role=button[name="Add to cart" i] >> nth=2',
+  ]);
+});
+
+test('tree → non-ARIA named node falls back to a text target', async () => {
+  const div: Node = { role: 'generic', name: 'Hello', bounds: sampleNode.bounds, enabled: true };
+  const { adapter } = fakeAdapter({ nodes: [div] });
+  const res = await runObserve(adapter, { kind: 'tree', fields: ['role'] });
+  expect((res as { nodes: Array<{ target?: string }> }).nodes[0]?.target).toBe('text=Hello');
+});
+
+test('tree scoped by within or filters → omits target (unscoped replay could miss)', async () => {
+  const scoped = await runObserve(fakeAdapter({ nodes: [sampleNode] }).adapter, {
+    kind: 'tree',
+    within: 'main',
+  });
+  expect((scoped as { nodes: Array<{ target?: string }> }).nodes[0]?.target).toBeUndefined();
+
+  const filtered = await runObserve(fakeAdapter({ nodes: [sampleNode] }).adapter, {
+    kind: 'tree',
+    filters: { visible_eq: true },
+  });
+  expect((filtered as { nodes: Array<{ target?: string }> }).nodes[0]?.target).toBeUndefined();
 });
 
 test('tree forwards query/filters/limit/within to the adapter', async () => {
