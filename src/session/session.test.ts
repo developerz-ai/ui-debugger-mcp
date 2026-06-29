@@ -464,3 +464,100 @@ test('start may be called only once', async () => {
   expect(() => session.start(async () => undefined)).toThrow(AgentError);
   await run;
 });
+
+// --- post-verdict summarize --------------------------------------------------
+
+test('summarize is called and its result written when the driver left summary empty', async () => {
+  const store = makeStore();
+  let summarizeCalled = false;
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    summarize: async (findings) => {
+      summarizeCalled = true;
+      expect(findings.status).toBe('passed'); // settled verdict passed in
+      return 'one visual glitch on the login page';
+    },
+  });
+
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({
+      status: 'passed',
+      steps: [],
+      bugs: [],
+      visual: [],
+      // no summary written by the driver
+    });
+  });
+
+  expect(session.status).toBe('passed');
+  expect(summarizeCalled).toBe(true);
+  const findings = await store.readFindings();
+  expect(findings.summary).toBe('one visual glitch on the login page');
+  expect(findings.status).toBe('passed'); // status preserved in write-back
+});
+
+test('summarize is skipped when the driver already wrote a non-empty summary', async () => {
+  const store = makeStore();
+  let summarizeCalled = false;
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    summarize: async () => {
+      summarizeCalled = true;
+      return 'should not be called';
+    },
+  });
+
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({
+      status: 'passed',
+      steps: [],
+      bugs: [],
+      visual: [],
+      summary: 'driver wrote this summary itself',
+    });
+  });
+
+  expect(session.status).toBe('passed');
+  expect(summarizeCalled).toBe(false);
+  expect((await store.readFindings()).summary).toBe('driver wrote this summary itself');
+});
+
+test('summarize is not called when no summarizer is wired', async () => {
+  const store = makeStore();
+  // makeSession() wires no summarize option
+  const session = makeSession();
+
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'passed', steps: [], bugs: [], visual: [] });
+  });
+
+  expect(session.status).toBe('passed');
+  // No summary written — the driver left it absent and we had no summarizer.
+  expect((await store.tryReadFindings())?.summary).toBeUndefined();
+});
+
+test('a summarize failure does not block teardown (fail-soft)', async () => {
+  const store = makeStore();
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    summarize: async () => {
+      throw new Error('summary model exploded');
+    },
+  });
+
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'passed', steps: [], bugs: [], visual: [] });
+  });
+
+  // Verdict stands; teardown was not blocked.
+  expect(session.status).toBe('passed');
+});
