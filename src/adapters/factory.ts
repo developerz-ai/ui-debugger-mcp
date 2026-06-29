@@ -4,13 +4,14 @@
  * Maps config targets (`web`, `desktop`, `mobile`, …) to their adapter protocols
  * (CDP browser, X11-Wayland, ADB). Throws {@link TargetNotFoundError} if the target
  * name doesn't exist in the config; throws {@link AdapterError} for unimplemented
- * adapters (desktop/android not yet wired). Only `browser` (CDP) is operational.
+ * adapters (android not yet wired). `browser` (CDP) and `desktop` (X11) are operational.
  */
 
 import type { Config } from '../config/schema.js';
 import { AdapterError, TargetNotFoundError } from '../errors.js';
 import { BrowserAdapter, type BrowserAdapterInit } from './browser/browser-adapter.js';
 import type { Adapter } from './contract.js';
+import { DesktopAdapter } from './desktop/desktop-adapter.js';
 
 /**
  * Create an adapter for a named target from the resolved config.
@@ -40,7 +41,8 @@ export async function createAdapter(
       return BrowserAdapter.create({ config: target, profileDir, onLog });
 
     case 'desktop':
-      throw new AdapterError('desktop adapter not implemented');
+      // Desktop is managed-only (no attach handle), so `profileDir`/`onLog` don't apply.
+      return DesktopAdapter.create({ config: target });
 
     case 'android':
       throw new AdapterError('android adapter not implemented');

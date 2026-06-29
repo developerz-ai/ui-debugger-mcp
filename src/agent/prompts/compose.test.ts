@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { composeSystemPrompt } from './compose.js';
 import { DEBUG_AGENT_BASE_PROMPT } from './debug-agent.js';
+import { DESKTOP_ADDENDUM_PROMPT } from './desktop-addendum.js';
 import { WEB_ADDENDUM_PROMPT } from './web-addendum.js';
 
 test('composeSystemPrompt: includes the base debug-agent prompt', () => {
@@ -12,6 +13,13 @@ test('composeSystemPrompt: includes the base debug-agent prompt', () => {
 test('composeSystemPrompt: includes the web addendum for target=web', () => {
   const prompt = composeSystemPrompt({ target: 'web', story: 'Test the login flow.' });
   expect(prompt).toContain(WEB_ADDENDUM_PROMPT.slice(0, 80));
+});
+
+test('composeSystemPrompt: includes the desktop addendum for target=desktop', () => {
+  const prompt = composeSystemPrompt({ target: 'desktop', story: 'Open the settings dialog.' });
+  expect(prompt).toContain(DESKTOP_ADDENDUM_PROMPT.slice(0, 80));
+  // Not the web one — addenda are mutually exclusive per target.
+  expect(prompt).not.toContain(WEB_ADDENDUM_PROMPT.slice(0, 80));
 });
 
 test('composeSystemPrompt: includes the story', () => {

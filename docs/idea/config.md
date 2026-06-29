@@ -74,7 +74,9 @@ Per-project. Lives in the repo, travels with it. Describes the app + targets.
     },
     "desktop": {
       "adapter": "desktop",
-      "launch": "my-desktop-app"
+      "launch": "my-desktop-app",                  // command the server runs (managed)
+      "window": { "title": "My Desktop App" },     // which window to drive (WM_NAME/WM_CLASS); omit → launched window
+      "display": null                              // X11 DISPLAY, e.g. ":99" for Xvfb; null = inherit env
     },
     "mobile": {
       "adapter": "android",                        // ADB-driven (uiautomator + screencap)

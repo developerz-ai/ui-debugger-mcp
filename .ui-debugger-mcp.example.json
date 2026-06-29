@@ -17,7 +17,9 @@
     },
     "desktop": {
       "adapter": "desktop",
-      "launch": "my-desktop-app"
+      "launch": "my-desktop-app",
+      "window": { "title": "My Desktop App" },
+      "display": null
     },
     "mobile": {
       "adapter": "android",

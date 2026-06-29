@@ -29,10 +29,22 @@ export const WebTargetSchema = z.strictObject({
   cdpUrl: z.url().nullish(), // set → attach over CDP, server does NOT start/stop it
 });
 
-/** Desktop target — reserved (X11/Wayland adapter not yet driven). */
-const DesktopTargetSchema = z.strictObject({
+/**
+ * Which window to drive once the app is up. Matched by WM properties
+ * (X11: xdotool `--name`/`--class`; AT-SPI: application name). Omit a field to
+ * leave it unconstrained; omit the whole object to drive the launched window.
+ */
+const WindowMatchSchema = z.strictObject({
+  title: z.string().optional(), // WM_NAME / title substring
+  class: z.string().optional(), // WM_CLASS
+});
+
+/** Desktop target — X11/Wayland adapter (reserved; not yet driven). Managed launch. */
+export const DesktopTargetSchema = z.strictObject({
   adapter: z.literal('desktop'),
-  launch: z.string(),
+  launch: z.string(), // command that starts the app (managed)
+  window: WindowMatchSchema.optional(), // which window to drive; omit → the launched window
+  display: z.string().nullish(), // X11 DISPLAY, e.g. ":99" for Xvfb; null = inherit env
 });
 
 /** Android target — reserved (ADB adapter not yet driven). */
@@ -59,5 +71,6 @@ export const ConfigSchema = z.strictObject({
 
 export type Models = z.infer<typeof ModelsSchema>;
 export type WebTarget = z.infer<typeof WebTargetSchema>;
+export type DesktopTarget = z.infer<typeof DesktopTargetSchema>;
 export type Target = z.infer<typeof TargetSchema>;
 export type Config = z.infer<typeof ConfigSchema>;

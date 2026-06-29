@@ -1,6 +1,12 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { ConfigSchema, ModelsSchema, TargetSchema, WebTargetSchema } from './schema.js';
+import {
+  ConfigSchema,
+  DesktopTargetSchema,
+  ModelsSchema,
+  TargetSchema,
+  WebTargetSchema,
+} from './schema.js';
 
 const example = JSON.parse(
   readFileSync(new URL('../../.ui-debugger-mcp.example.json', import.meta.url), 'utf8'),
@@ -35,6 +41,33 @@ test('WebTargetSchema: executablePath and cdpUrl accept null', () => {
   });
   expect(parsed.executablePath).toBeNull();
   expect(parsed.cdpUrl).toBeNull();
+});
+
+test('DesktopTargetSchema: launch required; window match and display optional', () => {
+  const base = { adapter: 'desktop', launch: 'my-app' };
+  expect(DesktopTargetSchema.safeParse(base).success).toBe(true); // minimal still valid
+  expect(DesktopTargetSchema.safeParse({ adapter: 'desktop' }).success).toBe(false); // launch required
+
+  const parsed = DesktopTargetSchema.parse({
+    ...base,
+    window: { title: 'My App', class: 'my-app' },
+    display: ':99',
+  });
+  expect(parsed.window?.title).toBe('My App');
+  expect(parsed.display).toBe(':99');
+});
+
+test('DesktopTargetSchema: display accepts null, strict rejects unknown keys', () => {
+  expect(
+    DesktopTargetSchema.safeParse({ adapter: 'desktop', launch: 'a', display: null }).success,
+  ).toBe(true);
+  expect(
+    DesktopTargetSchema.safeParse({ adapter: 'desktop', launch: 'a', window: { role: 'x' } })
+      .success,
+  ).toBe(false); // window match is strict too
+  expect(DesktopTargetSchema.safeParse({ adapter: 'desktop', launch: 'a', bogus: 1 }).success).toBe(
+    false,
+  );
 });
 
 test('TargetSchema: discriminates desktop and android, rejects unknown adapters', () => {

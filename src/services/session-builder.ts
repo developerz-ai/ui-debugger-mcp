@@ -113,15 +113,21 @@ function withToolLog(name: string, t: Tool, log: (line: string) => void): Tool {
   };
 }
 
-/** Map a config adapter kind to its prompt addendum target. Only browser/web ships today. */
+/** Map a config adapter kind to its prompt addendum target. Browser + desktop ship; android pending. */
 function addendumTarget(adapter: Target['adapter']): TargetName {
   if (adapter === 'browser') return 'web';
-  throw new AdapterError(`no prompt addendum for adapter '${adapter}' (desktop/android not wired)`);
+  if (adapter === 'desktop') return 'desktop';
+  throw new AdapterError(`no prompt addendum for adapter '${adapter}' (android not wired)`);
 }
 
-/** The address `open()` navigates to — the URL for a web target. */
+/**
+ * The address `open()` hands the adapter: the URL to navigate to (web), or the
+ * window-title hint (desktop — empty when `window` is unset, so the launched
+ * window is driven). The managed launch command itself lives in the target config.
+ */
 function openAddress(target: Target): string {
   if (target.adapter === 'browser') return target.url;
+  if (target.adapter === 'desktop') return target.window?.title ?? '';
   throw new AdapterError(`adapter '${target.adapter}' has no open target (not wired)`);
 }
 
