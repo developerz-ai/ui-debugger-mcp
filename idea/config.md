@@ -29,7 +29,11 @@ Per-project. Lives in the repo, travels with it. Describes the app + targets.
 
 ```jsonc
 {
-  "model": "openrouter/anthropic/claude-...",   // small-agent model, swappable
+  "models": {                                    // per-role, swappable — see models.md
+    "driver": "openrouter/...",                  // fast text — controls (blind)
+    "vision": "openrouter/...",                  // multimodal — describes screenshots
+    "summary": "openrouter/..."                  // optional — compress findings
+  },
   "workspace": "./tmp/ui-debugger-mcp",
   "targets": {
     "web": {

@@ -1,5 +1,9 @@
 {
-  "model": "openrouter/anthropic/claude-sonnet-4-6",
+  "models": {
+    "driver": "openrouter/anthropic/claude-haiku-4-5",
+    "vision": "openrouter/anthropic/claude-sonnet-4-6",
+    "summary": "openrouter/anthropic/claude-haiku-4-5"
+  },
   "workspace": "./tmp/ui-debugger-mcp",
   "targets": {
     "web": {

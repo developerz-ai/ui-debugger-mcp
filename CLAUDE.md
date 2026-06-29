@@ -6,6 +6,11 @@ A smart agent hands a goal (a "story") to a small fast agent inside this server.
 The small agent drives browser/desktop, gathers evidence, reports findings.
 Smart agent fixes code, asks again. Loop until the UI works. No human clicking.
 
+**Goal: stuff WORKS + LOOKS NICE.** Three actors cooperate (`idea/models.md`):
+- **smart-ass** — the boss (Claude/caller): sets goals, fixes code, loops.
+- **fast guy** — the driver (fast, text-only, blind): controls the target.
+- **vision guy** — the eyes (multimodal): describes screenshots, judges looks.
+
 ## Response Rules
 - Execute. No preamble.
 - Lead with action or answer.
@@ -25,8 +30,9 @@ Smart agent fixes code, asks again. Loop until the UI works. No human clicking.
 ## Architecture
 - `src/main.ts` — boot stdio MCP server.
 - `src/mcp/` — MCP server, tool defs (few fat tools, NOT one-per-action).
-- `src/agent/` — small debug agent (Vercel AI SDK loop, OpenRouter model).
-  - `prompts/` — OUR system prompts (in-repo, versioned, tested). Provider-agnostic. Never rely on a 3rd-party model's defaults.
+- `src/agent/` — debug agent (Vercel AI SDK loop). The **fast guy** (driver) +
+  the **vision guy** (eyes via `look`). Models per role via OpenRouter.
+  - `prompts/` — OUR system prompts (in-repo, versioned, tested). Provider-agnostic. Never rely on a 3rd-party model's defaults. Teaches the bits + why CDP.
 - `src/adapters/` — target control behind one shared contract.
   - `browser/` — web via CDP (headless default).
   - `desktop/` — X11/Wayland windows. Covers desktop app AND mobile emulator.
@@ -59,8 +65,9 @@ Never ship click/type/screenshot as separate tools. That floods context.
 Findings carry BOTH functional bugs AND visual/UX feedback ("how it looks").
 
 Two tool layers (see `idea/mcp-tools.md`): outer = few conversational MCP tools
-(smart Claude). Inner = the debug agent's belt (`observe`/`act`/`report`),
+(smart Claude). Inner = the debug agent's belt (`observe`/`act`/`look`/`report`),
 SQL-like, heavily parameterized (`query`/`fields`/`filters`), one `act` not six.
+`look` = the eyes: sends a screenshot to the **vision guy** for visual judgment.
 
 ## Config split
 - `.mcp.json` — how to LAUNCH server (command, model API key). Gitignored. Secret.
@@ -68,13 +75,14 @@ SQL-like, heavily parameterized (`query`/`fields`/`filters`), one `act` not six.
 
 `.ui-debugger-mcp.json` shape:
 ```
-model:   "openrouter/..."         small-agent model
+models:  { driver, vision, summary? }   per-role, OpenRouter — see idea/models.md
 targets:
-  web:     { adapter: "browser", url, headless, debugLogin }
-  desktop: { adapter: "x11", launch }
-  mobile:  { adapter: "x11", launch, window }
+  web:     { adapter: "browser", url, headless, debugLogin, executablePath, profile, cdpUrl }
+  desktop: { adapter: "desktop", launch }
+  mobile:  { adapter: "android", avd, emulatorPath, adbSerial }
 workspace: "./tmp/ui-debugger-mcp"
 ```
+managed vs attach: `cdpUrl` (web) / `adbSerial` (android) → attach, never start/stop.
 
 ## Per-project workspace
 `./tmp/ui-debugger-mcp/<project>/`
@@ -127,5 +135,6 @@ Web → DOM. Desktop/mobile → a11y tree, fall back to vision/screenshots.
 - `idea/desktop-control.md` — Linux tooling: X11/Wayland input, screenshots, AT-SPI, mobile.
 - `idea/agent-loop.md` — story → findings loop.
 - `idea/mcp-tools.md` — two tool layers, SQL-like params, in-repo system prompts.
+- `idea/models.md` — the three actors (smart-ass / fast guy / vision guy), `look`, why CDP.
 - `idea/config.md` — `.mcp.json` + `.ui-debugger-mcp.json`.
 - `idea/workspace.md` — per-project space + logs.

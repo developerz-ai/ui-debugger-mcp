@@ -71,15 +71,19 @@ parameterized** — treat each protocol like **SQL/REST, not RPC.** The bible:
 heavily parameterized — one SELECT, one GET, dozens of knobs. That's the same
 shape MCP tools should have."* So: a handful of verbs, lots of composable params.
 
-| Tool | Shape | Maps to adapter |
-|------|-------|-----------------|
+| Tool | Shape | Maps to / routes |
+|------|-------|------------------|
 | `observe` | `{ kind, query?, fields?, filters?, limit? }` | `readState` / `screenshot` |
 | `act`     | discriminated union: `click \| type \| key \| scroll \| navigate \| wait` `{ target, ... }` | `find` + `click`/`type`/`waitFor`/`open` |
+| `look`    | `{ question?, expect? }` → `{ description, matches?, issues[] }` | **vision model** (see [`models.md`](models.md)) |
 | `report`  | `{ bugs[], visual[], steps[], summary }` (Zod) | → surfaced via `get_findings` |
 
 - **One `act`, not six tools.** `act({action:"click", target})` beats
   `click_element` / `fill_input` / `press_key` — gold-standards discriminated-union.
 - **One `observe`, not four.** `kind` selects tree / screenshot / console / network.
+- **`look` is the eyes.** The driver is a fast **blind text model**; `look` sends
+  the screenshot to a **vision model** that describes / judges how it looks and
+  answers questions. Blind-driver + sighted-describer — see [`models.md`](models.md).
 - **`report` is the bridge.** Structured, Zod-validated; exactly what outer
   `get_findings` returns. No prose parsing.
 
