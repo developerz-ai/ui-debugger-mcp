@@ -386,6 +386,35 @@ test('close aborts the in-flight loop, waits for it, then releases the adapter',
   expect(await store.tryReadFindings()).toBeNull(); // abort is the verdict — nothing surfaced
 });
 
+test('close forces failed even if the loop resolves with a verdict after abort', async () => {
+  const store = makeStore();
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+  });
+
+  // Loop observes the abort signal and resolves cleanly (no reject) after writing
+  // a passing verdict — the race the guard closes.
+  session.start(async (ctx) => {
+    await new Promise<void>((resolve) => {
+      ctx.signal.addEventListener('abort', () => resolve(), { once: true });
+    });
+    await ctx.progress.writeFindings({
+      status: 'passed',
+      steps: [],
+      bugs: [],
+      visual: [],
+      summary: 'all good',
+    });
+  });
+
+  await session.close();
+
+  expect(session.status).toBe('failed'); // aborted run settles failed, not the written verdict
+});
+
 test('an agent crash settles failed and surfaces the error (with its trail) into findings', async () => {
   const store = makeStore();
   const session = new Session({

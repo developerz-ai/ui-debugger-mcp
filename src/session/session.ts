@@ -177,6 +177,13 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
         progress: this.#findingsStore,
         signal: this.#abort.signal,
       });
+      // Aborted by `close()` but the loop resolved anyway (observed the signal and
+      // returned instead of rejecting): honor the teardown contract — an aborted run
+      // settles `failed`, never the verdict it may have written just before close.
+      if (this.#abort.signal.aborted) {
+        this.#status = 'failed';
+        return;
+      }
       this.#status = await this.#verdict();
     } catch (error) {
       this.#status = 'failed';
