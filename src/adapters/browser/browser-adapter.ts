@@ -1,0 +1,423 @@
+/**
+ * Browser adapter — drives a Chrome page over CDP via Playwright.
+ *
+ * Two lifecycles (see `idea/adapters.md`):
+ *   - **managed** (default): launch a persistent context with the per-project
+ *     profile; we OWN start/stop. `executablePath` picks the binary, else system
+ *     Chrome (`channel`) — `playwright-core` ships no bundled browser.
+ *   - **attach**: connect to an already-running browser over CDP (`cdpUrl`) and
+ *     NEVER start/stop it — `close()` only disconnects.
+ *
+ * Implements the shared {@link Adapter} contract over the DOM/a11y: every element
+ * normalizes to a {@link Node} (role/name/bounds/enabled) via one batched in-page
+ * extraction. Console/network capture is wired by the CDP capture module (next).
+ *
+ * Fails loud — every Playwright call is wrapped to throw {@link AdapterError},
+ * never a silent fallback.
+ */
+
+import { URL } from 'node:url';
+import type { Browser, BrowserContext, Page } from 'playwright-core';
+import { chromium } from 'playwright-core';
+import type { WebTarget } from '../../config/schema.js';
+import { AdapterError } from '../../errors.js';
+import type {
+  Adapter,
+  Bounds,
+  ConsoleEntry,
+  Filters,
+  FilterValue,
+  NetworkEntry,
+  Node,
+  NodeRef,
+  Query,
+  WaitOptions,
+} from '../contract.js';
+
+/** System Chrome channel used when no explicit `executablePath` is configured. */
+const DEFAULT_CHANNEL = 'chrome';
+
+/** Default cap on `readState` so the tree stays small (overridable via `limit`). */
+const DEFAULT_LIMIT = 200;
+
+/** Interactive + semantic elements `readState` surfaces when no `query` is given. */
+const DEFAULT_SELECTOR =
+  'a[href], button, input, select, textarea, [role], [tabindex], [onclick], [contenteditable="true"], summary, label, h1, h2, h3, h4, h5, h6';
+
+/** Whitelisted `filters` keys for this adapter — anything else is rejected, not ignored. */
+export const NODE_FILTER_KEYS = ['visible_eq', 'enabled_eq', 'role_in', 'name_contains'] as const;
+
+/** A {@link Node} plus the computed `visible` flag backing the `visible_eq` filter. */
+export interface RawNode extends Node {
+  visible: boolean;
+}
+
+/**
+ * Minimal in-page element shape. The DOM lib is off project-wide (Node/Bun only),
+ * so we type the handful of members the extractor touches; annotations are erased
+ * at runtime, so this never reaches the browser.
+ */
+interface DomEl {
+  tagName: string;
+  textContent: string | null;
+  disabled?: boolean;
+  labels?: ArrayLike<DomEl> | null;
+  ownerDocument: { getElementById(id: string): DomEl | null };
+  getAttribute(name: string): string | null;
+  hasAttribute(name: string): boolean;
+  getBoundingClientRect(): { x: number; y: number; width: number; height: number };
+}
+
+/**
+ * Browser-side element → {@link RawNode} extractor. Playwright serializes this and
+ * runs it in the page, so it MUST stay self-contained: no module references, only
+ * its params and nested locals. One batched call powers both `find` and
+ * `readState`.
+ */
+const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
+  const clean = (s: string | null | undefined): string => (s ?? '').replace(/\s+/g, ' ').trim();
+
+  const implicitRole = (el: DomEl): string => {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'a') return el.hasAttribute('href') ? 'link' : 'generic';
+    if (tag === 'select') return 'combobox';
+    if (tag === 'textarea') return 'textbox';
+    if (tag === 'input') {
+      const type = (el.getAttribute('type') ?? 'text').toLowerCase();
+      if (type === 'checkbox' || type === 'radio') return type;
+      if (type === 'range') return 'slider';
+      if (type === 'button' || type === 'submit' || type === 'reset' || type === 'image') {
+        return 'button';
+      }
+      return 'textbox';
+    }
+    if (tag === 'button') return 'button';
+    if (tag === 'img') return 'img';
+    if (tag === 'nav') return 'navigation';
+    if (tag === 'main') return 'main';
+    if (tag === 'form') return 'form';
+    if (
+      tag === 'h1' ||
+      tag === 'h2' ||
+      tag === 'h3' ||
+      tag === 'h4' ||
+      tag === 'h5' ||
+      tag === 'h6'
+    ) {
+      return 'heading';
+    }
+    return tag;
+  };
+
+  const accessibleName = (el: DomEl): string => {
+    const label = clean(el.getAttribute('aria-label'));
+    if (label) return label;
+    const labelledby = el.getAttribute('aria-labelledby');
+    if (labelledby) {
+      const text = clean(
+        labelledby
+          .split(/\s+/)
+          .map((id) => el.ownerDocument.getElementById(id)?.textContent ?? '')
+          .join(' '),
+      );
+      if (text) return text;
+    }
+    if (el.labels && el.labels.length > 0) {
+      const text = clean(
+        Array.from(el.labels)
+          .map((l) => l.textContent ?? '')
+          .join(' '),
+      );
+      if (text) return text;
+    }
+    const placeholder = clean(el.getAttribute('placeholder'));
+    if (placeholder) return placeholder;
+    const alt = clean(el.getAttribute('alt'));
+    if (alt) return alt;
+    const text = clean(el.textContent);
+    if (text) return text;
+    const value = clean(el.getAttribute('value'));
+    if (value) return value;
+    return clean(el.getAttribute('title'));
+  };
+
+  return elements.map((el) => {
+    const r = el.getBoundingClientRect();
+    return {
+      role: clean(el.getAttribute('role')) || implicitRole(el),
+      name: accessibleName(el),
+      bounds: {
+        x: Math.round(r.x),
+        y: Math.round(r.y),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+      },
+      enabled: el.disabled !== true && el.getAttribute('aria-disabled') !== 'true',
+      visible:
+        r.width > 0 &&
+        r.height > 0 &&
+        !el.hasAttribute('hidden') &&
+        el.getAttribute('aria-hidden') !== 'true',
+    };
+  });
+};
+
+/** Append the login-bypass query param (`?<param>=true`) when `debugLogin` is configured. */
+export function appendDebugLogin(target: string, debugLogin?: { param: string }): string {
+  if (!debugLogin) return target;
+  const url = new URL(target);
+  url.searchParams.set(debugLogin.param, 'true');
+  return url.toString();
+}
+
+function expectBoolean(key: string, value: FilterValue): boolean {
+  if (typeof value !== 'boolean') {
+    throw new AdapterError(`filter \`${key}\` expects a boolean`);
+  }
+  return value;
+}
+
+function expectString(key: string, value: FilterValue): string {
+  if (typeof value !== 'string') {
+    throw new AdapterError(`filter \`${key}\` expects a string`);
+  }
+  return value;
+}
+
+function expectStringArray(key: string, value: FilterValue): string[] {
+  if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
+    throw new AdapterError(`filter \`${key}\` expects a string[]`);
+  }
+  return value;
+}
+
+/**
+ * Apply the whitelisted node `filters` in JS. Throws {@link AdapterError} on an
+ * unknown key (no silent injection surface) or a wrong value type.
+ */
+export function applyNodeFilters(nodes: RawNode[], filters?: Filters): RawNode[] {
+  if (!filters) return nodes;
+  let out = nodes;
+  for (const [key, value] of Object.entries(filters)) {
+    switch (key) {
+      case 'visible_eq': {
+        const want = expectBoolean(key, value);
+        out = out.filter((n) => n.visible === want);
+        break;
+      }
+      case 'enabled_eq': {
+        const want = expectBoolean(key, value);
+        out = out.filter((n) => n.enabled === want);
+        break;
+      }
+      case 'role_in': {
+        const roles = expectStringArray(key, value);
+        out = out.filter((n) => roles.includes(n.role));
+        break;
+      }
+      case 'name_contains': {
+        const needle = expectString(key, value).toLowerCase();
+        out = out.filter((n) => n.name.toLowerCase().includes(needle));
+        break;
+      }
+      default:
+        throw new AdapterError(
+          `unknown filter \`${key}\` for browser adapter (allowed: ${NODE_FILTER_KEYS.join(', ')})`,
+        );
+    }
+  }
+  return out;
+}
+
+/** True when a node's center sits inside `region` — used to scope by a {@link Node} `within`. */
+function centerWithin(node: RawNode, region: Bounds): boolean {
+  const cx = node.bounds.x + node.bounds.width / 2;
+  const cy = node.bounds.y + node.bounds.height / 2;
+  return (
+    cx >= region.x &&
+    cx <= region.x + region.width &&
+    cy >= region.y &&
+    cy <= region.y + region.height
+  );
+}
+
+/** Drop the internal `visible` flag — the public contract returns plain {@link Node}s. */
+function toNode(node: RawNode): Node {
+  return { role: node.role, name: node.name, bounds: node.bounds, enabled: node.enabled };
+}
+
+interface AdapterHandles {
+  config: WebTarget;
+  context: BrowserContext;
+  page: Page;
+  browser: Browser | null;
+  mode: 'managed' | 'attach';
+}
+
+export interface BrowserAdapterInit {
+  /** Resolved web-target config (url, headless, debugLogin, cdpUrl, …). */
+  config: WebTarget;
+  /** Absolute persistent-profile dir for a managed launch; ignored when attaching. */
+  profileDir: string;
+}
+
+/**
+ * The web {@link Adapter}: a Playwright-driven Chrome page. Construct via
+ * {@link BrowserAdapter.create} (async launch/connect can't live in a constructor).
+ */
+export class BrowserAdapter implements Adapter {
+  readonly #config: WebTarget;
+  readonly #context: BrowserContext;
+  readonly #page: Page;
+  readonly #browser: Browser | null;
+  readonly #mode: 'managed' | 'attach';
+
+  private constructor(handles: AdapterHandles) {
+    this.#config = handles.config;
+    this.#context = handles.context;
+    this.#page = handles.page;
+    this.#browser = handles.browser;
+    this.#mode = handles.mode;
+  }
+
+  /** Open the adapter: attach over `cdpUrl` when set, else launch a managed persistent context. */
+  static async create(init: BrowserAdapterInit): Promise<BrowserAdapter> {
+    return init.config.cdpUrl
+      ? BrowserAdapter.#attach(init.config)
+      : BrowserAdapter.#launch(init.config, init.profileDir);
+  }
+
+  static async #launch(config: WebTarget, profileDir: string): Promise<BrowserAdapter> {
+    const context = await chromium.launchPersistentContext(profileDir, {
+      headless: config.headless,
+      ...(config.executablePath
+        ? { executablePath: config.executablePath }
+        : { channel: DEFAULT_CHANNEL }),
+    });
+    const page = context.pages()[0] ?? (await context.newPage());
+    return new BrowserAdapter({ config, context, page, browser: null, mode: 'managed' });
+  }
+
+  static async #attach(config: WebTarget): Promise<BrowserAdapter> {
+    if (!config.cdpUrl) {
+      throw new AdapterError('attach mode requires `cdpUrl`');
+    }
+    const browser = await chromium.connectOverCDP(config.cdpUrl);
+    const context = browser.contexts()[0] ?? (await browser.newContext());
+    const page = context.pages()[0] ?? (await context.newPage());
+    return new BrowserAdapter({ config, context, page, browser, mode: 'attach' });
+  }
+
+  async open(target: string): Promise<void> {
+    const url = appendDebugLogin(target, this.#config.debugLogin);
+    await this.#run('open', async () => {
+      await this.#page.goto(url);
+    });
+  }
+
+  async find(opts: Query): Promise<Node | null> {
+    return this.#run('find', async () => {
+      const nodes = await this.#collect({ ...opts, limit: 1 });
+      return nodes[0] ?? null;
+    });
+  }
+
+  async click(target: NodeRef): Promise<void> {
+    await this.#run('click', async () => {
+      if (typeof target === 'string') {
+        await this.#page.locator(target).first().click();
+        return;
+      }
+      const { x, y, width, height } = target.bounds;
+      await this.#page.mouse.click(x + width / 2, y + height / 2);
+    });
+  }
+
+  async type(target: NodeRef, text: string): Promise<void> {
+    await this.#run('type', async () => {
+      if (typeof target === 'string') {
+        await this.#page.locator(target).first().fill(text);
+        return;
+      }
+      const { x, y, width, height } = target.bounds;
+      await this.#page.mouse.click(x + width / 2, y + height / 2);
+      await this.#page.keyboard.type(text);
+    });
+  }
+
+  async readState(opts: Query = {}): Promise<Node[]> {
+    return this.#run('readState', () => this.#collect(opts, DEFAULT_LIMIT));
+  }
+
+  async screenshot(): Promise<Uint8Array> {
+    return this.#run('screenshot', async () => {
+      const buffer = await this.#page.screenshot({ type: 'png' });
+      return new Uint8Array(buffer);
+    });
+  }
+
+  async waitFor(opts: WaitOptions): Promise<void> {
+    if (!opts.query && !opts.networkIdle) {
+      throw new AdapterError('waitFor requires `query` and/or `networkIdle`');
+    }
+    await this.#run('waitFor', async () => {
+      if (opts.query) {
+        await this.#page
+          .locator(opts.query)
+          .first()
+          .waitFor({ state: 'visible', timeout: opts.timeout });
+      }
+      if (opts.networkIdle) {
+        await this.#page.waitForLoadState('networkidle', { timeout: opts.timeout });
+      }
+    });
+  }
+
+  async console(): Promise<ConsoleEntry[]> {
+    throw new AdapterError('console capture is not wired yet (CDP capture module lands next)');
+  }
+
+  async network(): Promise<NetworkEntry[]> {
+    throw new AdapterError('network capture is not wired yet (CDP capture module lands next)');
+  }
+
+  async close(): Promise<void> {
+    await this.#run('close', async () => {
+      if (this.#mode === 'attach') {
+        // Attach: disconnect only — never stop a browser we did not start.
+        if (this.#browser) await this.#browser.close();
+        return;
+      }
+      // Managed: close the persistent context we own (stops the browser).
+      await this.#context.close();
+    });
+  }
+
+  /** Build, scope, filter, and cap the normalized node list shared by `find`/`readState`. */
+  async #collect(opts: Query, defaultLimit?: number): Promise<Node[]> {
+    const selector = opts.query ?? DEFAULT_SELECTOR;
+    const scope = typeof opts.within === 'string' ? this.#page.locator(opts.within) : this.#page;
+    let nodes = await scope.locator(selector).evaluateAll<RawNode[]>(NODE_EXTRACTOR);
+
+    if (opts.within && typeof opts.within !== 'string') {
+      const region = opts.within.bounds;
+      nodes = nodes.filter((n) => centerWithin(n, region));
+    }
+    nodes = applyNodeFilters(nodes, opts.filters);
+
+    const limit = opts.limit ?? defaultLimit;
+    if (limit !== undefined) nodes = nodes.slice(0, limit);
+    return nodes.map(toNode);
+  }
+
+  /** Run a Playwright call, re-throwing any failure as a loud {@link AdapterError}. */
+  async #run<T>(op: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (error) {
+      throw new AdapterError(
+        `browser.${op} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+}
