@@ -45,9 +45,11 @@ video**.
 
 - **Frames** = the session's screenshots, in order (one per meaningful step:
   navigate, click, the broken state, the fixed state).
-- **Subtitles** = a few words per frame describing what happened ("open login",
-  "submit form", "❌ button overlaps total", "✅ centred after fix"). Captions come
-  from the agent's step trail (`agent.log`) + visual notes from `look`.
+- **Subtitles** = a few words per frame, **present-continuous action + the real
+  element label**: "filling signup", "clicking 'Add item'", "submitting form",
+  "❌ total overlaps the button", "✅ centred after fix". Captions come from the
+  agent's step trail (`agent.log` — each `act` knows the target's text/label) +
+  visual notes from `look`. Short, human, scannable.
 - **Output** = `replay.mp4` + `captions.vtt` (ffmpeg-style stitch; subtitles
   burned in or sidecar).
 
