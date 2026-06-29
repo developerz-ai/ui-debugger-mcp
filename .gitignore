@@ -1,0 +1,16 @@
+node_modules/
+dist/
+tmp/
+*.log
+.DS_Store
+*.tsbuildinfo
+coverage/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# launch config holds the model API key — never commit
+.mcp.json
+
+# Claude Code runtime
+.claude/scheduled_tasks.lock

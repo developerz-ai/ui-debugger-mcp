@@ -1,0 +1,46 @@
+{
+  "name": "@developerz.ai/ui-debugger-mcp",
+  "version": "0.0.0",
+  "description": "Autonomous UI debugging MCP server. Give a goal; a fast agent drives the browser/desktop, finds bugs + visual issues, and reports back.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/developerz-ai/ui-debugger-mcp.git"
+  },
+  "homepage": "https://github.com/developerz-ai/ui-debugger-mcp#readme",
+  "bugs": "https://github.com/developerz-ai/ui-debugger-mcp/issues",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "bin": {
+    "ui-debugger-mcp": "./dist/main.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "start": "bun src/main.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.15",
+    "@types/bun": "^1.2.0",
+    "typescript": "^6.0.3"
+  }
+}

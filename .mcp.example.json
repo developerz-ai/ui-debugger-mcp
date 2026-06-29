@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "ui-debugger": {
+      "command": "npx",
+      "args": ["-y", "@developerz.ai/ui-debugger-mcp"],
+      "env": {
+        "OPENROUTER_API_KEY": "sk-or-..."
+      }
+    }
+  }
+}

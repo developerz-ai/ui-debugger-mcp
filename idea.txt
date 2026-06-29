@@ -1,0 +1,39 @@
+this project will be about this:
+
+i got a problem: the ai coding like claude can do very good right, but debugging is hard, really hard for UI. for code it's easy
+yeah there are instegration tests, unit, but still requires a human in the loop.
+
+i want to eliminate the human in loop with a mcp
+
+this mcp will be like a smart ai like claude talk with this mcp locally to debug stuff like in browser or in desktop
+we target linux, and x11/wayland - we do adapter based
+
+in browser we want cdp to control the browser
+
+
+so think about this flow:
+
+the smart agent has acess to the code for a PR, he did all the work,
+now polish comes into places, if stuff looks good, right, and correct
+
+the big agent generates a story for the small agent to debug the thing
+
+
+it can even do the debug on a produciton site if it has access
+
+to describe: i login to this page and then i can do X,Y,Z
+
+the small agent runnin in this
+
+so this mcp server expose like another agent specilaized in debugging
+
+uses ai agent sdk, js(bun, but it will be npm)
+
+and then ca be monitored by the smart agent
+
+the job of the fast agent is to control desktop/browser(headless by default)
+
+and come with feedback how to improve, then the smart agent makes changes and asks again if stuff works
+
+the smart agent is in a loop until the thing is working fine
+
