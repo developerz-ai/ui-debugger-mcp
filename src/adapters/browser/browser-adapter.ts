@@ -27,12 +27,15 @@ import type {
   ConsoleEntry,
   Filters,
   FilterValue,
+  LogQuery,
   NetworkEntry,
   Node,
   NodeRef,
   Query,
   WaitOptions,
 } from '../contract.js';
+import type { CaptureSink } from './cdp.js';
+import { CdpCapture } from './cdp.js';
 
 /** System Chrome channel used when no explicit `executablePath` is configured. */
 const DEFAULT_CHANNEL = 'chrome';
@@ -252,6 +255,7 @@ interface AdapterHandles {
   page: Page;
   browser: Browser | null;
   mode: 'managed' | 'attach';
+  capture: CdpCapture;
 }
 
 export interface BrowserAdapterInit {
@@ -259,6 +263,8 @@ export interface BrowserAdapterInit {
   config: WebTarget;
   /** Absolute persistent-profile dir for a managed launch; ignored when attaching. */
   profileDir: string;
+  /** Optional sink for streaming captured console/network lines to `findings-store`. */
+  onLog?: CaptureSink;
 }
 
 /**
@@ -271,6 +277,7 @@ export class BrowserAdapter implements Adapter {
   readonly #page: Page;
   readonly #browser: Browser | null;
   readonly #mode: 'managed' | 'attach';
+  readonly #capture: CdpCapture;
 
   private constructor(handles: AdapterHandles) {
     this.#config = handles.config;
@@ -278,16 +285,21 @@ export class BrowserAdapter implements Adapter {
     this.#page = handles.page;
     this.#browser = handles.browser;
     this.#mode = handles.mode;
+    this.#capture = handles.capture;
   }
 
   /** Open the adapter: attach over `cdpUrl` when set, else launch a managed persistent context. */
   static async create(init: BrowserAdapterInit): Promise<BrowserAdapter> {
     return init.config.cdpUrl
-      ? BrowserAdapter.#attach(init.config)
-      : BrowserAdapter.#launch(init.config, init.profileDir);
+      ? BrowserAdapter.#attach(init.config, init.onLog)
+      : BrowserAdapter.#launch(init.config, init.profileDir, init.onLog);
   }
 
-  static async #launch(config: WebTarget, profileDir: string): Promise<BrowserAdapter> {
+  static async #launch(
+    config: WebTarget,
+    profileDir: string,
+    onLog?: CaptureSink,
+  ): Promise<BrowserAdapter> {
     const context = await chromium.launchPersistentContext(profileDir, {
       headless: config.headless,
       ...(config.executablePath
@@ -295,17 +307,26 @@ export class BrowserAdapter implements Adapter {
         : { channel: DEFAULT_CHANNEL }),
     });
     const page = context.pages()[0] ?? (await context.newPage());
-    return new BrowserAdapter({ config, context, page, browser: null, mode: 'managed' });
+    const capture = BrowserAdapter.#startCapture(page, context, onLog);
+    return new BrowserAdapter({ config, context, page, browser: null, mode: 'managed', capture });
   }
 
-  static async #attach(config: WebTarget): Promise<BrowserAdapter> {
+  static async #attach(config: WebTarget, onLog?: CaptureSink): Promise<BrowserAdapter> {
     if (!config.cdpUrl) {
       throw new AdapterError('attach mode requires `cdpUrl`');
     }
     const browser = await chromium.connectOverCDP(config.cdpUrl);
     const context = browser.contexts()[0] ?? (await browser.newContext());
     const page = context.pages()[0] ?? (await context.newPage());
-    return new BrowserAdapter({ config, context, page, browser, mode: 'attach' });
+    const capture = BrowserAdapter.#startCapture(page, context, onLog);
+    return new BrowserAdapter({ config, context, page, browser, mode: 'attach', capture });
+  }
+
+  /** Wire console/network capture onto the live page/context before the first navigation. */
+  static #startCapture(page: Page, context: BrowserContext, onLog?: CaptureSink): CdpCapture {
+    const capture = new CdpCapture({ page, context, sink: onLog });
+    capture.start();
+    return capture;
   }
 
   async open(target: string): Promise<void> {
@@ -373,15 +394,17 @@ export class BrowserAdapter implements Adapter {
     });
   }
 
-  async console(): Promise<ConsoleEntry[]> {
-    throw new AdapterError('console capture is not wired yet (CDP capture module lands next)');
+  async console(opts?: LogQuery): Promise<ConsoleEntry[]> {
+    return this.#capture.console(opts);
   }
 
-  async network(): Promise<NetworkEntry[]> {
-    throw new AdapterError('network capture is not wired yet (CDP capture module lands next)');
+  async network(opts?: LogQuery): Promise<NetworkEntry[]> {
+    return this.#capture.network(opts);
   }
 
   async close(): Promise<void> {
+    // Detach capture first so no events fire mid-teardown.
+    this.#capture.stop();
     await this.#run('close', async () => {
       if (this.#mode === 'attach') {
         // Attach: disconnect only — never stop a browser we did not start.
