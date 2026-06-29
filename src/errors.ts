@@ -74,3 +74,11 @@ export class FindingsError extends UiDebuggerError {
     Object.setPrototypeOf(this, FindingsError.prototype);
   }
 }
+
+export class McpServerError extends UiDebuggerError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'McpServerError';
+    Object.setPrototypeOf(this, McpServerError.prototype);
+  }
+}
