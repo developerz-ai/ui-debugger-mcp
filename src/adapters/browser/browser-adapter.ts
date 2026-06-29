@@ -72,6 +72,13 @@ interface DomEl {
 }
 
 /**
+ * In-page `window.getComputedStyle`, typed locally (the DOM lib is off project-wide).
+ * Resolves to the page global at runtime — the extractor below is serialized into
+ * the page, so this stays a free identifier, never a module reference.
+ */
+declare function getComputedStyle(el: DomEl): { display: string; visibility: string };
+
+/**
  * Browser-side element → {@link RawNode} extractor. Playwright serializes this and
  * runs it in the page, so it MUST stay self-contained: no module references, only
  * its params and nested locals. One batched call powers both `find` and
@@ -146,6 +153,7 @@ const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
 
   return elements.map((el) => {
     const r = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
     return {
       role: clean(el.getAttribute('role')) || implicitRole(el),
       name: accessibleName(el),
@@ -159,6 +167,8 @@ const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
       visible:
         r.width > 0 &&
         r.height > 0 &&
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
         !el.hasAttribute('hidden') &&
         el.getAttribute('aria-hidden') !== 'true',
     };
@@ -300,6 +310,10 @@ export class BrowserAdapter implements Adapter {
     profileDir: string,
     onLog?: CaptureSink,
   ): Promise<BrowserAdapter> {
+    // Still CDP: Playwright drives Chromium exclusively over the DevTools Protocol
+    // (here a CDP pipe; `#attach` uses a CDP WebSocket). A persistent context is the
+    // supported way to own a Chrome process WITH the per-project profile — both
+    // managed and attach speak the same protocol, only the transport differs.
     const context = await chromium.launchPersistentContext(profileDir, {
       headless: config.headless,
       ...(config.executablePath
@@ -307,7 +321,7 @@ export class BrowserAdapter implements Adapter {
         : { channel: DEFAULT_CHANNEL }),
     });
     const page = context.pages()[0] ?? (await context.newPage());
-    const capture = BrowserAdapter.#startCapture(page, context, onLog);
+    const capture = BrowserAdapter.#startCapture(page, onLog);
     return new BrowserAdapter({ config, context, page, browser: null, mode: 'managed', capture });
   }
 
@@ -318,13 +332,13 @@ export class BrowserAdapter implements Adapter {
     const browser = await chromium.connectOverCDP(config.cdpUrl);
     const context = browser.contexts()[0] ?? (await browser.newContext());
     const page = context.pages()[0] ?? (await context.newPage());
-    const capture = BrowserAdapter.#startCapture(page, context, onLog);
+    const capture = BrowserAdapter.#startCapture(page, onLog);
     return new BrowserAdapter({ config, context, page, browser, mode: 'attach', capture });
   }
 
-  /** Wire console/network capture onto the live page/context before the first navigation. */
-  static #startCapture(page: Page, context: BrowserContext, onLog?: CaptureSink): CdpCapture {
-    const capture = new CdpCapture({ page, context, sink: onLog });
+  /** Wire console/network capture onto the live page before the first navigation. */
+  static #startCapture(page: Page, onLog?: CaptureSink): CdpCapture {
+    const capture = new CdpCapture({ page, sink: onLog });
     capture.start();
     return capture;
   }
@@ -355,13 +369,16 @@ export class BrowserAdapter implements Adapter {
   }
 
   async type(target: NodeRef, text: string): Promise<void> {
+    // Same semantics for both NodeRef forms: focus the target, then type into it
+    // (the contract is "focuses it first"). A selector focuses via click rather
+    // than `fill()` so it appends like the coordinate path instead of replacing.
     await this.#run('type', async () => {
       if (typeof target === 'string') {
-        await this.#page.locator(target).first().fill(text);
-        return;
+        await this.#page.locator(target).first().click();
+      } else {
+        const { x, y, width, height } = target.bounds;
+        await this.#page.mouse.click(x + width / 2, y + height / 2);
       }
-      const { x, y, width, height } = target.bounds;
-      await this.#page.mouse.click(x + width / 2, y + height / 2);
       await this.#page.keyboard.type(text);
     });
   }

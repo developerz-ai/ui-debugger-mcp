@@ -27,7 +27,7 @@
  * is exercised: open · find · click · readState · screenshot · console · network.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -137,14 +137,34 @@ const FIXTURE_HTML = `<!DOCTYPE html>
     if (profileDir) rmSync(profileDir, { recursive: true, force: true });
   });
 
+  // Per-test setup: every case starts from a freshly loaded fixture so no test
+  // depends on another having run first (order-independent, safe to rerun in
+  // isolation). The fixture's `console.error` re-fires on each load.
+  beforeEach(async () => {
+    await adapter.open(`http://localhost:${server.port}/`);
+    await adapter.waitFor({ query: '#go', timeout: 10_000 });
+  }, 15_000);
+
+  // Click the button and let the triggered fetch settle, so the network buffer
+  // holds the `/api/missing` 404 the network tests assert on — each test that
+  // needs it calls this rather than relying on the click test running first.
+  async function clickAndSettle(): Promise<void> {
+    const node = await adapter.find({ query: '#go' });
+    if (!node) throw new Error('button not found');
+    await adapter.click(node);
+    await adapter.waitFor({ networkIdle: true, timeout: 10_000 });
+  }
+
   // -------------------------------------------------------------------------
   // open
   // -------------------------------------------------------------------------
 
   test('open: navigates to the fixture and waits for the button', async () => {
+    // Re-navigate explicitly (not relying on beforeEach) to assert open() itself.
     await adapter.open(`http://localhost:${server.port}/`);
     // waitFor confirms the button is visible — implicitly asserts open() worked.
     await adapter.waitFor({ query: '#go', timeout: 10_000 });
+    expect(await adapter.find({ query: '#go' })).not.toBeNull();
   }, 15_000);
 
   // -------------------------------------------------------------------------
@@ -223,14 +243,7 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   // -------------------------------------------------------------------------
 
   test('click: button click updates the page and triggers a fetch', async () => {
-    const node = await adapter.find({ query: '#go' });
-    expect(node).not.toBeNull();
-    if (!node) throw new Error('button not found');
-
-    await adapter.click(node);
-    // Wait until the in-flight fetch settles so the network entry is captured.
-    await adapter.waitFor({ networkIdle: true, timeout: 10_000 });
-
+    await clickAndSettle();
     // The click handler sets #status to 'clicked'.
     const status = await adapter.find({ query: '#status' });
     expect(status?.name).toBe('clicked');
@@ -241,6 +254,7 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   // -------------------------------------------------------------------------
 
   test('network: captures the 404 response from /api/missing', async () => {
+    await clickAndSettle();
     const entries = await adapter.network({ filters: { url_contains: '/api/missing' } });
     expect(entries.length).toBeGreaterThan(0);
 
@@ -251,6 +265,7 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   });
 
   test('network: status_gte filter narrows to error responses', async () => {
+    await clickAndSettle();
     const all = await adapter.network();
     const errors = await adapter.network({ filters: { status_gte: 400 } });
     // Must be a proper subset — at least the fixture 404, possibly the page itself.

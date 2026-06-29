@@ -8,7 +8,11 @@
  *      exceptions never surface as console messages, but the contract says
  *      console capture covers them — so we fold them in)
  *   - `page.on('requestfailed')` → {@link NetworkEntry} (`status: 0`, `ok: false`)
- *   - `context.on('response')`   → {@link NetworkEntry} (covers 4xx/5xx too)
+ *   - `page.on('response')`      → {@link NetworkEntry} (covers 4xx/5xx too)
+ *
+ * Every listener is scoped to the SELECTED page, not the context — an attach or
+ * persistent session can hold unrelated tabs, and their traffic must not leak
+ * into this run's `network()`.
  *
  * Each captured entry is ALSO streamed line-by-line to an optional {@link CaptureSink}
  * (the session layer wires it to `findings-store`'s `logs/console.log` /
@@ -21,7 +25,7 @@
  * {@link AdapterError}, never a silent ignore.
  */
 
-import type { BrowserContext, ConsoleMessage, Page, Request, Response } from 'playwright-core';
+import type { ConsoleMessage, Page, Request, Response } from 'playwright-core';
 import { AdapterError } from '../../errors.js';
 import type { ConsoleEntry, Filters, FilterValue, LogQuery, NetworkEntry } from '../contract.js';
 
@@ -51,10 +55,8 @@ export const NETWORK_FILTER_KEYS = [
 export type CaptureSink = (channel: 'console' | 'network', line: string) => void;
 
 export interface CdpCaptureInit {
-  /** Page that emits `console`/`pageerror`/`requestfailed`. */
+  /** Page that emits `console`/`pageerror`/`requestfailed`/`response`. */
   page: Page;
-  /** Context that emits `response` (covers every page in the context). */
-  context: BrowserContext;
   /** Optional log sink — each new entry is streamed here as a line. */
   sink?: CaptureSink;
   /** Injected clock (epoch ms) for deterministic capture timestamps; default `Date.now`. */
@@ -225,10 +227,18 @@ export function filterNetwork(entries: NetworkEntry[], filters?: Filters): Netwo
   return out;
 }
 
-/** Reverse to newest-first and apply `limit` — the shared `console`/`network` read tail. */
+/**
+ * Reverse to newest-first and apply `limit` — the shared `console`/`network` read
+ * tail. Rejects bad limits loud: `slice` would silently coerce `-1` to "all but
+ * the oldest" and `NaN` to `[]`, so non-negative integers only.
+ */
 function newestFirst<T>(filtered: T[], limit?: number): T[] {
   const out = [...filtered].reverse();
-  return limit !== undefined ? out.slice(0, limit) : out;
+  if (limit === undefined) return out;
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new AdapterError('`limit` must be a non-negative integer');
+  }
+  return out.slice(0, limit);
 }
 
 /**
@@ -238,7 +248,6 @@ function newestFirst<T>(filtered: T[], limit?: number): T[] {
  */
 export class CdpCapture {
   readonly #page: Page;
-  readonly #context: BrowserContext;
   readonly #sink: CaptureSink | undefined;
   readonly #now: () => number;
   readonly #cap: number;
@@ -251,7 +260,6 @@ export class CdpCapture {
 
   constructor(init: CdpCaptureInit) {
     this.#page = init.page;
-    this.#context = init.context;
     this.#sink = init.sink;
     this.#now = init.now ?? (() => Date.now());
     this.#cap = init.cap ?? DEFAULT_BUFFER_CAP;
@@ -264,12 +272,12 @@ export class CdpCapture {
     this.#page.on('console', this.#onConsole);
     this.#page.on('pageerror', this.#onPageError);
     this.#page.on('requestfailed', this.#onRequestFailed);
-    this.#context.on('response', this.#onResponse);
+    this.#page.on('response', this.#onResponse);
     this.#detachers.push(
       () => this.#page.off('console', this.#onConsole),
       () => this.#page.off('pageerror', this.#onPageError),
       () => this.#page.off('requestfailed', this.#onRequestFailed),
-      () => this.#context.off('response', this.#onResponse),
+      () => this.#page.off('response', this.#onResponse),
     );
   }
 

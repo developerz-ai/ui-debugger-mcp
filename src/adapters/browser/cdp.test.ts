@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { BrowserContext, Page } from 'playwright-core';
+import type { Page } from 'playwright-core';
 import { AdapterError } from '../../errors.js';
 import type { ConsoleEntry, NetworkEntry } from '../contract.js';
 import {
@@ -16,7 +16,7 @@ import {
 
 type Listener = (arg: unknown) => void;
 
-/** Minimal event emitter standing in for a Playwright `Page`/`BrowserContext`. */
+/** Minimal event emitter standing in for a Playwright `Page`. */
 class FakeEmitter {
   readonly #listeners = new Map<string, Listener[]>();
 
@@ -83,16 +83,14 @@ const fakeFailed = (o: {
 
 function setup(opts?: { now?: () => number; cap?: number; sink?: CaptureSink }) {
   const page = new FakeEmitter();
-  const context = new FakeEmitter();
   const cap = new CdpCapture({
     page: page as unknown as Page,
-    context: context as unknown as BrowserContext,
     now: opts?.now ?? (() => 1000),
     cap: opts?.cap,
     sink: opts?.sink,
   });
   cap.start();
-  return { page, context, cap };
+  return { page, cap };
 }
 
 // --- normalizeConsoleLevel --------------------------------------------------
@@ -267,9 +265,9 @@ test('folds uncaught pageerror into a console error entry', () => {
 });
 
 test('captures responses incl 4xx/5xx with ok flag', () => {
-  const { context, cap } = setup();
-  context.emit('response', fakeResponse({ url: 'http://x/ok', status: 200, ok: true }));
-  context.emit(
+  const { page, cap } = setup();
+  page.emit('response', fakeResponse({ url: 'http://x/ok', status: 200, ok: true }));
+  page.emit(
     'response',
     fakeResponse({
       method: 'POST',
@@ -309,12 +307,12 @@ test('limit caps results to the most recent', () => {
 });
 
 test('filters apply through console()/network()', () => {
-  const { page, context, cap } = setup();
+  const { page, cap } = setup();
   page.emit('console', fakeConsole('log', 'noise'));
   page.emit('console', fakeConsole('error', 'boom'));
   expect(cap.console({ filters: { level_eq: 'error' } }).map((e) => e.text)).toEqual(['boom']);
-  context.emit('response', fakeResponse({ url: 'http://x/a', status: 200, ok: true }));
-  context.emit('response', fakeResponse({ url: 'http://x/b', status: 404, ok: false }));
+  page.emit('response', fakeResponse({ url: 'http://x/a', status: 200, ok: true }));
+  page.emit('response', fakeResponse({ url: 'http://x/b', status: 404, ok: false }));
   expect(cap.network({ filters: { status_gte: 400 } }).map((e) => e.status)).toEqual([404]);
 });
 
@@ -328,9 +326,9 @@ test('ring buffer caps retained entries, dropping oldest', () => {
 
 test('streams formatted lines to the sink as entries arrive', () => {
   const lines: Array<[string, string]> = [];
-  const { page, context } = setup({ now: () => 0, sink: (ch, line) => lines.push([ch, line]) });
+  const { page } = setup({ now: () => 0, sink: (ch, line) => lines.push([ch, line]) });
   page.emit('console', fakeConsole('warning', 'hi', '', 0, 0));
-  context.emit('response', fakeResponse({ url: 'http://x/a', status: 200, ok: true }));
+  page.emit('response', fakeResponse({ url: 'http://x/a', status: 200, ok: true }));
   expect(lines).toEqual([
     ['console', '1970-01-01T00:00:00.000Z WARN hi'],
     ['network', '1970-01-01T00:00:00.000Z GET http://x/a → 200 [fetch]'],
@@ -338,16 +336,16 @@ test('streams formatted lines to the sink as entries arrive', () => {
 });
 
 test('stop detaches every listener', () => {
-  const { page, context, cap } = setup();
-  expect(page.count() + context.count()).toBe(4);
+  const { page, cap } = setup();
+  expect(page.count()).toBe(4);
   cap.stop();
-  expect(page.count() + context.count()).toBe(0);
+  expect(page.count()).toBe(0);
   page.emit('console', fakeConsole('log', 'late'));
   expect(cap.console()).toEqual([]);
 });
 
 test('start is idempotent (no double subscription)', () => {
-  const { page, context, cap } = setup();
+  const { page, cap } = setup();
   cap.start();
-  expect(page.count() + context.count()).toBe(4);
+  expect(page.count()).toBe(4);
 });
