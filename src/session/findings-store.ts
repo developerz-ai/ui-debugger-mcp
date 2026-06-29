@@ -13,7 +13,7 @@
  * `FindingsError` — never a silent fallback.
  */
 
-import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { access, appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FindingsError } from '../errors.js';
 import type { Findings } from '../findings/schema.js';
@@ -83,6 +83,20 @@ export class FindingsStore {
       throw new FindingsError(`findings.json is invalid: ${issues}`);
     }
     return result.data;
+  }
+
+  /**
+   * Read + validate `findings.json` if it exists yet; `null` if the agent has
+   * not written one. Absence is normal (early in a run); a present-but-corrupt
+   * file still throws `FindingsError` via `readFindings` — never swallowed.
+   */
+  async tryReadFindings(): Promise<Findings | null> {
+    try {
+      await access(this.#paths.findingsJson);
+    } catch {
+      return null;
+    }
+    return this.readFindings();
   }
 
   /** Append a line to `logs/<channel>.log` (newline added if absent). Returns its path. */
