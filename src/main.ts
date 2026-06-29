@@ -2,6 +2,7 @@
 import { resolveModels } from './agent/models.js';
 import { createOpenRouterProvider } from './agent/provider.js';
 import { runStatus, runStop } from './cli/control.js';
+import { runHelp, runVersion } from './cli/help.js';
 import { runInit } from './cli/init.js';
 import { loadConfig } from './config/load.js';
 import { NAME, VERSION } from './index.js';
@@ -15,8 +16,20 @@ import { FileStatePort } from './session/state-file.js';
 import { ensureWorkspace, workspacePaths } from './session/workspace.js';
 
 async function main(): Promise<void> {
-  // Dispatch CLI subcommands before loading project config (status/stop need no key).
+  // Dispatch help/version and CLI subcommands before loading project config (none need API key).
   const [, , subcmd] = process.argv;
+
+  // Help and version exit immediately.
+  if (subcmd === '--help' || subcmd === '-h') {
+    runHelp();
+    return;
+  }
+  if (subcmd === '--version' || subcmd === '-v') {
+    runVersion();
+    return;
+  }
+
+  // Subcommands: init, status, stop.
   if (subcmd === 'init' || subcmd === 'status' || subcmd === 'stop') {
     try {
       if (subcmd === 'init') runInit();
