@@ -34,13 +34,17 @@ Smart agent fixes code, asks again. Loop until the UI works. No human clicking.
 - `src/services/` — business logic. Thin handlers, logic here.
 
 ## Targets (one project, many)
-| Target  | Adapter            | Reads          |
-|---------|--------------------|----------------|
-| web     | browser (CDP)      | DOM            |
-| desktop | x11/wayland window | a11y tree / vision |
-| mobile  | x11/wayland (emulator window) | a11y tree / vision |
+| Target  | Adapter        | Protocol            | Reads              |
+|---------|----------------|---------------------|--------------------|
+| web     | browser        | CDP                 | DOM                |
+| desktop | desktop        | x11/wayland input   | a11y tree / vision |
+| mobile  | android        | ADB (uiautomator)   | view hierarchy / vision |
 
-Two adapters cover three targets. Story names the target.
+Three adapters, one shared contract. Story names the target. iOS out of scope on Linux.
+
+Each adapter runs **managed** (server launches + owns the target) or **attach**
+(connect to a running one — `cdpUrl` for web, `adbSerial` for android — never
+start/stop it). Managed picks the binary via `executablePath`/`emulatorPath`.
 
 ## MCP tools (few, fat — not playwright-mcp)
 A **conversation**, not a remote control. Small agent owns the clicking loop.

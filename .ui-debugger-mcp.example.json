@@ -6,16 +6,20 @@
       "adapter": "browser",
       "url": "http://localhost:3000",
       "headless": true,
-      "debugLogin": { "param": "debug-ai" }
+      "debugLogin": { "param": "debug-ai" },
+      "executablePath": null,
+      "profile": "chrome-user-data",
+      "cdpUrl": null
     },
     "desktop": {
       "adapter": "desktop",
       "launch": "my-desktop-app"
     },
     "mobile": {
-      "adapter": "desktop",
-      "launch": "emulator @my-avd",
-      "window": "My App"
+      "adapter": "android",
+      "avd": "my-avd",
+      "emulatorPath": null,
+      "adbSerial": null
     }
   }
 }

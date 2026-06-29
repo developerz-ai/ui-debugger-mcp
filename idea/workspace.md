@@ -23,7 +23,7 @@ for that app. Keyed by the current dir.
 
 | Path                | Why |
 |---------------------|-----|
-| `chrome-user-data/` | Login survives runs. No re-auth each time. Works with `?debug-ai`. |
+| `chrome-user-data/` | Login survives runs. No re-auth each time. Works with `?debug-ai`. **Managed mode only** — in attach mode (`cdpUrl`) the browser keeps its own profile. |
 | `story.md`          | What was asked. Becomes the integration-test spec later. |
 | `screenshots/`      | Evidence for visual feedback; lets the smart agent judge too. |
 | `findings.json`     | The structured verdict. Smart agent reads this, not prose. |
