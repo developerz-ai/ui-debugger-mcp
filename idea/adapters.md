@@ -5,7 +5,7 @@ a mobile emulator. One **shared contract**; each adapter implements it.
 
 ## Targets (per project)
 
-A big project like `tesote.ai` exposes several:
+A big project can expose several:
 
 | Target  | Adapter            | Protocol / drives              | Reads state |
 |---------|--------------------|--------------------------------|-------------|

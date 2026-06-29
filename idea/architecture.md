@@ -56,7 +56,7 @@ See [`agent-loop.md`](agent-loop.md).
 
 ## Two adapters, three targets
 
-`tesote.ai` exposes web + desktop + mobile. Browser adapter drives web (CDP).
+A large app exposes web + desktop + mobile. Browser adapter drives web (CDP).
 Desktop adapter drives both the desktop app and the mobile emulator (both are
 just windows on the Linux desktop). See [`adapters.md`](adapters.md).
 

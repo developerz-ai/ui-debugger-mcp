@@ -62,10 +62,14 @@ Designed for **Claude controlling the whole thing**:
 3. RE-RUN "try again" → small agent confirms, or reports what remains
 4. TEST   Claude writes integration tests that lock the fix in
           (the story the small agent ran is a ready-made test spec)
+5. PR     the run's screenshots stitch into a captioned replay video;
+          Claude attaches it to the PR as evidence
 ```
 
 So a debug story doubles as a test spec: once it passes, Claude turns it into a
-real integration test so the bug can't come back.
+real integration test so the bug can't come back — and the same run yields a
+short **captioned video** of the flow working, attached to the PR (see
+[`workspace.md`](workspace.md#pr-replay-video)).
 
 ## Findings shape (what comes back)
 

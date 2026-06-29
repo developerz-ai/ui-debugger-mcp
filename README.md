@@ -8,7 +8,7 @@ AI coding agents (Claude, etc.) are great at writing code. They're bad at
 **knowing if the UI actually works**. For backend code there are unit and
 integration tests. For UI, a human still has to open the app, log in, click
 around, and report what's broken. That human-in-the-loop is slow, boring, and
-the main bottleneck when an entire product (like `tesote.ai`) is built by AI.
+the main bottleneck when an entire product is built by AI.
 
 ## The idea
 
@@ -40,7 +40,7 @@ Picture a **boss**, a **fast blind driver**, and a **describer with eyes**:
 
 ```
    ┌─────────────┐   MCP conversation    ┌──────────────────────────────────────┐
-   │  smart-ass  │  start_debug ───────▶ │        UI Debugger MCP server         │
+   │ smart agent │  start_debug ───────▶ │        UI Debugger MCP server         │
    │  (Claude)   │  send_message (live)  │                                       │
    │             │ ◀─────── get_findings │   ┌────────────┐     ┌────────────┐   │
    │ sets goals  │                       │   │  fast guy  │ look│ vision guy │   │
@@ -59,7 +59,7 @@ Picture a **boss**, a **fast blind driver**, and a **describer with eyes**:
                               └──────────────┴──────────────┴──────────────┘
 ```
 
-- **smart-ass** — the boss (Claude/caller). Sends a goal, reads findings, **fixes
+- **smart agent** — the boss (Claude/caller). Sends a goal, reads findings, **fixes
   the code**, loops. Stays high-level — never clicks.
 - **fast guy** — the driver. Fast, cheap, **text-only and blind**. Runs the
   click loop on structure (DOM / a11y tree / view hierarchy). Default: deepseek.
@@ -69,9 +69,13 @@ Picture a **boss**, a **fast blind driver**, and a **describer with eyes**:
 
 One goal: **the UI works *and* looks nice.** Full design in [`idea/`](idea/).
 
+Every run keeps its screenshots and stitches them into a short **captioned
+replay video** — Claude attaches it to the PR so a reviewer sees the flow working
+in ~10 seconds ([`idea/workspace.md`](idea/workspace.md#pr-replay-video)).
+
 ## Targets
 
-One project can expose several debug targets. `tesote.ai` has all three:
+One project can expose several debug targets. A large app can have all three:
 
 | Target  | Protocol / how it's driven                       | Reads |
 |---------|--------------------------------------------------|-------|
@@ -147,7 +151,7 @@ Early. This repo currently holds the design only — see [`idea/`](idea/).
 - [`idea/desktop-control.md`](idea/desktop-control.md) — Linux control tooling (X11/Wayland/mobile)
 - [`idea/agent-loop.md`](idea/agent-loop.md) — the story → findings loop
 - [`idea/mcp-tools.md`](idea/mcp-tools.md) — two tool layers, SQL-like params, in-repo prompts
-- [`idea/models.md`](idea/models.md) — the three actors (smart-ass / fast guy / vision guy)
+- [`idea/models.md`](idea/models.md) — the three actors (smart agent / fast guy / vision guy)
 - [`idea/config.md`](idea/config.md) — config files
 - [`idea/workspace.md`](idea/workspace.md) — per-project space + logs
 - [`CLAUDE.md`](CLAUDE.md) — instructions for AI agents working on this repo

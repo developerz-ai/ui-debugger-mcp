@@ -9,7 +9,9 @@ for that app. Keyed by the current dir.
 │                              (login, cookies, localStorage, prefs)
 ├── sessions/<id>/
 │   ├── story.md               the goal the smart agent gave
-│   ├── screenshots/           before / after / on-failure (+ per target)
+│   ├── screenshots/           ordered frames: NNN-step.png (+ per target)
+│   ├── replay.mp4             frames stitched into a captioned video (PR evidence)
+│   ├── captions.vtt           subtitle per frame — few words describing each step
 │   ├── findings.json          structured report back to the smart agent
 │   └── logs/
 │       ├── console.log        browser / app console
@@ -25,13 +27,37 @@ for that app. Keyed by the current dir.
 |---------------------|-----|
 | `chrome-user-data/` | Login survives runs. No re-auth each time. Works with `?debug-ai`. **Managed mode only** — in attach mode (`cdpUrl`) the browser keeps its own profile. |
 | `story.md`          | What was asked. Becomes the integration-test spec later. |
-| `screenshots/`      | Evidence for visual feedback; lets the smart agent judge too. |
+| `screenshots/`      | Ordered frames — evidence for visual feedback, and the raw material for the replay video. |
+| `replay.mp4`        | The run as a short captioned video — drop it in the PR (see below). |
+| `captions.vtt`      | One subtitle per frame; a few words describing each step. |
 | `findings.json`     | The structured verdict. Smart agent reads this, not prose. |
 | `console.log`       | JS errors a code-only agent can't see. |
 | `network.log`       | The 500s / hangs / bad payloads behind a broken UI. |
 | `agent.log`         | Why the small agent decided pass/fail. Auditable. |
 | `cdp.log`           | Last-resort protocol-level debugging. |
 | `state.json`        | Resume / inspect the cwd-keyed session. |
+
+## PR replay video
+
+The screenshots aren't throwaway — they're **kept and ordered** (`NNN-step.png`),
+and at the end of a run the session stitches them into a short **captioned
+video**.
+
+- **Frames** = the session's screenshots, in order (one per meaningful step:
+  navigate, click, the broken state, the fixed state).
+- **Subtitles** = a few words per frame describing what happened ("open login",
+  "submit form", "❌ button overlaps total", "✅ centred after fix"). Captions come
+  from the agent's step trail (`agent.log`) + visual notes from `look`.
+- **Output** = `replay.mp4` + `captions.vtt` (ffmpeg-style stitch; subtitles
+  burned in or sidecar).
+
+### Why — the PR drops the video
+
+When the loop ends and the smart agent opens the PR, it attaches `replay.mp4`.
+A reviewer (human or agent) watches the flow in ~10 seconds — *this is what the
+change does, here's it working* — instead of pulling the branch and clicking
+through. The evidence the human used to gather by hand is now a captioned clip,
+generated for free from a run that already happened.
 
 ## Rules
 

@@ -74,12 +74,12 @@ Per-project. Lives in the repo, travels with it. Describes the app + targets.
     },
     "desktop": {
       "adapter": "desktop",
-      "launch": "tesote-desktop"
+      "launch": "my-desktop-app"
     },
     "mobile": {
       "adapter": "android",                        // ADB-driven (uiautomator + screencap)
       // --- managed mode (default): server boots the emulator ---
-      "avd": "tesote",                             // emulator @tesote
+      "avd": "my-avd",                             // emulator @my-avd
       "emulatorPath": null,                        // null = auto-detect from SDK
       // --- attach mode: talk to an already-running device/emulator ---
       "adbSerial": null                            // e.g. "emulator-5554" or "host:5555" → attach, no start/stop

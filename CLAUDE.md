@@ -8,7 +8,7 @@ The small agent drives browser/desktop, gathers evidence, reports findings.
 Smart agent fixes code, asks again. Loop until the UI works. No human clicking.
 
 **Goal: stuff WORKS + LOOKS NICE.** Three actors cooperate (`idea/models.md`):
-- **smart-ass** — the boss (Claude/caller): sets goals, fixes code, loops.
+- **smart agent** — the boss (Claude/caller): sets goals, fixes code, loops.
 - **fast guy** — the driver (fast, text-only, blind): controls the target.
 - **vision guy** — the eyes (multimodal): describes screenshots, judges looks.
 
@@ -99,7 +99,7 @@ managed vs attach: `cdpUrl` (web) / `adbSerial` (android) → attach, never star
 - `logs/` — `console.log`, `network.log`, `agent.log`, `cdp.log`.
 - `state.json` — session keyed by cwd.
 
-## Login bypass (for tesote.ai et al)
+## Login bypass (captcha)
 Add `?debug-ai=true` escape hatch in the app under test. Skips **captcha only**,
 not auth. Gate behind `ALLOW_AI_DEBUG_LOGIN` env so it's off in prod.
 Captchas are the #1 blocker for headless agents.
@@ -143,6 +143,6 @@ Web → DOM. Desktop/mobile → a11y tree, fall back to vision/screenshots.
 - `idea/desktop-control.md` — Linux tooling: X11/Wayland input, screenshots, AT-SPI, mobile.
 - `idea/agent-loop.md` — story → findings loop.
 - `idea/mcp-tools.md` — two tool layers, SQL-like params, in-repo system prompts.
-- `idea/models.md` — the three actors (smart-ass / fast guy / vision guy), `look`, why CDP.
+- `idea/models.md` — the three actors (smart agent / fast guy / vision guy), `look`, why CDP.
 - `idea/config.md` — `.mcp.json` + `.ui-debugger-mcp.json`.
 - `idea/workspace.md` — per-project space + logs.

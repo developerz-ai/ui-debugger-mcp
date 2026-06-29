@@ -6,7 +6,7 @@ AI writes the code fine. AI can't tell if the **UI** works.
 
 Backend code has unit + integration tests. UI does not, really — a human still
 opens the app, logs in, clicks around, and says what's broken or ugly. When a
-whole product (`tesote.ai`) is built by AI, that human-in-the-loop is the
+whole product is built by AI, that human-in-the-loop is the
 bottleneck. It's slow, repetitive, and annoying.
 
 ## The idea

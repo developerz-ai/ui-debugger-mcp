@@ -1,20 +1,20 @@
 # Models — the three actors
 
-Three actors, plain terms: **the smart-ass, the fast guy, the vision guy.**
+Three actors, plain terms: **the smart agent, the fast guy, the vision guy.**
 
 | Nickname | Role | Where | Model | Sees pixels? |
 |----------|------|-------|-------|--------------|
-| **smart-ass** | the boss — sets goals, reads findings, **fixes the code**, loops | outside (Claude / caller) | the host's | via screenshots in findings |
+| **smart agent** | the boss — sets goals, reads findings, **fixes the code**, loops | outside (Claude / caller) | the host's | via screenshots in findings |
 | **fast guy** | the **driver** — controls browser/desktop/android, runs the click loop | in-server | `deepseek-v4-flash` (text) | **no — blind** |
 | **vision guy** | the **eyes** — describes screenshots, judges how it looks | in-server | `glm-5v-turbo` (image) | **yes** |
 
-The smart-ass talks to the in-server agent over MCP (a conversation). Inside,
+The smart agent talks to the in-server agent over MCP (a conversation). Inside,
 the fast guy drives blind and asks the vision guy for eyes when needed. Three
 specialists, each cheap at its job.
 
 **One goal: the UI WORKS *and* LOOKS NICE.** Fast guy proves it works (flows,
 console, network); vision guy proves it looks right (alignment, colour, spacing);
-smart-ass fixes the code until both pass, then writes the test. Functional +
+smart agent fixes the code until both pass, then writes the test. Functional +
 visual, every loop.
 
 ---
