@@ -9,7 +9,8 @@
  * `start()` kicks the debug agent loop off as a **background task** (non-blocking)
  * so the outer MCP tools stay live while it runs: `pushMessage()` injects work
  * (`send_message`) into the `inbox` the loop drains between steps, and `snapshot()`
- * reads the progress (`get_findings`) the loop flushes incrementally. When the
+ * reads the progress (`get_findings`) the loop flushes incrementally — optionally
+ * long-polling (`wait`) until the run settles its verdict. When the
  * loop concludes, the session settles `status` from `running` to the terminal
  * verdict the `report` step wrote to disk (`passed`/`failed`); a run aborted by
  * `close()` (`end_session`) settles as `failed`; an agent crash settles as
@@ -135,10 +136,20 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
    * Current findings view for `get_findings`: the persisted verdict (empty until
    * the loop writes one) with the live `status` overlaid. Pass `fields` to project
    * a subset (sparse read); omit for the whole findings object.
+   *
+   * Pass `wait` (ms) to long-poll: while the run is still `running`, the call
+   * blocks until the loop settles a terminal verdict or `wait` elapses (whichever
+   * comes first), then reads — so `get_findings` can wait out a near-done run
+   * instead of busy-polling. Omit `wait` (or pass `0`) to read immediately. A run
+   * that has already settled, or one not yet `start()`ed, returns at once.
    */
-  snapshot(): Promise<Findings>;
-  snapshot(fields: readonly SnapshotField[]): Promise<Partial<Findings>>;
-  async snapshot(fields?: readonly SnapshotField[]): Promise<Findings | Partial<Findings>> {
+  snapshot(fields?: undefined, wait?: number): Promise<Findings>;
+  snapshot(fields: readonly SnapshotField[], wait?: number): Promise<Partial<Findings>>;
+  async snapshot(
+    fields?: readonly SnapshotField[],
+    wait?: number,
+  ): Promise<Findings | Partial<Findings>> {
+    if (wait !== undefined && wait > 0) await this.#waitForVerdict(wait);
     const findings = await this.#currentFindings();
     if (!fields || fields.length === 0) return findings;
     return Object.fromEntries(
@@ -200,6 +211,31 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
       });
     } catch {
       // Best-effort surfacing — `status` is already `failed`, so the loud signal stands.
+    }
+  }
+
+  /**
+   * Block until the background run settles a terminal verdict or `timeoutMs`
+   * elapses, whichever comes first (the `snapshot` long-poll). No-op when the run
+   * already settled (status is no longer `running`) or was never `start()`ed
+   * (`#run` is null) — neither changes on its own, so there is nothing to wait
+   * for. The run promise never rejects (`#execute` folds failures into `status`),
+   * so the race is safe; the timer is always cleared so a fast verdict leaves no
+   * dangling handle.
+   */
+  async #waitForVerdict(timeoutMs: number): Promise<void> {
+    const run = this.#run;
+    if (run === null || this.#status !== 'running') return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        run,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 

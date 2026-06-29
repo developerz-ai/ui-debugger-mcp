@@ -147,6 +147,108 @@ test('snapshot with an empty fields list returns the whole verdict', async () =>
   expect(snap).toEqual({ status: 'running', steps: [], bugs: [], visual: [] });
 });
 
+// --- snapshot long-poll (wait) ----------------------------------------------
+
+test('snapshot(wait) long-polls until the run settles its verdict', async () => {
+  const session = makeSession();
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const run = session.start(async (ctx) => {
+    await gate;
+    await ctx.progress.writeFindings({
+      status: 'passed',
+      steps: [],
+      bugs: [],
+      visual: [],
+      summary: 'done',
+    });
+  });
+
+  // Settle the loop mid-poll; a generous timeout proves the call waited for it.
+  setTimeout(release, 10);
+  const snap = await session.snapshot(undefined, 1000);
+  expect(snap.status).toBe('passed');
+  expect(snap.summary).toBe('done');
+  await run;
+});
+
+test('snapshot(wait) returns the in-flight snapshot when no verdict lands in time', async () => {
+  const session = makeSession();
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let markWritten: () => void = () => undefined;
+  const written = new Promise<void>((resolve) => {
+    markWritten = resolve;
+  });
+  const run = session.start(async (ctx) => {
+    await ctx.progress.writeFindings({
+      status: 'running',
+      steps: [{ step: 'typed email', ok: true }],
+      bugs: [],
+      visual: [],
+    });
+    markWritten();
+    await gate; // never settles before the poll times out
+  });
+
+  await written;
+  const snap = await session.snapshot(undefined, 20);
+  expect(snap.status).toBe('running'); // timed out, not settled
+  expect(snap.steps).toEqual([{ step: 'typed email', ok: true }]);
+
+  release();
+  await run;
+});
+
+test('snapshot(wait) returns at once when the run already settled', async () => {
+  const session = makeSession();
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({
+      status: 'failed',
+      steps: [],
+      bugs: [{ kind: 'flow', detail: 'dead button' }],
+      visual: [],
+    });
+  });
+  // Already settled — a large timeout must not block.
+  const snap = await session.snapshot(undefined, 5000);
+  expect(snap.status).toBe('failed');
+});
+
+test('snapshot(wait) returns at once when the run was never started', async () => {
+  // No loop running, so the status can never change — do not hang on the timeout.
+  const snap = await makeSession().snapshot(undefined, 5000);
+  expect(snap).toEqual({ status: 'running', steps: [], bugs: [], visual: [] });
+});
+
+test('snapshot(fields, wait) projects fields after long-polling for the verdict', async () => {
+  const session = makeSession();
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const run = session.start(async (ctx) => {
+    await gate;
+    await ctx.progress.writeFindings({
+      status: 'passed',
+      steps: [],
+      bugs: [],
+      visual: [],
+      summary: 'all green',
+    });
+  });
+
+  setTimeout(release, 10);
+  const snap = await session.snapshot(['status', 'summary'], 1000);
+  expect(snap).toEqual({ status: 'passed', summary: 'all green' });
+  expect('bugs' in snap).toBe(false);
+  await run;
+});
+
 // --- close / manager integration --------------------------------------------
 
 test('close releases the adapter', async () => {
