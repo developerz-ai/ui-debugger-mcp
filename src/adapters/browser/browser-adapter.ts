@@ -32,6 +32,8 @@ import type {
   Node,
   NodeRef,
   Query,
+  ScrollDirection,
+  ScrollOptions,
   WaitOptions,
 } from '../contract.js';
 import type { CaptureSink } from './cdp.js';
@@ -43,6 +45,9 @@ const DEFAULT_CHANNEL = 'chrome';
 
 /** Default cap on `readState` so the tree stays small (overridable via `limit`). */
 const DEFAULT_LIMIT = 200;
+
+/** One wheel step (CSS px) when `scroll` is called without an explicit `amount` — page-ish. */
+const DEFAULT_SCROLL_STEP = 600;
 
 /** Interactive + semantic elements `readState` surfaces when no `query` is given. */
 const DEFAULT_SELECTOR =
@@ -182,6 +187,29 @@ export function appendDebugLogin(target: string, debugLogin?: { param: string })
   const url = new URL(target);
   url.searchParams.set(debugLogin.param, 'true');
   return url.toString();
+}
+
+/**
+ * Map a {@link ScrollDirection} + pixel `amount` onto Playwright wheel deltas
+ * `[deltaX, deltaY]` (the viewport scrolls toward that edge). Fails loud on an
+ * unrecognized direction — the switch is exhaustive over the union, so a bad
+ * value can only arrive from an unchecked boundary.
+ */
+export function scrollDelta(direction: ScrollDirection, amount: number): [number, number] {
+  switch (direction) {
+    case 'up':
+      return [0, -amount];
+    case 'down':
+      return [0, amount];
+    case 'left':
+      return [-amount, 0];
+    case 'right':
+      return [amount, 0];
+    default: {
+      const unreachable: never = direction;
+      throw new AdapterError(`unknown scroll direction: ${JSON.stringify(unreachable)}`);
+    }
+  }
 }
 
 function expectBoolean(key: string, value: FilterValue): boolean {
@@ -384,6 +412,32 @@ export class BrowserAdapter implements Adapter {
     });
   }
 
+  async pressKey(key: string): Promise<void> {
+    if (key.trim() === '') {
+      throw new AdapterError('pressKey requires a non-empty key');
+    }
+    // Playwright's `press` parses chords from the `+`-joined string (`Control+A`):
+    // it holds the modifiers while tapping the final key, and throws on an unknown
+    // key — both surfaced loud via `#run` (CDP `Input.dispatchKeyEvent` underneath).
+    await this.#run('pressKey', async () => {
+      await this.#page.keyboard.press(key);
+    });
+  }
+
+  async scroll(opts: ScrollOptions): Promise<void> {
+    const [dx, dy] = scrollDelta(opts.direction, opts.amount ?? DEFAULT_SCROLL_STEP);
+    await this.#run('scroll', async () => {
+      // Scope: park the cursor over the region first, so the wheel event targets the
+      // scrollable element under it instead of the viewport. No scope → wheel where
+      // the mouse already is (`Input.dispatchMouseEvent` of type `mouseWheel`).
+      if (opts.within !== undefined) {
+        const { x, y, width, height } = await this.#regionBox(opts.within);
+        await this.#page.mouse.move(x + width / 2, y + height / 2);
+      }
+      await this.#page.mouse.wheel(dx, dy);
+    });
+  }
+
   async readState(opts: Query = {}): Promise<Node[]> {
     return this.#run('readState', () => this.#collect(opts, DEFAULT_LIMIT));
   }
@@ -454,6 +508,16 @@ export class BrowserAdapter implements Adapter {
     const limit = opts.limit ?? defaultLimit;
     if (limit !== undefined) nodes = nodes.slice(0, limit);
     return nodes.map(toNode);
+  }
+
+  /** Resolve a scroll `within` scope to an on-screen rectangle (Node bounds, or a located selector). */
+  async #regionBox(within: NodeRef): Promise<Bounds> {
+    if (typeof within !== 'string') return within.bounds;
+    const box = await this.#page.locator(normalizeQuery(within)).first().boundingBox();
+    if (!box) {
+      throw new AdapterError(`scroll \`within\` target not found or not visible: ${within}`);
+    }
+    return box;
   }
 
   /** Run a Playwright call, re-throwing any failure as a loud {@link AdapterError}. */

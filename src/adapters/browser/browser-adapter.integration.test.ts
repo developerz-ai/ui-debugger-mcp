@@ -22,9 +22,12 @@
  *   - visible <button id="go">  — exercises find / click
  *   - `console.error('fixture-error')` on load  — exercises console capture
  *   - click handler fetches `/api/missing` (→ 404)  — exercises network capture
+ *   - keydown + scroll listeners mirror the last chord / scroll offset into the DOM
+ *     (`#lastkey`, `#scrolly`, `#boxscroll`)  — exercises pressKey / scroll
  *
  * Then headless Chromium is launched through BrowserAdapter and the full contract
- * is exercised: open · find · click · readState · screenshot · console · network.
+ * is exercised: open · find · click · type · pressKey · scroll · readState ·
+ * screenshot · console · network.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
@@ -33,6 +36,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { chromium } from 'playwright-core';
 import type { WebTarget } from '../../config/schema.js';
+import { AdapterError } from '../../errors.js';
 import { BrowserAdapter } from './browser-adapter.js';
 
 // ---------------------------------------------------------------------------
@@ -80,6 +84,13 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   <h1>Test Fixture</h1>
   <button id="go">Click me</button>
   <p id="status">ready</p>
+  <p id="lastkey">none</p>
+  <p id="scrolly">0</p>
+  <p id="boxscroll">0</p>
+  <div id="box" style="height:100px;overflow:auto;border:1px solid #000">
+    <div style="height:1200px">scrollable region</div>
+  </div>
+  <div style="height:3000px">page spacer</div>
   <script>
     // Fires immediately on load — captured by the console listener.
     console.error('fixture-error');
@@ -89,6 +100,25 @@ const FIXTURE_HTML = `<!DOCTYPE html>
       document.getElementById('status').textContent = 'clicked';
       fetch('/api/missing').catch(function() {});
     });
+
+    // Mirror the last key chord into the DOM — exercises pressKey (incl. modifiers).
+    document.addEventListener('keydown', function(e) {
+      var parts = [];
+      if (e.ctrlKey) parts.push('Control');
+      if (e.shiftKey) parts.push('Shift');
+      if (e.altKey) parts.push('Alt');
+      if (e.metaKey) parts.push('Meta');
+      if (['Control', 'Shift', 'Alt', 'Meta'].indexOf(e.key) === -1) parts.push(e.key);
+      document.getElementById('lastkey').textContent = parts.join('+');
+    });
+
+    // Mirror viewport + region scroll offsets into the DOM — exercises scroll.
+    window.addEventListener('scroll', function() {
+      document.getElementById('scrolly').textContent = String(Math.round(window.scrollY));
+    }, { passive: true });
+    document.getElementById('box').addEventListener('scroll', function(e) {
+      document.getElementById('boxscroll').textContent = String(Math.round(e.target.scrollTop));
+    }, { passive: true });
   </script>
 </body>
 </html>`;
@@ -155,6 +185,16 @@ const FIXTURE_HTML = `<!DOCTYPE html>
     await adapter.waitFor({ networkIdle: true, timeout: 10_000 });
   }
 
+  // Scroll/key effects land via async DOM events — poll a mirror node's text until
+  // the predicate holds (or give up, letting the assertion report the real value).
+  async function pollText(query: string, pred: (text: string) => boolean): Promise<void> {
+    for (let i = 0; i < 40; i++) {
+      const node = await adapter.find({ query });
+      if (node && pred(node.name)) return;
+      await Bun.sleep(25);
+    }
+  }
+
   // -------------------------------------------------------------------------
   // open
   // -------------------------------------------------------------------------
@@ -219,6 +259,47 @@ const FIXTURE_HTML = `<!DOCTYPE html>
     expect(bytes[1]).toBe(0x50); // 'P'
     expect(bytes[2]).toBe(0x4e); // 'N'
     expect(bytes[3]).toBe(0x47); // 'G'
+  });
+
+  // -------------------------------------------------------------------------
+  // pressKey
+  // -------------------------------------------------------------------------
+
+  test('pressKey: a plain key reaches the page', async () => {
+    await adapter.pressKey('Enter');
+    await pollText('#lastkey', (t) => t === 'Enter');
+    expect((await adapter.find({ query: '#lastkey' }))?.name).toBe('Enter');
+  });
+
+  test('pressKey: a chord holds the modifier while tapping the key', async () => {
+    await adapter.pressKey('Control+a');
+    await pollText('#lastkey', (t) => t === 'Control+a');
+    expect((await adapter.find({ query: '#lastkey' }))?.name).toBe('Control+a');
+  });
+
+  test('pressKey: an unknown key fails loud', async () => {
+    await expect(adapter.pressKey('NotARealKey')).rejects.toThrow(AdapterError);
+  });
+
+  test('pressKey: a blank key fails loud', async () => {
+    await expect(adapter.pressKey('   ')).rejects.toThrow(AdapterError);
+  });
+
+  // -------------------------------------------------------------------------
+  // scroll
+  // -------------------------------------------------------------------------
+
+  test('scroll: down moves the viewport', async () => {
+    await adapter.scroll({ direction: 'down' });
+    await pollText('#scrolly', (t) => Number(t) > 0);
+    expect(Number((await adapter.find({ query: '#scrolly' }))?.name)).toBeGreaterThan(0);
+  });
+
+  test('scroll: within scrolls the region, leaving the viewport put', async () => {
+    await adapter.scroll({ direction: 'down', within: '#box', amount: 200 });
+    await pollText('#boxscroll', (t) => Number(t) > 0);
+    expect(Number((await adapter.find({ query: '#boxscroll' }))?.name)).toBeGreaterThan(0);
+    expect(Number((await adapter.find({ query: '#scrolly' }))?.name)).toBe(0);
   });
 
   // -------------------------------------------------------------------------

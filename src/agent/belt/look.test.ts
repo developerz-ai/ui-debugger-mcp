@@ -17,6 +17,8 @@ function fakeAdapter(png: Uint8Array, order?: string[]): Adapter {
     find: async () => null,
     click: async () => {},
     type: async () => {},
+    pressKey: async () => {},
+    scroll: async () => {},
     readState: async () => [],
     screenshot: async () => {
       order?.push('screenshot');

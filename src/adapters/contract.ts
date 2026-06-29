@@ -98,6 +98,19 @@ export interface WaitOptions {
   timeout?: number;
 }
 
+/** Cardinal direction for {@link Adapter.scroll}; each adapter maps it to wheel/gesture deltas. */
+export type ScrollDirection = 'up' | 'down' | 'left' | 'right';
+
+/** How {@link Adapter.scroll} moves content — a {@link ScrollDirection} plus optional distance and scope. */
+export interface ScrollOptions {
+  /** Which way to move the content (the viewport scrolls toward this edge). */
+  direction: ScrollDirection;
+  /** Distance in CSS/device pixels; omit for one adapter-default page-ish step. */
+  amount?: number;
+  /** Scope — scroll inside this subtree/region instead of the viewport (a selector or {@link Node}). */
+  within?: NodeRef;
+}
+
 /** One console message captured from the target (CDP `console` + uncaught errors). */
 export interface ConsoleEntry {
   /** Normalized severity (`'warning'` collapses to `'warn'`). */
@@ -144,6 +157,12 @@ export interface Adapter {
 
   /** Type `text` into an element (focuses it first). */
   type(target: NodeRef, text: string): Promise<void>;
+
+  /** Press a key or chord on the focused element — `'Enter'` · `'Escape'` · `'Control+a'` (chords split on `+`). */
+  pressKey(key: string): Promise<void>;
+
+  /** Scroll the viewport — or a scoped region via {@link ScrollOptions.within} — one {@link ScrollDirection} step. */
+  scroll(opts: ScrollOptions): Promise<void>;
 
   /** Read the structured UI tree as normalized {@link Node}s (DOM · a11y tree · view hierarchy). */
   readState(opts?: Query): Promise<Node[]>;

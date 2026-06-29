@@ -1,6 +1,12 @@
 import { expect, test } from 'bun:test';
 import { AdapterError } from '../../errors.js';
-import { appendDebugLogin, applyNodeFilters, type RawNode } from './browser-adapter.js';
+import type { ScrollDirection } from '../contract.js';
+import {
+  appendDebugLogin,
+  applyNodeFilters,
+  type RawNode,
+  scrollDelta,
+} from './browser-adapter.js';
 
 // --- appendDebugLogin -------------------------------------------------------
 
@@ -84,4 +90,21 @@ test('applyNodeFilters throws on a wrong value type', () => {
   expect(() => applyNodeFilters([node({})], { visible_eq: 'yes' })).toThrow(AdapterError);
   expect(() => applyNodeFilters([node({})], { role_in: 'button' })).toThrow(AdapterError);
   expect(() => applyNodeFilters([node({})], { name_contains: 5 })).toThrow(AdapterError);
+});
+
+// --- scrollDelta ------------------------------------------------------------
+
+test('scrollDelta maps each direction onto signed wheel deltas', () => {
+  expect(scrollDelta('up', 600)).toEqual([0, -600]);
+  expect(scrollDelta('down', 600)).toEqual([0, 600]);
+  expect(scrollDelta('left', 600)).toEqual([-600, 0]);
+  expect(scrollDelta('right', 600)).toEqual([600, 0]);
+});
+
+test('scrollDelta scales by the given amount', () => {
+  expect(scrollDelta('down', 120)).toEqual([0, 120]);
+});
+
+test('scrollDelta throws on an unknown direction', () => {
+  expect(() => scrollDelta('diagonal' as ScrollDirection, 600)).toThrow(AdapterError);
 });
