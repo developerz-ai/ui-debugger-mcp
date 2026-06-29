@@ -66,3 +66,11 @@ export class ProviderError extends UiDebuggerError {
     Object.setPrototypeOf(this, ProviderError.prototype);
   }
 }
+
+export class FindingsError extends UiDebuggerError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'FindingsError';
+    Object.setPrototypeOf(this, FindingsError.prototype);
+  }
+}
