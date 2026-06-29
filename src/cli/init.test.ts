@@ -67,3 +67,15 @@ test('is idempotent (second init is a no-op)', () => {
   expect(readFileSync(join(TMP, '.ui-debugger-mcp.json'), 'utf8')).toBe(configBefore);
   expect(readFileSync(join(TMP, '.gitignore'), 'utf8')).toBe(gitignoreBefore);
 });
+
+test('does not write .mcp.json or any API key to disk (snippet is stdout-only)', () => {
+  runInit(TMP);
+  // The .mcp.json snippet is only printed, never written.
+  expect(existsSync(join(TMP, '.mcp.json'))).toBe(false);
+  // The project config written to disk contains no API key or secret.
+  const config = readFileSync(join(TMP, '.ui-debugger-mcp.json'), 'utf8');
+  expect(config).not.toContain('OPENAI_API_KEY');
+  expect(config).not.toContain('sk-');
+  // Placeholder in the snippet must remain a placeholder, not a real value.
+  expect(config).not.toContain('<your-key-here>');
+});
