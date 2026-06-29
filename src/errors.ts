@@ -51,6 +51,15 @@ export class AdapterError extends UiDebuggerError {
   }
 }
 
+/** A failed ADB invocation (android transport). Extends {@link AdapterError} so the agent loop catches it. */
+export class AdbError extends AdapterError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AdbError';
+    Object.setPrototypeOf(this, AdbError.prototype);
+  }
+}
+
 export class AgentError extends UiDebuggerError {
   constructor(message: string) {
     super(message);

@@ -25,7 +25,7 @@ import { createDebugAgent, runDebugLoop } from '../agent/loop.js';
 import { composeSystemPrompt, type TargetName } from '../agent/prompts/compose.js';
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
-import { AdapterError, TargetNotFoundError } from '../errors.js';
+import { TargetNotFoundError } from '../errors.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
 import { ensureSession, sessionPaths, type WorkspacePaths } from '../session/workspace.js';
@@ -113,22 +113,24 @@ function withToolLog(name: string, t: Tool, log: (line: string) => void): Tool {
   };
 }
 
-/** Map a config adapter kind to its prompt addendum target. Browser + desktop ship; android pending. */
+/** Map a config adapter kind to its prompt addendum target — one per shipped adapter. */
 function addendumTarget(adapter: Target['adapter']): TargetName {
   if (adapter === 'browser') return 'web';
   if (adapter === 'desktop') return 'desktop';
-  throw new AdapterError(`no prompt addendum for adapter '${adapter}' (android not wired)`);
+  return 'android';
 }
 
 /**
  * The address `open()` hands the adapter: the URL to navigate to (web), or the
  * window-title hint (desktop — empty when `window` is unset, so the launched
- * window is driven). The managed launch command itself lives in the target config.
+ * window is driven), or empty for android (boot the emulator / attach, then the
+ * agent launches the app itself via `act navigate` using the package/activity in
+ * the story). The managed launch command itself lives in the target config.
  */
 function openAddress(target: Target): string {
   if (target.adapter === 'browser') return target.url;
   if (target.adapter === 'desktop') return target.window?.title ?? '';
-  throw new AdapterError(`adapter '${target.adapter}' has no open target (not wired)`);
+  return '';
 }
 
 /** Split a free-text criteria blob into per-line rules; `undefined` when empty/absent. */
@@ -144,8 +146,8 @@ function splitCriteria(criteria: string | undefined): string[] | undefined {
 /**
  * Assemble a debug run: adapter + belt + composed prompt + loop runner, all bound
  * to a fresh {@link FindingsStore}. Throws {@link TargetNotFoundError} if `target`
- * is not configured and {@link AdapterError} for an unimplemented adapter — both
- * BEFORE any browser launches, so a bad request never leaks a process.
+ * is not configured — BEFORE any device or browser launches, so a bad request never
+ * leaks a process.
  */
 export async function buildSession(
   deps: SessionBuilderDeps,

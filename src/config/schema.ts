@@ -47,8 +47,8 @@ export const DesktopTargetSchema = z.strictObject({
   display: z.string().nullish(), // X11 DISPLAY, e.g. ":99" for Xvfb; null = inherit env
 });
 
-/** Android target — reserved (ADB adapter not yet driven). */
-const AndroidTargetSchema = z.strictObject({
+/** Android target — ADB adapter. Managed (boot `emulator @avd`) unless `adbSerial` attaches. */
+export const AndroidTargetSchema = z.strictObject({
   adapter: z.literal('android'),
   avd: z.string(),
   emulatorPath: z.string().nullish(), // null = auto-detect from SDK (managed)
@@ -72,5 +72,6 @@ export const ConfigSchema = z.strictObject({
 export type Models = z.infer<typeof ModelsSchema>;
 export type WebTarget = z.infer<typeof WebTargetSchema>;
 export type DesktopTarget = z.infer<typeof DesktopTargetSchema>;
+export type AndroidTarget = z.infer<typeof AndroidTargetSchema>;
 export type Target = z.infer<typeof TargetSchema>;
 export type Config = z.infer<typeof ConfigSchema>;

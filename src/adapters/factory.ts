@@ -3,12 +3,13 @@
  *
  * Maps config targets (`web`, `desktop`, `mobile`, …) to their adapter protocols
  * (CDP browser, X11-Wayland, ADB). Throws {@link TargetNotFoundError} if the target
- * name doesn't exist in the config; throws {@link AdapterError} for unimplemented
- * adapters (android not yet wired). `browser` (CDP) and `desktop` (X11) are operational.
+ * name doesn't exist in the config; throws {@link AdapterError} only for an unknown
+ * adapter kind. `browser` (CDP), `desktop` (X11) and `android` (ADB) are operational.
  */
 
 import type { Config } from '../config/schema.js';
 import { AdapterError, TargetNotFoundError } from '../errors.js';
+import { AndroidAdapter } from './android/android-adapter.js';
 import { BrowserAdapter, type BrowserAdapterInit } from './browser/browser-adapter.js';
 import type { Adapter } from './contract.js';
 import { DesktopAdapter } from './desktop/desktop-adapter.js';
@@ -45,7 +46,9 @@ export async function createAdapter(
       return DesktopAdapter.create({ config: target });
 
     case 'android':
-      throw new AdapterError('android adapter not implemented');
+      // Managed (boot `emulator @avd`) unless `adbSerial` attaches — `create` reads that
+      // off the config. No page profile or CDP log sink applies, so neither is threaded.
+      return AndroidAdapter.create({ config: target });
 
     default: {
       const unreachable: never = target;

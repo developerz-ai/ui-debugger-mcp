@@ -12,17 +12,19 @@
  *   4. Criteria (optional)       (pass/fail rules for this run)
  */
 
+import { ANDROID_ADDENDUM_PROMPT } from './android-addendum.js';
 import { DEBUG_AGENT_BASE_PROMPT } from './debug-agent.js';
 import { DESKTOP_ADDENDUM_PROMPT } from './desktop-addendum.js';
 import { WEB_ADDENDUM_PROMPT } from './web-addendum.js';
 
-/** Supported target names. Extend when the android adapter lands. */
-export type TargetName = 'web' | 'desktop';
+/** Supported target names — one per shipped adapter (web · desktop · android). */
+export type TargetName = 'web' | 'desktop' | 'android';
 
 /** Resolved per-target addendum string. */
 const TARGET_ADDENDA: Record<TargetName, string> = {
   web: WEB_ADDENDUM_PROMPT,
   desktop: DESKTOP_ADDENDUM_PROMPT,
+  android: ANDROID_ADDENDUM_PROMPT,
 };
 
 export interface ComposeOptions {
