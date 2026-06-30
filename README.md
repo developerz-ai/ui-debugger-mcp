@@ -130,6 +130,51 @@ Config files:
 The server reads the **current directory** to pick the project session — open it
 in your repo and it debugs that repo.
 
+## Quickstart
+
+```bash
+# 1. Scaffold the project (run once in your app's root)
+npx @developerz.ai/ui-debugger-mcp init
+```
+
+This creates `./tmp/ui-debugger-mcp/`, writes a starter `.ui-debugger-mcp.json`,
+and prints the `.mcp.json` snippet to paste.
+
+```jsonc
+// 2. Paste into your project's .mcp.json (add your API key)
+{
+  "mcpServers": {
+    "ui-debugger": {
+      "command": "npx",
+      "args": ["-y", "@developerz.ai/ui-debugger-mcp"],
+      "env": {
+        "OPENAI_API_KEY": "sk-...",
+        "OPENAI_BASE_URL": "https://openrouter.ai/api/v1"
+      }
+    }
+  }
+}
+```
+
+```jsonc
+// 3. Edit .ui-debugger-mcp.json — set your app's URL
+{
+  "targets": {
+    "web": { "adapter": "browser", "url": "http://localhost:3000" }
+  }
+}
+```
+
+```text
+// 4. In Claude Code (or any MCP client):
+start_debug { target: "web", goal: "log in and add item 3 to the cart" }
+
+// 5. Poll until done:
+get_findings { session_id: "...", wait: true }
+
+// 6. Read bugs[] + visual[] + summary. Fix code, repeat.
+```
+
 ## Using it
 
 It's a **conversation**, not a remote control — five fat tools, not one-per-click:
@@ -168,6 +213,42 @@ ui-debugger-mcp status   # which run is active, server pid, verdict, finding cou
 ui-debugger-mcp stop     # gracefully end the run (frees the browser + profile)
 ```
 
+## Troubleshooting
+
+**Chrome not found**
+The web adapter launches Chrome via the system PATH. Install Chrome/Chromium, or
+set `executablePath` in `.ui-debugger-mcp.json`:
+```jsonc
+"web": { "adapter": "browser", "url": "...", "executablePath": "/usr/bin/chromium-browser" }
+```
+
+**Session locked — "another run is active"**
+One Chrome profile = one run. If a previous run crashed without cleaning up:
+```bash
+npx @developerz.ai/ui-debugger-mcp stop   # graceful teardown
+```
+Or delete `./tmp/ui-debugger-mcp/state.json` and restart the MCP server.
+
+**Run times out with no findings**
+Default cap is 300 s. Raise it per-call:
+```text
+start_debug { target: "web", goal: "...", timeout: 600 }
+```
+If the agent is stuck at login, add `?debug-ai=true` to your app's login route
+(gated by `ALLOW_AI_DEBUG_LOGIN`) to skip captchas — see `CLAUDE.md` for the
+pattern.
+
+**`get_findings` returns empty `bugs[]` / `visual[]`**
+The run may still be in progress — use `wait: true`:
+```text
+get_findings { session_id: "...", wait: true }
+```
+Check `./tmp/ui-debugger-mcp/<project>/logs/agent.log` for the agent's trace.
+
+**`replay.mp4` not generated**
+ffmpeg is optional. Install it and retry, or ignore — findings and screenshots
+still land without it.
+
 ## Stack
 
 - **Bun** + **TypeScript** (ships as npm, runs via `npx`/`bunx`)
@@ -179,7 +260,18 @@ ui-debugger-mcp stop     # gracefully end the run (frees the browser + profile)
 
 ## Status
 
-Web target shipped. Desktop and Android adapters are pending — see [`docs/idea/`](docs/idea/) for design.
+All three adapters ship in v1:
+
+| Target  | State |
+|---------|-------|
+| web     | ✅ shipped (CDP, headless + attach) |
+| desktop | ✅ shipped (X11/Wayland, AT-SPI + xdotool) |
+| android | ✅ shipped (ADB, uiautomator) |
+
+Replay video (`replay.mp4`, captioned stills → mp4 via ffmpeg) ships with the web adapter.
+ffmpeg is optional — absent gracefully, findings still land.
+
+See [`docs/idea/`](docs/idea/) for design notes.
 
 ## Docs
 
