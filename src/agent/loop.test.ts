@@ -17,6 +17,7 @@ import {
   progressForStep,
   runDebugLoop,
   stepTrailFrom,
+  terminalFindingsWithTrail,
 } from './loop.js';
 
 test('budgetNudge stays silent while there is ample budget', () => {
@@ -122,6 +123,51 @@ test('progressForStep flushes a running trail and accumulates across steps', () 
   );
   expect(second?.steps).toHaveLength(2);
   expect(trail).toHaveLength(2);
+});
+
+test('terminalFindingsWithTrail overlays the recorded act-trail as the verdict steps', () => {
+  const trail: Step[] = [
+    { step: 'key Tab', ok: true, screenshot: '001.png' },
+    { step: 'scroll down 200px', ok: true, screenshot: '002.png' },
+  ];
+  const out = terminalFindingsWithTrail(
+    {
+      toolCalls: [{ toolName: 'report', input: { status: 'passed', summary: 'all good' } }],
+      toolResults: [],
+    },
+    trail,
+  );
+  expect(out?.status).toBe('passed');
+  expect(out?.summary).toBe('all good');
+  expect(out?.steps).toEqual(trail); // driver omitted steps; the recorded trail wins
+});
+
+test('terminalFindingsWithTrail falls back to the reported steps when no trail was recorded', () => {
+  const reported = [{ step: 'manual note', ok: false, note: 'nothing acted' }];
+  const out = terminalFindingsWithTrail(
+    {
+      toolCalls: [{ toolName: 'report', input: { status: 'failed', steps: reported } }],
+      toolResults: [],
+    },
+    [],
+  );
+  expect(out?.status).toBe('failed');
+  expect(out?.steps).toEqual(reported);
+});
+
+test('terminalFindingsWithTrail returns null off the report step (or on an invalid verdict)', () => {
+  expect(
+    terminalFindingsWithTrail({ toolCalls: [{ toolName: 'act', input: {} }], toolResults: [] }, [
+      { step: 'key Tab', ok: true },
+    ]),
+  ).toBeNull();
+  // `running` is not a terminal status — the report schema rejects it, so no write.
+  expect(
+    terminalFindingsWithTrail(
+      { toolCalls: [{ toolName: 'report', input: { status: 'running' } }], toolResults: [] },
+      [],
+    ),
+  ).toBeNull();
 });
 
 test('createDebugAgent builds an agent driving the four-tool belt', () => {

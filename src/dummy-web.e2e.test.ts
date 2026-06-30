@@ -134,8 +134,18 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
   // Build once; serve throughout the suite.
   beforeAll(() => {
     if (!CHROME) return; // suite is skipped; skip side-effectful setup too
-    // Build the dummy app if dist/ is absent (or always in CI).
+    // Build the dummy app if dist/ is absent. The fixture is a standalone package
+    // (its own bun.lock), so the repo-root `bun install` never reaches it — install
+    // its deps first when node_modules is missing (e.g. a fresh CI checkout), else
+    // tsc/vite are absent and `bun run build` fails.
     if (!existsSync(join(DIST_DIR, 'index.html'))) {
+      if (!existsSync(join(DUMMY_WEB_DIR, 'node_modules'))) {
+        execSync('bun install --frozen-lockfile', {
+          cwd: DUMMY_WEB_DIR,
+          stdio: 'pipe',
+          timeout: 120_000,
+        });
+      }
       execSync('bun run build', {
         cwd: DUMMY_WEB_DIR,
         stdio: 'pipe',
@@ -147,7 +157,10 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
     const port = fixtureServer.port;
     if (port === undefined) throw new Error('fixture server did not bind a port');
     fixturePort = port;
-  });
+    // Generous hook timeout: a cold fixture install + Vite build can exceed bun's
+    // default per-hook budget. CI normally pre-builds it (the build step below), so
+    // this only bites a fresh local run — but it must not be killed mid-build.
+  }, 180_000);
 
   afterAll(() => {
     fixtureServer?.stop(true);

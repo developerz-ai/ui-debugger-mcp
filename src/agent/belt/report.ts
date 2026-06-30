@@ -84,18 +84,26 @@ export interface FindingsWriter {
 }
 
 /**
- * Write the terminal verdict and report the stop. Pure over the
- * {@link FindingsWriter} seam, so it unit-tests against a fake with no disk.
+ * Build the canonical findings record from a validated report input. Shared with
+ * the loop, which overlays its recorded act-trail as the authoritative `steps`
+ * (see `terminalFindingsWithTrail`), so both paths agree on the verdict shape.
  */
-export async function runReport(writer: FindingsWriter, input: ReportInput): Promise<ReportResult> {
-  const findings: Findings = {
+export function reportFindings(input: ReportInput): Findings {
+  return {
     status: input.status,
     steps: input.steps,
     bugs: input.bugs,
     visual: input.visual,
     ...(input.summary !== undefined && { summary: input.summary }),
   };
-  const path = await writer.writeFindings(findings);
+}
+
+/**
+ * Write the terminal verdict and report the stop. Pure over the
+ * {@link FindingsWriter} seam, so it unit-tests against a fake with no disk.
+ */
+export async function runReport(writer: FindingsWriter, input: ReportInput): Promise<ReportResult> {
+  const path = await writer.writeFindings(reportFindings(input));
   return {
     status: input.status,
     findings: path,
