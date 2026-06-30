@@ -39,6 +39,12 @@ export function startDebugTool(service: DebugApi): McpTool {
               .describe(
                 'The story: what to accomplish, in plain language (e.g. "log in and add item 3 to the cart").',
               ),
+            url: z
+              .url()
+              .optional()
+              .describe(
+                'Where to point the driver for this run (web targets) — e.g. a local dev server, a preview, or production. Overrides the target\'s configured url; required when the target has none. You ("the boss") decide where the driver goes.',
+              ),
             criteria: z
               .string()
               .optional()

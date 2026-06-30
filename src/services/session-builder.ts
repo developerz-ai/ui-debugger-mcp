@@ -25,7 +25,7 @@ import { createDebugAgent, runDebugLoop } from '../agent/loop.js';
 import { composeSystemPrompt, type TargetName } from '../agent/prompts/compose.js';
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
-import { TargetNotFoundError } from '../errors.js';
+import { ConfigError, TargetNotFoundError } from '../errors.js';
 import type { Step } from '../findings/schema.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
@@ -60,6 +60,8 @@ export interface BuildSessionParams {
   goal: string;
   /** Optional pass/fail criteria, one rule per line. */
   criteria?: string;
+  /** Per-run URL the caller points the driver at (web); overrides the target's configured url. */
+  url?: string;
 }
 
 /** A built-but-unregistered session plus the seams the service fires post-lock. */
@@ -129,9 +131,32 @@ function addendumTarget(adapter: Target['adapter']): TargetName {
  * the story). The managed launch command itself lives in the target config.
  */
 function openAddress(target: Target): string {
-  if (target.adapter === 'browser') return target.url;
+  if (target.adapter === 'browser') return target.url ?? ''; // url presence is enforced by resolveRunTarget
   if (target.adapter === 'desktop') return target.window?.title ?? '';
   return '';
+}
+
+/**
+ * Apply the caller's per-run `url` over the configured target (web only), and
+ * require that a web target ends up with *some* URL. Lets the boss point the
+ * driver at a local dev server, a preview, or production per run instead of
+ * pinning one address in config. Fails loud ({@link ConfigError}) on misuse.
+ */
+export function resolveRunTarget(target: Target, name: string, url: string | undefined): Target {
+  if (url !== undefined) {
+    if (target.adapter !== 'browser') {
+      throw new ConfigError(
+        `'url' only applies to web targets, but '${name}' is '${target.adapter}'`,
+      );
+    }
+    return { ...target, url };
+  }
+  if (target.adapter === 'browser' && !target.url) {
+    throw new ConfigError(
+      `web target '${name}' has no URL — pass 'url' to start_debug or set it in .ui-debugger-mcp.json`,
+    );
+  }
+  return target;
 }
 
 /** Split a free-text criteria blob into per-line rules; `undefined` when empty/absent. */
@@ -157,10 +182,17 @@ export async function buildSession(
   const { config, models, workspace } = deps;
   const { id, target, goal, criteria } = params;
 
-  const targetConfig = config.targets[target];
-  if (!targetConfig) {
+  const baseTarget = config.targets[target];
+  if (!baseTarget) {
     throw new TargetNotFoundError(`target '${target}' not found in config.targets`);
   }
+  // "The boss tells the driver where to go": a per-run `url` overrides the target's
+  // configured url. Web targets need one or the other — fail loud before any launch.
+  const targetConfig = resolveRunTarget(baseTarget, target, params.url);
+  const effectiveConfig: ResolvedConfig =
+    targetConfig === baseTarget
+      ? config
+      : { ...config, targets: { ...config.targets, [target]: targetConfig } };
   const addendum = addendumTarget(targetConfig.adapter);
 
   const paths = sessionPaths(workspace, id);
@@ -170,7 +202,7 @@ export async function buildSession(
     void store.appendLog(channel, line).catch(() => undefined);
   };
 
-  const adapter = await createAdapter(target, config, workspace.chromeUserData, onLog);
+  const adapter = await createAdapter(target, effectiveConfig, workspace.chromeUserData, onLog);
   const instructions = composeSystemPrompt({
     target: addendum,
     story: goal,

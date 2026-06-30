@@ -32,6 +32,8 @@ export interface StartInput {
   target: string;
   goal: string;
   criteria?: string;
+  /** Per-run URL the caller points the driver at (web); overrides the target's configured url. */
+  url?: string;
   /** Wall-clock cap (ms) before the run auto-ends; defaults to {@link DEFAULT_SESSION_TIMEOUT_MS}. */
   timeoutMs?: number;
 }
@@ -145,7 +147,7 @@ export class DebugService implements DebugApi {
    * already active for this cwd ({@link SessionBusyError}); never leaks a launched
    * browser — a lost lock race or a failed `open` tears the session back down.
    */
-  async start({ target, goal, criteria, timeoutMs }: StartInput): Promise<StartResult> {
+  async start({ target, goal, criteria, url, timeoutMs }: StartInput): Promise<StartResult> {
     const cwd = this.#cwd;
     if (this.#manager.has(cwd)) {
       throw new SessionBusyError(
@@ -155,7 +157,7 @@ export class DebugService implements DebugApi {
     }
 
     const id = generateSessionId(this.#now());
-    const built = await this.#build({ id, target, goal, criteria });
+    const built = await this.#build({ id, target, goal, criteria, url });
 
     try {
       this.#manager.start(cwd, built.session);

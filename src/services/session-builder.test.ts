@@ -1,9 +1,41 @@
 import { expect, test } from 'bun:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { ResolvedConfig } from '../config/load.js';
-import { TargetNotFoundError } from '../errors.js';
+import type { Target } from '../config/schema.js';
+import { ConfigError, TargetNotFoundError } from '../errors.js';
 import { workspacePaths } from '../session/workspace.js';
-import { buildSession, makeSessionBuilder, type SessionBuilderDeps } from './session-builder.js';
+import {
+  buildSession,
+  makeSessionBuilder,
+  resolveRunTarget,
+  type SessionBuilderDeps,
+} from './session-builder.js';
+
+// --- resolveRunTarget (per-run URL: "the boss tells the driver where to go") ---
+
+const webTarget: Target = { adapter: 'browser', url: 'http://localhost:3000', headless: true };
+
+test('resolveRunTarget overrides a web target url with the per-run url', () => {
+  expect(resolveRunTarget(webTarget, 'web', 'https://staging.example.com')).toEqual({
+    adapter: 'browser',
+    url: 'https://staging.example.com',
+    headless: true,
+  });
+});
+
+test('resolveRunTarget keeps the configured url when no per-run url is given', () => {
+  expect(resolveRunTarget(webTarget, 'web', undefined)).toBe(webTarget);
+});
+
+test('resolveRunTarget requires a url for a web target that has none', () => {
+  const noUrl: Target = { adapter: 'browser', headless: true };
+  expect(() => resolveRunTarget(noUrl, 'web', undefined)).toThrow(ConfigError);
+});
+
+test('resolveRunTarget rejects a url override for a non-web target', () => {
+  const desktop: Target = { adapter: 'desktop', launch: 'myapp' };
+  expect(() => resolveRunTarget(desktop, 'screen', 'http://x')).toThrow(ConfigError);
+});
 
 const CONFIG: ResolvedConfig = {
   models: { driver: 'd', vision: 'v', summary: 's' },

@@ -21,7 +21,7 @@ const DebugLoginSchema = z.strictObject({
 /** Web target — CDP-driven browser. Managed (default) unless `cdpUrl` attaches. */
 export const WebTargetSchema = z.strictObject({
   adapter: z.literal('browser'),
-  url: z.url(),
+  url: z.url().optional(), // optional: the caller ("boss") can supply it per-run via start_debug
   headless: z.boolean(),
   debugLogin: DebugLoginSchema.optional(),
   executablePath: z.string().nullish(), // null = auto-detect Chrome/Chromium (managed)

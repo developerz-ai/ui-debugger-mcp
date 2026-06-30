@@ -216,11 +216,11 @@ const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
  * a relative path (`/`, `/login`) — `page.goto` rejects those as "invalid URL",
  * so anchor them to `base`. Absolute targets pass through unchanged.
  */
-export function resolveTargetUrl(target: string, base: string): string {
+export function resolveTargetUrl(target: string, base?: string): string {
   try {
     return new URL(target, base).toString();
   } catch {
-    return target; // even base couldn't help — let `goto` surface a clear error
+    return target; // relative target with no usable base — let `goto` surface a clear error
   }
 }
 
