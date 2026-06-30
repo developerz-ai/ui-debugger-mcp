@@ -23,7 +23,7 @@
 
 import { tool } from 'ai';
 import { z } from 'zod';
-import type { Findings } from '../../findings/schema.js';
+import type { Findings, Step } from '../../findings/schema.js';
 import { BugSchema, StepSchema, VisualIssueSchema } from '../../findings/schema.js';
 
 /** Terminal verdicts `report` may emit — `running` is excluded (it isn't terminal). */
@@ -68,7 +68,7 @@ export interface ReportResult {
   status: ReportInput['status'];
   /** Path to the written `findings.json` (an evidence pointer, never the inlined blob). */
   findings: string;
-  /** How many of each were recorded, so the verdict reads without re-opening the file. */
+  /** Counts derived from the written {@link Findings}, so the verdict reads without re-opening the file. */
   counts: { steps: number; bugs: number; visual: number };
   /** Terminal signal: the agent loop ends after this call. `report` is the full stop. */
   stop: true;
@@ -84,32 +84,68 @@ export interface FindingsWriter {
 }
 
 /**
- * Write the terminal verdict and report the stop. Pure over the
- * {@link FindingsWriter} seam, so it unit-tests against a fake with no disk.
+ * Build the canonical findings record from a validated report input. The base
+ * verdict shape; {@link terminalFindings} overlays the loop's recorded act-trail
+ * on top, so both the persisted write and the returned counts agree.
  */
-export async function runReport(writer: FindingsWriter, input: ReportInput): Promise<ReportResult> {
-  const findings: Findings = {
+export function reportFindings(input: ReportInput): Findings {
+  return {
     status: input.status,
     steps: input.steps,
     bugs: input.bugs,
     visual: input.visual,
     ...(input.summary !== undefined && { summary: input.summary }),
   };
+}
+
+/**
+ * The authoritative terminal {@link Findings}: the report input with the loop's
+ * recorded act-`trail` overlaid as `steps` whenever one was captured. The driver's
+ * `report` rarely restates the steps it took (and the trail carries the evidence
+ * frames), so the trail wins; the reported steps are the fallback for a run that
+ * recorded none. The single source of truth for the terminal write AND the counts,
+ * so they never drift (a `0`-step result returned over a trail-filled file).
+ */
+export function terminalFindings(input: ReportInput, trail: readonly Step[] = []): Findings {
+  const findings = reportFindings(input);
+  return trail.length > 0 ? { ...findings, steps: [...trail] } : findings;
+}
+
+/**
+ * Write the terminal verdict and report the stop. Both the persisted findings and
+ * the returned counts derive from one {@link terminalFindings} object — the loop's
+ * `trail` (when present) is authoritative for `steps`. Pure over the
+ * {@link FindingsWriter} seam, so it unit-tests against a fake with no disk.
+ */
+export async function runReport(
+  writer: FindingsWriter,
+  input: ReportInput,
+  trail: readonly Step[] = [],
+): Promise<ReportResult> {
+  const findings = terminalFindings(input, trail);
   const path = await writer.writeFindings(findings);
   return {
     status: input.status,
     findings: path,
-    counts: { steps: input.steps.length, bugs: input.bugs.length, visual: input.visual.length },
+    counts: {
+      steps: findings.steps.length,
+      bugs: findings.bugs.length,
+      visual: findings.visual.length,
+    },
     stop: true,
   };
 }
 
-/** Build the `report` tool bound to one findings store, for the debug agent's belt. */
-export function createReportTool(writer: FindingsWriter) {
+/**
+ * Build the `report` tool bound to one findings store, for the debug agent's belt.
+ * `getTrail` (when wired by the loop) supplies the recorded act-trail so the
+ * written verdict and its counts both reflect the steps actually taken.
+ */
+export function createReportTool(writer: FindingsWriter, getTrail?: () => readonly Step[]) {
   return tool({
     description:
       'Emit the final structured findings and END the run. Call exactly once, when the goal is met or you hit the step limit. Validates and writes findings.json: status (passed|failed) plus steps/bugs/visual/summary. This is terminal — the loop stops after report, so do not act again. Make summary actionable for the smart agent: what broke, where, what to fix.',
     inputSchema: ReportInputSchema,
-    execute: (input) => runReport(writer, input),
+    execute: (input) => runReport(writer, input, getTrail?.() ?? []),
   });
 }

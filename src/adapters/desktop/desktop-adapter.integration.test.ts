@@ -44,8 +44,8 @@ import { DesktopAdapter } from './desktop-adapter.js';
 // ---------------------------------------------------------------------------
 
 function canRun(): boolean {
-  if (process.env['SKIP_DESKTOP_TESTS']) return false;
-  if (!process.env['DISPLAY']) return false;
+  if (process.env.SKIP_DESKTOP_TESTS) return false;
+  if (!process.env.DISPLAY) return false;
   try {
     execSync('which xdotool', { stdio: 'pipe' });
   } catch {

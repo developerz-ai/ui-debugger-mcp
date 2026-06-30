@@ -31,6 +31,13 @@ jobs:
       - name: typecheck
         run: bun run typecheck
 
+      # The dummy/web e2e fixture is a standalone package (its own bun.lock), so the
+      # repo-root install never reaches it. Build it up front — the e2e suite then
+      # finds dist/ and skips the heavy install+build inside a test hook.
+      - name: build dummy/web fixture
+        run: bun install --frozen-lockfile && bun run build
+        working-directory: dummy/web
+
       # bun test runs test files in parallel by default.
       - name: test
         run: bun test

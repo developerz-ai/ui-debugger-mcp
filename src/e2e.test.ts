@@ -36,8 +36,8 @@ import { ensureWorkspace, workspacePaths } from './session/workspace.js';
 // ---------------------------------------------------------------------------
 
 function findChrome(): string | null {
-  if (process.env['SKIP_BROWSER_TESTS']) return null;
-  const envPath = process.env['CHROMIUM_PATH'];
+  if (process.env.SKIP_BROWSER_TESTS) return null;
+  const envPath = process.env.CHROMIUM_PATH;
   if (envPath && existsSync(envPath)) return envPath;
   try {
     const p = chromium.executablePath();
@@ -136,7 +136,7 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
   let client: Client;
   let serverTransport: InMemoryTransport;
   let clientTransport: InMemoryTransport;
-  let manager: SessionManager<Session>;
+  let manager: SessionManager<Session> | undefined;
 
   // One fixture server shared across all tests in the describe.
   beforeAll(() => {
@@ -234,8 +234,10 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
   });
 
   afterEach(async () => {
-    if (manager.has(cwd)) await manager.end(cwd).catch(() => undefined);
-    await client.close().catch(() => undefined);
+    // Setup is fallible before `manager`/`client` are assigned; guard the handles
+    // so a partial beforeEach never throws a teardown error that masks the cause.
+    if (manager?.has(cwd)) await manager.end(cwd).catch(() => undefined);
+    if (client) await client.close().catch(() => undefined);
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -321,4 +323,165 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
     const content = await readFile(consolePath, 'utf8');
     expect(content).toContain('e2e-fixture-console-error');
   }, 30_000);
+
+  // ---------------------------------------------------------------------------
+  // key + scroll act steps + replay/evidence coverage
+  // A separate mock driver scripts key → scroll → report so the belt's two
+  // newest action verbs exercise the real CDP adapter and land in findings.steps.
+  // The session-builder always wires a replay step post-verdict, so we also
+  // assert the replay outcome is visible in findings (evidence path or skip note).
+  // ---------------------------------------------------------------------------
+
+  describe('key/scroll steps and replay evidence', () => {
+    let subClient: Client;
+    let subManager: SessionManager<Session> | undefined;
+    let subTmpDir: string;
+    let subCwd: string;
+
+    beforeEach(async () => {
+      subTmpDir = mkdtempSync(join(tmpdir(), 'ui-dbg-e2e-ks-'));
+      subCwd = subTmpDir;
+
+      // Script: press Tab → scroll down → report passed.
+      let callCount = 0;
+      const mockDriver = new MockLanguageModelV3({
+        doGenerate: async () => {
+          callCount++;
+          if (callCount === 1) {
+            return toolCallResponse('ks1', 'act', { action: 'key', key: 'Tab' });
+          }
+          if (callCount === 2) {
+            return toolCallResponse('ks2', 'act', {
+              action: 'scroll',
+              direction: 'down',
+              amount: 200,
+            });
+          }
+          return toolCallResponse('ks3', 'report', {
+            status: 'passed',
+            bugs: [],
+            visual: [],
+            summary: 'Pressed Tab, scrolled down — no bugs.',
+          });
+        },
+      });
+
+      const chromePath = typeof CHROME === 'string' ? CHROME : undefined;
+      const workspaceBase = join(subTmpDir, 'workspace');
+      const config: ResolvedConfig = {
+        models: { driver: 'mock/driver', vision: 'mock/vision', summary: 'mock/summary' },
+        workspace: workspaceBase,
+        targets: {
+          web: {
+            adapter: 'browser',
+            url: `http://localhost:${fixturePort}`,
+            headless: true,
+            ...(chromePath ? { executablePath: chromePath } : {}),
+          },
+        },
+        provider: { apiKey: 'sk-e2e-test', baseUrl: 'https://openrouter.ai/api/v1' },
+      };
+
+      const workspace = workspacePaths(subCwd, workspaceBase);
+      await ensureWorkspace(workspace);
+
+      const builder = makeSessionBuilder({
+        config,
+        models: {
+          driver: mockDriver,
+          vision: new MockLanguageModelV3(),
+          summary: new MockLanguageModelV3(),
+        },
+        workspace,
+      });
+
+      subManager = new SessionManager<Session>();
+      const service = new DebugService({
+        manager: subManager,
+        config,
+        cwd: subCwd,
+        build: builder,
+        now: () => 1_700_000_000_000,
+      });
+
+      const subServer = createMcpServer(outerTools(service));
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      await subServer.connect(st);
+
+      subClient = new Client({ name: 'e2e-ks-test', version: '0.0.1' });
+      await subClient.connect(ct);
+    });
+
+    afterEach(async () => {
+      // subManager/subClient may be unassigned if this beforeEach aborts early;
+      // guard them so cleanup never raises a secondary error over the real one.
+      if (subManager?.has(subCwd)) await subManager.end(subCwd).catch(() => undefined);
+      if (subClient) await subClient.close().catch(() => undefined);
+      rmSync(subTmpDir, { recursive: true, force: true });
+    });
+
+    test('key and scroll act steps appear in findings.steps', async () => {
+      const startRes = callResult(
+        await subClient.callTool({
+          name: 'start_debug',
+          arguments: { target: 'web', goal: 'press Tab then scroll down' },
+        }),
+      );
+      expect(startRes.isError).toBeFalsy();
+      const { session_id } = JSON.parse(resultText(startRes)) as { session_id: string };
+
+      const findRes = callResult(
+        await subClient.callTool({
+          name: 'get_findings',
+          arguments: { session_id, wait: 15_000 },
+        }),
+      );
+      expect(findRes.isError).toBeFalsy();
+      const findings = JSON.parse(resultText(findRes));
+
+      // This describe's mock driver reports `passed`; lock it in so a verdict
+      // regression can't slip through behind an either-verdict match.
+      expect(findings.status).toBe('passed');
+      expect(() => FindingsSchema.parse(findings)).not.toThrow();
+
+      // Both act verbs must produce a step entry via stepTrailFrom.
+      const steps: Array<{ step: string }> = findings.steps;
+      expect(steps.some((s) => s.step.startsWith('key'))).toBe(true);
+      expect(steps.some((s) => s.step.startsWith('scroll'))).toBe(true);
+    }, 30_000);
+
+    test('replay evidence path or skip step present after run', async () => {
+      const startRes = callResult(
+        await subClient.callTool({
+          name: 'start_debug',
+          arguments: { target: 'web', goal: 'replay evidence check' },
+        }),
+      );
+      expect(startRes.isError).toBeFalsy();
+      const { session_id } = JSON.parse(resultText(startRes)) as { session_id: string };
+
+      const findRes = callResult(
+        await subClient.callTool({
+          name: 'get_findings',
+          arguments: { session_id, wait: 15_000 },
+        }),
+      );
+      expect(findRes.isError).toBeFalsy();
+      const findings = JSON.parse(resultText(findRes));
+
+      expect(findings.status).toBe('passed');
+
+      // The session-builder always wires a replay step post-verdict. Two outcomes:
+      //   • ffmpeg present → findings.evidence is the replay.mp4 path (file exists).
+      //   • ffmpeg absent  → findings.steps contains a 'replay video' skip entry.
+      const hasEvidence = typeof findings.evidence === 'string' && findings.evidence.length > 0;
+      const hasSkipStep = (findings.steps as Array<{ step: string }>).some(
+        (s) => s.step === 'replay video',
+      );
+      expect(hasEvidence || hasSkipStep).toBe(true);
+      if (hasEvidence) {
+        expect(existsSync(findings.evidence as string)).toBe(true);
+      }
+    }, 30_000);
+  });
 });

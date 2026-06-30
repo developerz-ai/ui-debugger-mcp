@@ -26,6 +26,7 @@ import { composeSystemPrompt, type TargetName } from '../agent/prompts/compose.j
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import { TargetNotFoundError } from '../errors.js';
+import type { Step } from '../findings/schema.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
 import { ensureSession, sessionPaths, type WorkspacePaths } from '../session/workspace.js';
@@ -194,18 +195,27 @@ export async function buildSession(
   };
 
   const run: LoopRunner = async ({ inbox, progress, signal }) => {
+    // One trail per run, shared between the loop (which appends each act step) and
+    // the `report` tool (which overlays it as the verdict's authoritative steps), so
+    // the persisted findings and the returned counts derive from the same object.
+    const trail: Step[] = [];
     const agent = createDebugAgent({
       model: models.driver,
       tools: {
         observe: withToolLog('observe', createObserveTool(adapter), logAgent),
         act: withToolLog('act', createActTool(adapter, store), logAgent),
         look: withToolLog('look', createLookTool(adapter, models.vision, store), logAgent),
-        report: withToolLog('report', createReportTool(store), logAgent),
+        report: withToolLog(
+          'report',
+          createReportTool(store, () => trail),
+          logAgent,
+        ),
       },
       instructions,
       inbox,
       progress,
       log: logAgent,
+      trail,
     });
     await flushAgentLog(`run start: target=${target} goal=${JSON.stringify(goal)}`);
     try {

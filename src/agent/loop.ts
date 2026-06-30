@@ -150,6 +150,13 @@ export interface DebugAgentOptions {
   progress: ProgressWriter;
   /** Optional sink for a human-readable step trail (`logs/agent.log`). */
   log?: AgentLog;
+  /**
+   * Shared act-trail the running flush appends to and the `report` tool overlays
+   * as the verdict's authoritative `steps` — pass the SAME array to
+   * {@link createReportTool}'s `getTrail` so the write and its counts agree.
+   * Defaults to a fresh array (the report tool then keeps the driver's steps).
+   */
+  trail?: Step[];
   /** Step safety cap; defaults to {@link DEFAULT_MAX_STEPS}. */
   maxSteps?: number;
 }
@@ -211,8 +218,8 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
     progress,
     log,
     maxSteps = DEFAULT_MAX_STEPS,
+    trail = [],
   } = options;
-  const trail: Step[] = [];
   let stepIndex = 0;
   return new ToolLoopAgent<never, BeltTools>({
     model,
@@ -229,8 +236,12 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
     onStepFinish: async (step) => {
       stepIndex += 1;
       log?.(describeStep(step, stepIndex));
-      const findings = progressForStep(step, trail);
-      if (findings) await progress.writeFindings(findings);
+      // Append this step's `act` results to the shared trail and flush a running
+      // snapshot. The terminal `report` step writes its own verdict — with this
+      // same trail overlaid as `steps` (see `createReportTool`) — so the running
+      // flush steps aside for it (`progressForStep` returns null on the report step).
+      const running = progressForStep(step, trail);
+      if (running) await progress.writeFindings(running);
     },
   });
 }
