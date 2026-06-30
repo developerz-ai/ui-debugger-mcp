@@ -138,9 +138,12 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   let baseUrl: string;
 
   beforeAll(async () => {
-    // 1. Serve the fixture on a random OS-assigned port.
+    // 1. Serve the fixture on a random OS-assigned port. Bind + navigate via the
+    // IPv4 loopback explicitly: on some CI runners `localhost` resolves to `::1`
+    // (IPv6) while Bun.serve binds IPv4, so the browser hits a refused connection.
     server = Bun.serve({
       port: 0,
+      hostname: '127.0.0.1',
       fetch(req) {
         const path = new URL(req.url).pathname;
         if (path === '/') {
@@ -157,7 +160,7 @@ const FIXTURE_HTML = `<!DOCTYPE html>
     if (!assignedPort || assignedPort < 1) {
       throw new Error(`fixture server did not bind a valid port (got ${assignedPort})`);
     }
-    baseUrl = `http://localhost:${assignedPort}/`;
+    baseUrl = `http://127.0.0.1:${assignedPort}/`;
 
     // 2. Isolated Chrome profile so tests don't share state with the user's browser.
     profileDir = mkdtempSync(`${tmpdir()}/ui-dbg-test-`);

@@ -38,12 +38,24 @@ jobs:
         run: bun install --frozen-lockfile && bun run build
         working-directory: dummy/web
 
-      # Browser integration tests drive a real Chromium. Install the Playwright-
-      # managed build so the adapter uses a consistent binary — it prefers managed
-      # Chromium over a runner's system Chrome, which on some images is sandbox-
-      # confined and can't reach the localhost test fixture (ERR_CONNECTION_REFUSED).
+      # Browser integration tests drive a real Chromium. Cache the Playwright-
+      # managed browser (keyed on bun.lock so a playwright-core bump invalidates it)
+      # so it isn't re-downloaded each run; the adapter prefers managed Chromium.
+      - name: cache Playwright Chromium
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-playwright-
+
       - name: install chromium
-        run: bunx playwright install --with-deps chromium
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            bunx playwright install-deps chromium
+          else
+            bunx playwright install --with-deps chromium
+          fi
 
       # bun test runs test files in parallel by default.
       - name: test
