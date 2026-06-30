@@ -1,6 +1,6 @@
 {
   "name": "@developerz.ai/ui-debugger-mcp",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Autonomous UI debugging MCP server. Give a goal; a fast agent drives the browser/desktop, finds bugs + visual issues, and reports back.",
   "license": "MIT",
   "type": "module",
