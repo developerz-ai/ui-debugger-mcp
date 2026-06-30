@@ -15,7 +15,8 @@
  │    OpenAI-compatible router (OpenRouter default) │
  │  Adapters                                       │
  │    browser (CDP) ── web                          │
- │    desktop (x11/wayland) ── desktop app, mobile  │
+ │    desktop (x11/wayland) ── desktop app           │
+ │    android (ADB) ── mobile emulator / device     │
  │  Workspace  — ./tmp/ui-debugger-mcp/<project>/  │
  └──────────────────────────────────────────────┘
         │
@@ -54,11 +55,11 @@ session:
 
 See [`agent-loop.md`](agent-loop.md).
 
-## Two adapters, three targets
+## Three adapters, three targets
 
 A large app exposes web + desktop + mobile. Browser adapter drives web (CDP).
-Desktop adapter drives both the desktop app and the mobile emulator (both are
-just windows on the Linux desktop). See [`adapters.md`](adapters.md).
+Desktop adapter drives desktop apps (X11/Wayland, AT-SPI). Android adapter drives
+mobile via ADB + uiautomator. See [`adapters.md`](adapters.md).
 
 ## Concurrency
 

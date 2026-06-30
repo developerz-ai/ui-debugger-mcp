@@ -131,6 +131,11 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   let server: ReturnType<typeof Bun.serve>;
   let adapter: BrowserAdapter;
   let profileDir: string;
+  // Resolve the OS-assigned port ONCE at startup and cache the URL. Reading
+  // `server.port` repeatedly is unreliable on some CI runners (the getter can
+  // return -1 mid-run even while the server stays up), which yields a bogus
+  // `http://localhost:-1/` and fails every navigation after the first few.
+  let baseUrl: string;
 
   beforeAll(async () => {
     // 1. Serve the fixture on a random OS-assigned port.
@@ -147,13 +152,20 @@ const FIXTURE_HTML = `<!DOCTYPE html>
       },
     });
 
+    // Cache the bound port immediately — fail loud if it didn't bind a real one.
+    const assignedPort = server.port;
+    if (!assignedPort || assignedPort < 1) {
+      throw new Error(`fixture server did not bind a valid port (got ${assignedPort})`);
+    }
+    baseUrl = `http://localhost:${assignedPort}/`;
+
     // 2. Isolated Chrome profile so tests don't share state with the user's browser.
     profileDir = mkdtempSync(`${tmpdir()}/ui-dbg-test-`);
 
     // 3. Construct the adapter (does NOT navigate yet).
     const config: WebTarget = {
       adapter: 'browser',
-      url: `http://localhost:${server.port}/`,
+      url: baseUrl,
       headless: true,
       executablePath: CHROME,
     };
@@ -171,7 +183,7 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   // depends on another having run first (order-independent, safe to rerun in
   // isolation). The fixture's `console.error` re-fires on each load.
   beforeEach(async () => {
-    await adapter.open(`http://localhost:${server.port}/`);
+    await adapter.open(baseUrl);
     await adapter.waitFor({ query: '#go', timeout: 10_000 });
   }, 15_000);
 
@@ -201,7 +213,7 @@ const FIXTURE_HTML = `<!DOCTYPE html>
 
   test('open: navigates to the fixture and waits for the button', async () => {
     // Re-navigate explicitly (not relying on beforeEach) to assert open() itself.
-    await adapter.open(`http://localhost:${server.port}/`);
+    await adapter.open(baseUrl);
     // waitFor confirms the button is visible — implicitly asserts open() worked.
     await adapter.waitFor({ query: '#go', timeout: 10_000 });
     expect(await adapter.find({ query: '#go' })).not.toBeNull();
