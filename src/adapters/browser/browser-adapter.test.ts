@@ -1,12 +1,53 @@
 import { expect, test } from 'bun:test';
+import type { WebTarget } from '../../config/schema.js';
 import { AdapterError } from '../../errors.js';
 import type { ScrollDirection } from '../contract.js';
 import {
   appendDebugLogin,
   applyNodeFilters,
   type RawNode,
+  resolveLaunchBinary,
+  resolveTargetUrl,
   scrollDelta,
 } from './browser-adapter.js';
+
+// --- resolveLaunchBinary ----------------------------------------------------
+
+const webTarget = (over: Partial<WebTarget> = {}): WebTarget => ({
+  adapter: 'browser',
+  url: 'http://localhost:5173',
+  headless: true,
+  ...over,
+});
+
+test('resolveLaunchBinary prefers an explicit executablePath', () => {
+  expect(
+    resolveLaunchBinary(webTarget({ executablePath: '/opt/my/chrome' }), () => '/managed'),
+  ).toEqual({ executablePath: '/opt/my/chrome' });
+});
+
+test('resolveLaunchBinary uses the managed Chromium when no executablePath', () => {
+  expect(resolveLaunchBinary(webTarget(), () => '/cache/ms-playwright/chrome')).toEqual({
+    executablePath: '/cache/ms-playwright/chrome',
+  });
+});
+
+test('resolveLaunchBinary falls back to the system Chrome channel when none found', () => {
+  expect(resolveLaunchBinary(webTarget(), () => null)).toEqual({ channel: 'chrome' });
+});
+
+// --- resolveTargetUrl -------------------------------------------------------
+
+test('resolveTargetUrl anchors a relative path to the base', () => {
+  expect(resolveTargetUrl('/', 'http://localhost:5173')).toBe('http://localhost:5173/');
+  expect(resolveTargetUrl('/login', 'http://localhost:5173')).toBe('http://localhost:5173/login');
+});
+
+test('resolveTargetUrl passes an absolute URL through', () => {
+  expect(resolveTargetUrl('http://example.com/x', 'http://localhost:5173')).toBe(
+    'http://example.com/x',
+  );
+});
 
 // --- appendDebugLogin -------------------------------------------------------
 

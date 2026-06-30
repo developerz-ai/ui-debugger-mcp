@@ -16,6 +16,7 @@
  * never a silent fallback.
  */
 
+import { existsSync } from 'node:fs';
 import { URL } from 'node:url';
 import type { Browser, BrowserContext, Page } from 'playwright-core';
 import { chromium } from 'playwright-core';
@@ -40,8 +41,37 @@ import type { CaptureSink } from './cdp.js';
 import { CdpCapture } from './cdp.js';
 import { normalizeQuery } from './query.js';
 
-/** System Chrome channel used when no explicit `executablePath` is configured. */
+/** System Chrome channel used as the last resort when no binary can be resolved. */
 const DEFAULT_CHANNEL = 'chrome';
+
+/** Detect the Playwright-managed Chromium binary; null if it isn't installed. */
+function detectManagedChromium(): string | null {
+  try {
+    const p = chromium.executablePath();
+    return p && existsSync(p) ? p : null;
+  } catch {
+    return null; // Playwright browser not installed
+  }
+}
+
+/**
+ * Pick the Chromium binary for a managed launch. Order:
+ *   1. explicit `executablePath` from config
+ *   2. the Playwright-managed Chromium, if it's installed (`npx playwright install chromium`)
+ *   3. fall back to the system Google Chrome channel
+ * Without (2) the adapter failed on hosts that have the managed Chromium but no
+ * system Chrome — the common dev setup. `detect` is injected so the ordering is
+ * unit-testable without a real browser install.
+ */
+export function resolveLaunchBinary(
+  config: WebTarget,
+  detect: () => string | null = detectManagedChromium,
+): { executablePath: string } | { channel: string } {
+  if (config.executablePath) return { executablePath: config.executablePath };
+  const managed = detect();
+  if (managed) return { executablePath: managed };
+  return { channel: DEFAULT_CHANNEL };
+}
 
 /** Default cap on `readState` so the tree stays small (overridable via `limit`). */
 const DEFAULT_LIMIT = 200;
@@ -180,6 +210,19 @@ const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
     };
   });
 };
+
+/**
+ * Resolve a navigate target against the configured base URL. Drivers often pass
+ * a relative path (`/`, `/login`) — `page.goto` rejects those as "invalid URL",
+ * so anchor them to `base`. Absolute targets pass through unchanged.
+ */
+export function resolveTargetUrl(target: string, base: string): string {
+  try {
+    return new URL(target, base).toString();
+  } catch {
+    return target; // even base couldn't help — let `goto` surface a clear error
+  }
+}
 
 /** Append the login-bypass query param (`?<param>=true`) when `debugLogin` is configured. */
 export function appendDebugLogin(target: string, debugLogin?: { param: string }): string {
@@ -345,9 +388,7 @@ export class BrowserAdapter implements Adapter {
     // managed and attach speak the same protocol, only the transport differs.
     const context = await chromium.launchPersistentContext(profileDir, {
       headless: config.headless,
-      ...(config.executablePath
-        ? { executablePath: config.executablePath }
-        : { channel: DEFAULT_CHANNEL }),
+      ...resolveLaunchBinary(config),
     });
     const page = context.pages()[0] ?? (await context.newPage());
     const capture = BrowserAdapter.#startCapture(page, onLog);
@@ -373,7 +414,8 @@ export class BrowserAdapter implements Adapter {
   }
 
   async open(target: string): Promise<void> {
-    const url = appendDebugLogin(target, this.#config.debugLogin);
+    const resolved = resolveTargetUrl(target, this.#config.url);
+    const url = appendDebugLogin(resolved, this.#config.debugLogin);
     await this.#run('open', async () => {
       await this.#page.goto(url);
     });
