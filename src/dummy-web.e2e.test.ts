@@ -129,7 +129,7 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
   let client: Client;
   let serverTransport: InMemoryTransport;
   let clientTransport: InMemoryTransport;
-  let manager: SessionManager<Session>;
+  let manager: SessionManager<Session> | undefined;
 
   // Build once; serve throughout the suite.
   beforeAll(() => {
@@ -258,8 +258,11 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
   });
 
   afterEach(async () => {
-    if (manager.has(cwd)) await manager.end(cwd).catch(() => undefined);
-    await client.close().catch(() => undefined);
+    // Guard the handles: beforeEach has several fallible steps before `manager`
+    // and `client` are assigned, so a partial setup must not throw a secondary
+    // teardown error that masks the real failure.
+    if (manager?.has(cwd)) await manager.end(cwd).catch(() => undefined);
+    if (client) await client.close().catch(() => undefined);
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -283,7 +286,8 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
     expect(findRes.isError).toBeFalsy();
     const findings = JSON.parse(resultText(findRes));
 
-    expect(findings.status).toMatch(/^(passed|failed)$/);
+    // Scripted fixture plants bugs → the verdict is a known `failed`, not either.
+    expect(findings.status).toBe('failed');
     expect(() => FindingsSchema.parse(findings)).not.toThrow();
 
     // The mock reports 5 bugs (3 network + 1 console + 1 flow).
@@ -365,7 +369,7 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
     const raw = await readFile(findingsPath, 'utf8');
     const parsed = JSON.parse(raw);
     expect(() => FindingsSchema.parse(parsed)).not.toThrow();
-    expect(parsed.status).toMatch(/^(passed|failed)$/);
+    expect(parsed.status).toBe('failed');
     expect(parsed.bugs.length).toBeGreaterThan(0);
   }, 40_000);
 });

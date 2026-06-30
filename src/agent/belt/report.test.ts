@@ -70,6 +70,36 @@ test('reports counts so the verdict reads without re-opening the file', async ()
   expect(res.counts).toEqual({ steps: 2, bugs: 1, visual: 2 });
 });
 
+test('overlays the recorded act-trail as authoritative steps; counts match the written file', async () => {
+  const { writer, written } = fakeWriter();
+  const trail = [
+    { step: 'key Tab', ok: true, screenshot: '001.png' },
+    { step: 'scroll down', ok: true, screenshot: '002.png' },
+  ];
+  // Driver omitted steps; the recorded trail wins in the persisted verdict.
+  const res = await runReport(writer, { status: 'passed', steps: [], bugs: [], visual: [] }, trail);
+  const persisted = written[0];
+  if (!persisted) throw new Error('expected a written findings');
+  expect(persisted.steps).toEqual(trail);
+  // The returned counts derive from the SAME findings object — no 0-vs-N drift.
+  expect(res.counts.steps).toBe(persisted.steps.length);
+  expect(res.counts.steps).toBe(2);
+});
+
+test('keeps the reported steps when no act-trail was recorded', async () => {
+  const { writer, written } = fakeWriter();
+  const reported = [{ step: 'manual note', ok: false }];
+  const res = await runReport(
+    writer,
+    { status: 'failed', steps: reported, bugs: [], visual: [] },
+    [],
+  );
+  const persisted = written[0];
+  if (!persisted) throw new Error('expected a written findings');
+  expect(persisted.steps).toEqual(reported);
+  expect(res.counts.steps).toBe(persisted.steps.length);
+});
+
 test('omits summary from the written findings when not given', async () => {
   const { writer, written } = fakeWriter();
   await runReport(writer, { status: 'passed', steps: [], bugs: [], visual: [] });

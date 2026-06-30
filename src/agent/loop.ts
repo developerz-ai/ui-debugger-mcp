@@ -30,7 +30,6 @@ import {
 } from 'ai';
 import { z } from 'zod';
 import type { Findings, Step } from '../findings/schema.js';
-import { ReportInputSchema, reportFindings } from './belt/report.js';
 
 /** Safety cap on driver steps before the loop force-stops (paired with `hasToolCall('report')`). */
 export const DEFAULT_MAX_STEPS = 30;
@@ -137,24 +136,6 @@ export function progressForStep(step: FinishedStep, trail: Step[]): Findings | n
   return { status: 'running', steps: [...trail], bugs: [], visual: [] };
 }
 
-/**
- * Terminal findings for a finished `report` step, with the loop's recorded
- * act-trail overlaid as the authoritative `steps`. The driver's `report` rarely
- * restates the steps it took (and the recorded trail carries the evidence frames),
- * so the trail wins whenever the loop captured one; the model-reported steps are
- * the fallback for a run that recorded no `act` trail. Returns `null` when the
- * step did not call `report`, or when the report input fails its schema (the
- * `report` tool itself surfaces that — we never double-write a half-formed verdict).
- */
-export function terminalFindingsWithTrail(step: FinishedStep, trail: Step[]): Findings | null {
-  const report = step.toolCalls.find((call) => call.toolName === 'report');
-  if (!report) return null;
-  const parsed = ReportInputSchema.safeParse(report.input);
-  if (!parsed.success) return null;
-  const findings = reportFindings(parsed.data);
-  return trail.length > 0 ? { ...findings, steps: [...trail] } : findings;
-}
-
 /** Everything the loop needs to run one debug session. */
 export interface DebugAgentOptions {
   /** fast guy — the blind text driver running the high-frequency click loop. */
@@ -169,6 +150,13 @@ export interface DebugAgentOptions {
   progress: ProgressWriter;
   /** Optional sink for a human-readable step trail (`logs/agent.log`). */
   log?: AgentLog;
+  /**
+   * Shared act-trail the running flush appends to and the `report` tool overlays
+   * as the verdict's authoritative `steps` — pass the SAME array to
+   * {@link createReportTool}'s `getTrail` so the write and its counts agree.
+   * Defaults to a fresh array (the report tool then keeps the driver's steps).
+   */
+  trail?: Step[];
   /** Step safety cap; defaults to {@link DEFAULT_MAX_STEPS}. */
   maxSteps?: number;
 }
@@ -230,8 +218,8 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
     progress,
     log,
     maxSteps = DEFAULT_MAX_STEPS,
+    trail = [],
   } = options;
-  const trail: Step[] = [];
   let stepIndex = 0;
   return new ToolLoopAgent<never, BeltTools>({
     model,
@@ -248,16 +236,12 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
     onStepFinish: async (step) => {
       stepIndex += 1;
       log?.(describeStep(step, stepIndex));
+      // Append this step's `act` results to the shared trail and flush a running
+      // snapshot. The terminal `report` step writes its own verdict — with this
+      // same trail overlaid as `steps` (see `createReportTool`) — so the running
+      // flush steps aside for it (`progressForStep` returns null on the report step).
       const running = progressForStep(step, trail);
-      if (running) {
-        await progress.writeFindings(running);
-        return;
-      }
-      // The `report` step writes the verdict but with the driver's (often empty)
-      // step list; overlay the recorded act-trail so the evidence trail survives
-      // into the terminal findings. No-op for non-report steps (returns null).
-      const terminal = terminalFindingsWithTrail(step, trail);
-      if (terminal) await progress.writeFindings(terminal);
+      if (running) await progress.writeFindings(running);
     },
   });
 }

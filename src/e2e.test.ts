@@ -136,7 +136,7 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
   let client: Client;
   let serverTransport: InMemoryTransport;
   let clientTransport: InMemoryTransport;
-  let manager: SessionManager<Session>;
+  let manager: SessionManager<Session> | undefined;
 
   // One fixture server shared across all tests in the describe.
   beforeAll(() => {
@@ -234,8 +234,10 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
   });
 
   afterEach(async () => {
-    if (manager.has(cwd)) await manager.end(cwd).catch(() => undefined);
-    await client.close().catch(() => undefined);
+    // Setup is fallible before `manager`/`client` are assigned; guard the handles
+    // so a partial beforeEach never throws a teardown error that masks the cause.
+    if (manager?.has(cwd)) await manager.end(cwd).catch(() => undefined);
+    if (client) await client.close().catch(() => undefined);
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -332,7 +334,7 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
 
   describe('key/scroll steps and replay evidence', () => {
     let subClient: Client;
-    let subManager: SessionManager<Session>;
+    let subManager: SessionManager<Session> | undefined;
     let subTmpDir: string;
     let subCwd: string;
 
@@ -411,8 +413,10 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
     });
 
     afterEach(async () => {
-      if (subManager.has(subCwd)) await subManager.end(subCwd).catch(() => undefined);
-      await subClient.close().catch(() => undefined);
+      // subManager/subClient may be unassigned if this beforeEach aborts early;
+      // guard them so cleanup never raises a secondary error over the real one.
+      if (subManager?.has(subCwd)) await subManager.end(subCwd).catch(() => undefined);
+      if (subClient) await subClient.close().catch(() => undefined);
       rmSync(subTmpDir, { recursive: true, force: true });
     });
 
@@ -435,7 +439,9 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
       expect(findRes.isError).toBeFalsy();
       const findings = JSON.parse(resultText(findRes));
 
-      expect(findings.status).toMatch(/^(passed|failed)$/);
+      // This describe's mock driver reports `passed`; lock it in so a verdict
+      // regression can't slip through behind an either-verdict match.
+      expect(findings.status).toBe('passed');
       expect(() => FindingsSchema.parse(findings)).not.toThrow();
 
       // Both act verbs must produce a step entry via stepTrailFrom.
@@ -463,7 +469,7 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
       expect(findRes.isError).toBeFalsy();
       const findings = JSON.parse(resultText(findRes));
 
-      expect(findings.status).toMatch(/^(passed|failed)$/);
+      expect(findings.status).toBe('passed');
 
       // The session-builder always wires a replay step post-verdict. Two outcomes:
       //   • ffmpeg present → findings.evidence is the replay.mp4 path (file exists).
