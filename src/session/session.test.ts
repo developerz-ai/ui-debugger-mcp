@@ -661,7 +661,7 @@ test('replay skipped with no note (no frames) leaves findings.evidence and steps
   expect(findings.steps).toEqual([]); // a silent skip adds no note
 });
 
-test('replay skipped with a note (e.g. ffmpeg absent) records a step but no evidence', async () => {
+test('replay skipped with a note (e.g. ffmpeg absent) records a skipped (not failed) step, no evidence', async () => {
   const store = makeStore();
   const session = new Session({
     id: 's1',
@@ -685,7 +685,9 @@ test('replay skipped with a note (e.g. ffmpeg absent) records a step but no evid
   expect(findings.evidence).toBeUndefined(); // nothing was stitched
   expect(findings.steps).toEqual([
     { step: 'open', ok: true }, // the driver's trail is preserved
-    { step: 'replay video', ok: false, note: "ffmpeg not found ('ffmpeg')" },
+    // A missing ffmpeg is a SKIP, not a failure — ok stays true so the run
+    // doesn't read as broken; skipped + note explain the absent replay.mp4.
+    { step: 'replay video', ok: true, skipped: true, note: "ffmpeg not found ('ffmpeg')" },
   ]);
 });
 

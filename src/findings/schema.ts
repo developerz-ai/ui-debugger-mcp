@@ -3,6 +3,10 @@ import { z } from 'zod';
 export const StepSchema = z.object({
   step: z.string(),
   ok: z.boolean(),
+  /** True for a deliberately skipped optional step (e.g. replay video when
+   * ffmpeg is absent). A skip is NOT a failure — `ok` stays true so a clean run
+   * never reads as broken; `note` explains why the step was skipped. */
+  skipped: z.boolean().optional(),
   note: z.string().optional(),
   screenshot: z.string().optional(),
 });
