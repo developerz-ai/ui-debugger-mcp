@@ -305,10 +305,13 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
   }
 
   /**
-   * Record a skipped replay as a `failed` step in the findings so `get_findings`
-   * explains the absent `replay.mp4` (the loud `agent.log` line is written upstream
-   * in the replay step). Preserves the existing trail + summary; writes under the
-   * settled terminal `status`. Best-effort — wrapped by `#ensureReplay`'s catch.
+   * Record a skipped replay as a `skipped` (NOT failed) step in the findings so
+   * `get_findings` explains the absent `replay.mp4` without making a clean run
+   * read as broken — replay is optional PR evidence, and a missing ffmpeg is not
+   * a test failure. `ok` stays true; `skipped` + `note` carry the reason (the loud
+   * `agent.log` line is written upstream in the replay step). Preserves the
+   * existing trail + summary; writes under the settled terminal `status`.
+   * Best-effort — wrapped by `#ensureReplay`'s catch.
    */
   async #noteReplaySkipped(note: string): Promise<void> {
     const findings = await this.#findingsStore.tryReadFindings();
@@ -316,7 +319,7 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
     await this.#findingsStore.writeFindings({
       ...findings,
       status: this.#status,
-      steps: [...findings.steps, { step: 'replay video', ok: false, note }],
+      steps: [...findings.steps, { step: 'replay video', ok: true, skipped: true, note }],
     });
   }
 
