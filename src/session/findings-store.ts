@@ -13,7 +13,7 @@
  * `FindingsError` — never a silent fallback.
  */
 
-import { access, appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { access, appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FindingsError } from '../errors.js';
 import type { Findings } from '../findings/schema.js';
@@ -55,8 +55,10 @@ export class FindingsStore {
   readonly #paths: SessionPaths;
   /** Cached mkdir promise — directories are ensured once per instance. */
   #dirsReady: Promise<void> | null = null;
-  /** Highest screenshot sequence seen; lazily seeded from disk (resume-safe). */
-  #screenshotSeq: number | null = null;
+  /** Cached seed scan — the disk is scanned once per instance (resume-safe). */
+  #seqReady: Promise<void> | null = null;
+  /** Highest screenshot sequence handed out; valid once `#seqReady` settles. */
+  #screenshotSeq = 0;
 
   constructor(paths: SessionPaths) {
     this.#paths = paths;
@@ -72,7 +74,11 @@ export class FindingsStore {
       throw new FindingsError(`Refusing to write invalid findings: ${issues}`);
     }
     await this.#ensureDirs();
-    await writeFile(this.#paths.findingsJson, `${JSON.stringify(result.data, null, 2)}\n`, 'utf8');
+    // Write-then-rename so a concurrent reader (get_findings, CLI `status`) never
+    // sees a torn/empty findings.json — rename is atomic on the same filesystem.
+    const tmp = `${this.#paths.findingsJson}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(result.data, null, 2)}\n`, 'utf8');
+    await rename(tmp, this.#paths.findingsJson);
     return this.#paths.findingsJson;
   }
 
@@ -177,11 +183,18 @@ export class FindingsStore {
     return this.#dirsReady;
   }
 
-  /** Next screenshot index, seeding from existing files so resume never overwrites. */
+  /**
+   * Next screenshot index, seeding from existing files so resume never overwrites.
+   * The seed scan is cached as a promise (like `#ensureDirs`) so concurrent first
+   * saves share one scan and still get distinct numbers — never a duplicate `001`.
+   */
   async #nextSeq(): Promise<number> {
-    if (this.#screenshotSeq === null) {
-      this.#screenshotSeq = await this.#scanMaxSeq();
+    if (this.#seqReady === null) {
+      this.#seqReady = this.#scanMaxSeq().then((max) => {
+        this.#screenshotSeq = max;
+      });
     }
+    await this.#seqReady;
     this.#screenshotSeq += 1;
     return this.#screenshotSeq;
   }
