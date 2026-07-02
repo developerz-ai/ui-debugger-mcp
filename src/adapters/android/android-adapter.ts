@@ -39,6 +39,7 @@ import {
   keyArgs,
   parseScreenSize,
   scrollSwipe,
+  splitTextForInput,
   startArgs,
   swipeArgs,
   tapArgs,
@@ -135,7 +136,12 @@ interface AndroidAdapterHandles {
   adb: Adb;
   ui: UiAutomatorSource;
   attach: boolean;
+  spawn: SpawnEmulator;
+  bootWaitMs: number;
 }
+
+/** Launch the emulator process — the spawn seam tests replace with a fake child. */
+export type SpawnEmulator = (bin: string, args: string[]) => ChildProcess;
 
 export interface AndroidAdapterInit {
   /** Resolved android-target config (avd, emulatorPath, adbSerial). */
@@ -144,6 +150,10 @@ export interface AndroidAdapterInit {
   adb?: Adb;
   /** Override the read source (defaults to {@link AdbUiAutomator}); a seam for tests. */
   ui?: UiAutomatorSource;
+  /** Override the emulator spawn (defaults to `spawn`, detached); a seam for tests. */
+  spawn?: SpawnEmulator;
+  /** Override the managed-boot deadline (defaults to {@link BOOT_WAIT_MS}); a seam for tests. */
+  bootWaitMs?: number;
 }
 
 /**
@@ -155,7 +165,11 @@ export class AndroidAdapter implements Adapter {
   readonly #adb: Adb;
   readonly #ui: UiAutomatorSource;
   readonly #attach: boolean;
+  readonly #spawn: SpawnEmulator;
+  readonly #bootWaitMs: number;
   #emulator: ChildProcess | null = null;
+  /** Why the managed emulator process is unusable (launch failure / early exit), or null. */
+  #emulatorDown: string | null = null;
   #booted: boolean;
   #screen: Bounds | null = null;
 
@@ -164,6 +178,8 @@ export class AndroidAdapter implements Adapter {
     this.#adb = handles.adb;
     this.#ui = handles.ui;
     this.#attach = handles.attach;
+    this.#spawn = handles.spawn;
+    this.#bootWaitMs = handles.bootWaitMs;
     // Attach mode targets an already-running device — treat it as booted from the start.
     this.#booted = handles.attach;
   }
@@ -178,6 +194,8 @@ export class AndroidAdapter implements Adapter {
       adb,
       ui: init.ui ?? new AdbUiAutomator(adb),
       attach,
+      spawn: init.spawn ?? ((bin, args) => spawn(bin, args, { detached: true, stdio: 'ignore' })),
+      bootWaitMs: init.bootWaitMs ?? BOOT_WAIT_MS,
     });
   }
 
@@ -213,10 +231,13 @@ export class AndroidAdapter implements Adapter {
 
   async type(target: NodeRef, text: string): Promise<void> {
     // Contract: focus the target first, then type. Tap its center to focus.
+    // Text goes out in %s-safe chunks — one `input text` per chunk (they append).
     await this.#run('type', async () => {
       const { x, y } = centerOf((await this.#resolve(target)).bounds);
       await this.#adb.shell(tapArgs(x, y));
-      if (text !== '') await this.#adb.shell(textArgs(text));
+      for (const chunk of splitTextForInput(text)) {
+        await this.#adb.shell(textArgs(chunk));
+      }
     });
   }
 
@@ -266,7 +287,9 @@ export class AndroidAdapter implements Adapter {
   /** Drain recent logcat as normalized console entries (newest first), narrowed by {@link LogQuery}. */
   async console(opts: LogQuery = {}): Promise<ConsoleEntry[]> {
     return this.#run('console', async () => {
-      const tail = opts.limit ?? LOGCAT_TAIL;
+      // `limit` caps the *filtered result*, never the raw window — narrowing the
+      // logcat tail to `limit` first would make filtered reads miss older matches.
+      const tail = Math.max(LOGCAT_TAIL, opts.limit ?? 0);
       // `-t N` dumps the most recent N lines and exits (implies `-d`); `-v epoch` → real timestamps.
       const raw = await this.#adb.shell(['logcat', '-v', 'epoch', '-t', String(tail)]);
       const entries = applyLogFilters(parseLogcat(raw).reverse(), opts.filters);
@@ -307,21 +330,54 @@ export class AndroidAdapter implements Adapter {
     if (this.#booted) return;
     if (!this.#emulator) {
       const bin = this.#config.emulatorPath ?? 'emulator';
-      this.#emulator = spawn(bin, [`@${this.#config.avd}`], { detached: true, stdio: 'ignore' });
+      const child = this.#spawn(bin, [`@${this.#config.avd}`]);
+      this.#emulatorDown = null;
+      // Both fire async (later tick): without a listener a bad `emulatorPath` would
+      // crash the whole server via an unhandled 'error' event. Capture the failure
+      // and let the boot poll below surface it as a loud AdapterError.
+      child.on('error', (err) => {
+        this.#emulatorDown = `emulator ('${bin}') failed to launch: ${err.message}`;
+      });
+      child.on('exit', (code, signal) => {
+        this.#emulatorDown ??= `emulator ('${bin}') exited before boot (${signal ?? code ?? 'unknown'})`;
+      });
+      this.#emulator = child;
     }
-    await this.#adb.adb(['wait-for-device']);
-    const start = Date.now();
+    const deadline = Date.now() + this.#bootWaitMs;
+    await this.#awaitDevice(deadline);
     for (;;) {
       const out = (await this.#adb.shell(['getprop', 'sys.boot_completed'])).trim();
       if (out === '1') break;
-      if (Date.now() - start >= BOOT_WAIT_MS) {
+      if (Date.now() >= deadline) {
         throw new AdapterError(
-          `android: emulator @${this.#config.avd} did not boot within ${BOOT_WAIT_MS}ms`,
+          `android: emulator @${this.#config.avd} did not boot within ${this.#bootWaitMs}ms`,
         );
       }
       await delay(POLL_MS);
     }
     this.#booted = true;
+  }
+
+  /**
+   * Bounded replacement for the unbounded `adb wait-for-device`: poll `get-state`
+   * until a device answers, failing loud when the emulator died or the boot
+   * deadline passed — a dead emulator must never hang `open` forever.
+   */
+  async #awaitDevice(deadline: number): Promise<void> {
+    for (;;) {
+      if (this.#emulatorDown !== null) {
+        throw new AdapterError(`android: ${this.#emulatorDown}`);
+      }
+      // `get-state` exits non-zero while no device is connected — that's "keep waiting".
+      const state = await this.#adb.adb(['get-state']).catch(() => '');
+      if (state.trim() === 'device') return;
+      if (Date.now() >= deadline) {
+        throw new AdapterError(
+          `android: no device appeared within ${this.#bootWaitMs}ms (emulator @${this.#config.avd})`,
+        );
+      }
+      await delay(POLL_MS);
+    }
   }
 
   /** Read (and cache) the device screen size for viewport scrolls. */
