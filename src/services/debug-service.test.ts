@@ -7,11 +7,13 @@ import {
   AdapterError,
   SessionBusyError,
   SessionNotFoundError,
+  SessionSettledError,
   TargetNotFoundError,
 } from '../errors.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { SessionManager } from '../session/manager.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
+import type { StatePort } from '../session/state-file.js';
 import { _resetCounter, sessionPaths, workspacePaths } from '../session/workspace.js';
 import { DebugService } from './debug-service.js';
 import type { BuiltSession, SessionBuilder } from './session-builder.js';
@@ -30,11 +32,13 @@ const CONFIG: ResolvedConfig = {
   provider: { apiKey: 'sk-test', baseUrl: 'https://openrouter.ai/api/v1' },
 };
 
-/** Adapter stub that records how many times it was closed. */
+/** Adapter stub that records how many times it was closed (optionally failing). */
 class FakeAdapter implements SessionAdapter {
   closeCalls = 0;
+  constructor(readonly closeFails = false) {}
   async close(): Promise<void> {
     this.closeCalls += 1;
+    if (this.closeFails) throw new AdapterError('close failed');
   }
 }
 
@@ -66,11 +70,14 @@ afterEach(async () => {
 });
 
 /** A fake session builder backed by a real `Session` (FakeAdapter + temp store). */
-function fakeBuilder(opts: { openFails?: boolean } = {}): { build: SessionBuilder; log: BuildLog } {
+function fakeBuilder(opts: { openFails?: boolean; closeFails?: boolean; run?: LoopRunner } = {}): {
+  build: SessionBuilder;
+  log: BuildLog;
+} {
   const log: BuildLog = { params: [], adapters: [], openCalls: 0 };
   const build: SessionBuilder = async (params) => {
     log.params.push({ ...params });
-    const adapter = new FakeAdapter();
+    const adapter = new FakeAdapter(opts.closeFails ?? false);
     log.adapters.push(adapter);
     const store = new FindingsStore(sessionPaths(workspacePaths(CWD, tmpDir), params.id));
     const session = new Session<SessionAdapter>({
@@ -86,7 +93,7 @@ function fakeBuilder(opts: { openFails?: boolean } = {}): { build: SessionBuilde
         log.openCalls += 1;
         if (opts.openFails) throw new AdapterError('open failed');
       },
-      run: idleRun,
+      run: opts.run ?? idleRun,
     };
     return built;
   };
@@ -125,6 +132,28 @@ test('start refuses a second run for the same cwd (busy), without rebuilding', a
   await svc.start({ target: 'web', goal: 'first' });
   await expect(svc.start({ target: 'web', goal: 'second' })).rejects.toThrow(SessionBusyError);
   expect(log.params).toHaveLength(1);
+});
+
+test('two concurrent starts: the second fails busy without launching a second build', async () => {
+  const { build } = fakeBuilder();
+  let builds = 0;
+  const slowBuild: SessionBuilder = async (params) => {
+    builds += 1;
+    await tick(20); // hold the build (≈ Chromium launching) so the calls overlap
+    return build(params);
+  };
+  const svc = makeService(slowBuild);
+
+  const [first, second] = await Promise.allSettled([
+    svc.start({ target: 'web', goal: 'first' }),
+    svc.start({ target: 'web', goal: 'second' }),
+  ]);
+
+  expect(first.status).toBe('fulfilled');
+  expect(second.status).toBe('rejected');
+  expect((second as PromiseRejectedResult).reason).toBeInstanceOf(SessionBusyError);
+  expect(builds).toBe(1); // the loser never reached the builder — no second browser
+  expect(manager.has(CWD)).toBe(true); // the winner's run is live
 });
 
 test('start tears the session down and frees the lock when open fails', async () => {
@@ -207,6 +236,26 @@ test('send queues a mid-run message on the active session', async () => {
   expect(manager.get(CWD).inbox).toEqual(['also check mobile']);
 });
 
+test('a failed start releases the in-flight guard so a retry is not busy', async () => {
+  const svc = makeService(fakeBuilder({ openFails: true }).build);
+  await expect(svc.start({ target: 'web', goal: 'x' })).rejects.toThrow(AdapterError);
+  // A stuck guard would surface SessionBusyError here instead of the open failure.
+  await expect(svc.start({ target: 'web', goal: 'x' })).rejects.toThrow(AdapterError);
+});
+
+test('send after the run settles fails loud instead of dropping the message', async () => {
+  // A loop that concludes immediately: the session settles (no findings → failed).
+  const instantRun: LoopRunner = async () => {};
+  const svc = makeService(fakeBuilder({ run: instantRun }).build);
+  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
+
+  await manager.get(CWD).snapshot(['status'], 1_000); // long-poll until it settles
+  expect(manager.get(CWD).status).toBe('failed');
+
+  expect(() => svc.send({ session_id, message: 'too late' })).toThrow(SessionSettledError);
+  expect(manager.get(CWD).inbox).toEqual([]); // never silently queued
+});
+
 test('send rejects a stale/unknown session id', async () => {
   const svc = makeService(fakeBuilder().build);
   expect(() => svc.send({ session_id: 'ghost', message: 'x' })).toThrow(SessionNotFoundError);
@@ -260,7 +309,7 @@ test('describe lists every configured target with mode + operational flags', () 
     name: 'phone',
     adapter: 'android',
     mode: 'attach',
-    operational: false,
+    operational: true, // android adapter is shipped — never advertised as inoperative
   });
 });
 
@@ -283,4 +332,37 @@ test('end aborts the run, closes the adapter, and frees the lock', async () => {
   expect(manager.has(CWD)).toBe(false);
   expect(log.adapters[0]?.closeCalls).toBe(1);
   await expect(svc.end({ session_id })).rejects.toThrow(SessionNotFoundError);
+});
+
+/** A `StatePort` spy counting `clear()` calls. */
+function spyState(): { state: StatePort; clears: () => number } {
+  let clears = 0;
+  const state: StatePort = {
+    async record() {},
+    async clear() {
+      clears += 1;
+    },
+  };
+  return { state, clears: () => clears };
+}
+
+test('end clears state.json even when the session close throws (error still propagates)', async () => {
+  const { build } = fakeBuilder({ closeFails: true });
+  const { state, clears } = spyState();
+  const svc = new DebugService({ manager, config: CONFIG, cwd: CWD, build, state, now: () => NOW });
+  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
+
+  await expect(svc.end({ session_id })).rejects.toThrow(AdapterError);
+  expect(clears()).toBe(1); // no stale `running` breadcrumb for the CLI to SIGTERM
+  expect(manager.has(CWD)).toBe(false);
+});
+
+test('endActive clears state.json even when the session close throws', async () => {
+  const { build } = fakeBuilder({ closeFails: true });
+  const { state, clears } = spyState();
+  const svc = new DebugService({ manager, config: CONFIG, cwd: CWD, build, state, now: () => NOW });
+  await svc.start({ target: 'web', goal: 'x' });
+
+  await expect(svc.endActive()).rejects.toThrow(AdapterError);
+  expect(clears()).toBe(1);
 });

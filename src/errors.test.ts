@@ -7,6 +7,7 @@ import {
   ProviderError,
   SessionBusyError,
   SessionNotFoundError,
+  SessionSettledError,
   TargetNotFoundError,
   UiDebuggerError,
 } from './errors.js';
@@ -40,6 +41,14 @@ test('SessionNotFoundError: message, name, instanceof chain', () => {
   expect(e.message).toBe('not found');
   expect(e.name).toBe('SessionNotFoundError');
   expect(e instanceof SessionNotFoundError).toBe(true);
+  expect(e instanceof UiDebuggerError).toBe(true);
+});
+
+test('SessionSettledError: message, name, instanceof chain', () => {
+  const e = new SessionSettledError('already settled');
+  expect(e.message).toBe('already settled');
+  expect(e.name).toBe('SessionSettledError');
+  expect(e instanceof SessionSettledError).toBe(true);
   expect(e instanceof UiDebuggerError).toBe(true);
 });
 
