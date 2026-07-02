@@ -35,6 +35,15 @@ export class SessionNotFoundError extends UiDebuggerError {
   }
 }
 
+/** The run exists but already settled its verdict — mid-run actions (e.g. `send_message`) no longer apply. */
+export class SessionSettledError extends UiDebuggerError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionSettledError';
+    Object.setPrototypeOf(this, SessionSettledError.prototype);
+  }
+}
+
 export class TargetNotFoundError extends UiDebuggerError {
   constructor(message: string) {
     super(message);

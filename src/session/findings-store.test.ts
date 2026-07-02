@@ -45,6 +45,16 @@ test('saveScreenshot caps a long label so the filename never overflows (ENAMETOO
   expect(file).not.toMatch(/-\.png$/); // no trailing dash before the extension
 });
 
+test('two concurrent first saves get distinct sequence numbers (001 and 002)', async () => {
+  await Promise.all([
+    store.saveScreenshot('frame a', new Uint8Array([1])),
+    store.saveScreenshot('frame b', new Uint8Array([2])),
+  ]);
+  const frames = await store.listScreenshots();
+  expect(frames).toHaveLength(2);
+  expect(frames.map((f) => f.seq)).toEqual([1, 2]); // never a duplicate 001 overwrite
+});
+
 // --- listScreenshots --------------------------------------------------------
 
 test('listScreenshots returns [] when no frames were saved', async () => {
@@ -98,6 +108,19 @@ test('writeFindings is idempotent — second write overwrites, read returns late
   const read = await store.readFindings();
   expect(read.status).toBe('failed');
   expect(read.summary).toBe('later');
+});
+
+test('writeFindings replaces atomically — no .tmp remains, target is always valid JSON', async () => {
+  await store.writeFindings(VALID_FINDINGS);
+  await store.writeFindings({ ...VALID_FINDINGS, status: 'failed' });
+  const ws = workspacePaths('/project/my-app', tmpDir);
+  const sp = sessionPaths(ws, 'test-session-001');
+  const fs = await import('node:fs/promises');
+  const entries = await fs.readdir(sp.root);
+  expect(entries).toContain('findings.json');
+  expect(entries).not.toContain('findings.json.tmp'); // rename consumed the temp file
+  const raw = await fs.readFile(sp.findingsJson, 'utf8');
+  expect(JSON.parse(raw).status).toBe('failed');
 });
 
 test('readFindings throws FindingsError when file is missing', async () => {

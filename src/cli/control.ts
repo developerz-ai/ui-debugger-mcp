@@ -115,6 +115,16 @@ export async function runStop(cwd = process.cwd()): Promise<void> {
     return;
   }
 
+  // A terminal state (`ended`/`stopped`) means the run is already down — the pid
+  // may be the healthy, idle MCP server still serving the smart agent. Don't
+  // signal it, and don't relabel the recorded terminal status.
+  if (state.status !== 'running') {
+    console.log(
+      `ui-debugger-mcp: no active debug run to stop for '${project}' (last run '${state.sessionId}' ${state.status}).`,
+    );
+    return;
+  }
+
   const { check, alive } = checkServer(state.pid, state.identity);
 
   // The recorded PID is alive but now owns an *unrelated* process (it was recycled

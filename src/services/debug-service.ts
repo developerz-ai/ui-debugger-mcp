@@ -16,7 +16,12 @@
 
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
-import { SessionBusyError, SessionNotFoundError, TargetNotFoundError } from '../errors.js';
+import {
+  SessionBusyError,
+  SessionNotFoundError,
+  SessionSettledError,
+  TargetNotFoundError,
+} from '../errors.js';
 import type { Findings } from '../findings/schema.js';
 import type { SessionManager } from '../session/manager.js';
 import type { Session, SnapshotField } from '../session/session.js';
@@ -73,7 +78,7 @@ export interface TargetInfo {
   adapter: Target['adapter'];
   /** `managed` = the server launches/owns it; `attach` = it connects to a running one. */
   mode: 'managed' | 'attach';
-  /** Whether this adapter is wired yet (only `browser` today). */
+  /** Whether this adapter is wired. All three (browser/desktop/android) are shipped. */
   operational: boolean;
   /** Web target entry url, when applicable. */
   url?: string;
@@ -130,6 +135,13 @@ export class DebugService implements DebugApi {
   readonly #now: () => number;
   /** Live wall-clock timer for the active run; cleared when the run ends. */
   #timer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * A `start()` is in flight (building/launching, slot not yet in the manager).
+   * Set synchronously before the first await so a concurrent `start_debug` fails
+   * loud with {@link SessionBusyError} instead of racing a second browser onto
+   * the same profile.
+   */
+  #starting = false;
 
   constructor(deps: DebugServiceDeps) {
     this.#manager = deps.manager;
@@ -155,28 +167,41 @@ export class DebugService implements DebugApi {
           'End it before starting another — one run per project at a time.',
       );
     }
-
-    const id = generateSessionId(this.#now());
-    const built = await this.#build({ id, target, goal, criteria, url });
+    // Taken synchronously (no await since the has() check) — a concurrent start
+    // must fail here, not launch a second browser on the same profile.
+    if (this.#starting) {
+      throw new SessionBusyError(
+        `A debug session is already starting for '${cwd}'. ` +
+          'Wait for it to open (or end it) before starting another — one run per project at a time.',
+      );
+    }
+    this.#starting = true;
 
     try {
-      this.#manager.start(cwd, built.session);
-    } catch (err) {
-      await built.session.close().catch(() => undefined);
-      throw err;
-    }
+      const id = generateSessionId(this.#now());
+      const built = await this.#build({ id, target, goal, criteria, url });
 
-    try {
-      await built.open();
-      built.session.start(built.run);
-    } catch (err) {
-      await this.#manager.end(cwd).catch(() => undefined);
-      throw err;
-    }
+      try {
+        this.#manager.start(cwd, built.session);
+      } catch (err) {
+        await built.session.close().catch(() => undefined);
+        throw err;
+      }
 
-    await this.#state.record({ sessionId: id, target, goal });
-    this.#armTimeout(timeoutMs ?? this.#defaultTimeoutMs);
-    return { session_id: id };
+      try {
+        await built.open();
+        built.session.start(built.run);
+      } catch (err) {
+        await this.#manager.end(cwd).catch(() => undefined);
+        throw err;
+      }
+
+      await this.#state.record({ sessionId: id, target, goal });
+      this.#armTimeout(timeoutMs ?? this.#defaultTimeoutMs);
+      return { session_id: id };
+    } finally {
+      this.#starting = false;
+    }
   }
 
   /** Arm the wall-clock cap: auto-end the run when it fires (replaces any prior timer). */
@@ -196,9 +221,20 @@ export class DebugService implements DebugApi {
     }
   }
 
-  /** Queue a mid-run instruction for the active run's driver. */
+  /**
+   * Queue a mid-run instruction for the active run's driver. Fails loud
+   * ({@link SessionSettledError}) once the run has settled — the loop no longer
+   * drains the inbox, so an ack then would silently drop the message.
+   */
   send({ session_id, message }: SendInput): Ack {
-    this.#require(session_id).pushMessage(message);
+    const session = this.#require(session_id);
+    if (session.status !== 'running') {
+      throw new SessionSettledError(
+        `Debug run '${session_id}' has already settled ('${session.status}') — the driver is no ` +
+          'longer listening. Read its results with get_findings, or start a new run with start_debug.',
+      );
+    }
+    session.pushMessage(message);
     return { ok: true, session_id };
   }
 
@@ -232,8 +268,14 @@ export class DebugService implements DebugApi {
   async end({ session_id }: EndInput): Promise<Ack> {
     this.#require(session_id);
     this.#clearTimeout();
-    await this.#manager.end(this.#cwd);
-    await this.#state.clear();
+    // Clear the breadcrumb even when the close throws: the manager frees the slot
+    // before closing, so a stale `running` state.json would make a later CLI
+    // `stop` SIGTERM a healthy server. The close error still propagates.
+    try {
+      await this.#manager.end(this.#cwd);
+    } finally {
+      await this.#state.clear();
+    }
     return { ok: true, session_id };
   }
 
@@ -245,8 +287,12 @@ export class DebugService implements DebugApi {
   async endActive(): Promise<void> {
     this.#clearTimeout();
     if (!this.#manager.has(this.#cwd)) return;
-    await this.#manager.end(this.#cwd);
-    await this.#state.clear();
+    // Same contract as `end()`: the breadcrumb clears even when the close throws.
+    try {
+      await this.#manager.end(this.#cwd);
+    } finally {
+      await this.#state.clear();
+    }
   }
 
   /** Resolve the active session for this cwd, asserting its id matches the caller's. */
@@ -274,7 +320,7 @@ function describeTarget(name: string, target: Target): TargetInfo {
     name,
     adapter: target.adapter,
     mode: isAttach(target) ? 'attach' : 'managed',
-    operational: target.adapter === 'browser' || target.adapter === 'desktop',
+    operational: true,
   };
   if (target.adapter === 'browser') {
     return { ...base, url: target.url, headless: target.headless };
