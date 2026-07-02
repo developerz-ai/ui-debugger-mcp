@@ -21,8 +21,13 @@ test('maps role + quoted name onto the role engine (case-insensitive)', () => {
 
 test('keeps real CSS selectors as CSS', () => {
   expect(normalizeQuery('.add-to-cart')).toBe('.add-to-cart');
+  expect(normalizeQuery('.class')).toBe('.class');
   expect(normalizeQuery('#submit')).toBe('#submit');
+  expect(normalizeQuery('#id')).toBe('#id');
   expect(normalizeQuery('button.add')).toBe('button.add');
+  expect(normalizeQuery('div.card')).toBe('div.card');
+  expect(normalizeQuery('a:hover')).toBe('a:hover');
+  expect(normalizeQuery('input[type=text]')).toBe('input[type=text]');
   expect(normalizeQuery('[data-id="3"]')).toBe('[data-id="3"]');
   expect(normalizeQuery('nav > a')).toBe('nav > a');
   expect(normalizeQuery('div > .foo')).toBe('div > .foo');
@@ -35,6 +40,14 @@ test('does not misclassify labels as role= or CSS (narrowed heuristics)', () => 
   // A combinator not flanked by simple selectors on both sides stays text
   expect(normalizeQuery('Next >')).toBe('text=Next >');
   expect(normalizeQuery('A ~ B')).toBe('text=A ~ B');
+});
+
+test('word + trailing punctuation is visible text, not CSS', () => {
+  // `.`/`:` after a word only reads as CSS with a selector-ish continuation —
+  // ellipses, trailing dots, and `label: value` prose stay on the text engine.
+  expect(normalizeQuery('Loading...')).toBe('text=Loading...');
+  expect(normalizeQuery('Loading.')).toBe('text=Loading.');
+  expect(normalizeQuery('Error: payment failed')).toBe('text=Error: payment failed');
 });
 
 test('falls back to the text engine for plain visible text', () => {
