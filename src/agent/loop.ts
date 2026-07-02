@@ -6,8 +6,9 @@
  * or a safety step cap trips. Two things make it a *conversation*, not a job:
  *
  *   - **inbox** — `prepareStep` drains the session inbox between steps and folds
- *     any mid-run messages (the smart agent's `send_message`) into the next turn,
- *     so the driver adapts without restarting.
+ *     any mid-run messages (the smart agent's `send_message`) into a standing
+ *     instruction block re-appended to EVERY turn (the SDK rebuilds each step's
+ *     prompt from scratch), so the driver adapts without restarting or forgetting.
  *   - **incremental findings** — `onStepFinish` lifts each step's `act` results
  *     into a running step trail and flushes it as `status: 'running'` findings,
  *     so `get_findings` shows live progress before the verdict lands.
@@ -70,19 +71,27 @@ export interface FinishedStep {
 const ActStepSchema = z.object({ label: z.string(), screenshot: z.string() });
 
 /**
- * `prepareStep`: fold any mid-run messages into the next model turn. Drains the
- * inbox; when non-empty, appends one user message so the driver adapts before its
- * next action. Returns `{}` (no override) when the inbox is empty.
+ * `prepareStep`: fold mid-run messages into the next model turn. Drains the inbox
+ * into `standing` — the run-long list of caller instructions — then, while any
+ * exist, appends ONE user message rebuilt from the whole list.
+ *
+ * Rebuilt on EVERY step, not just the drain step: the SDK composes each step's
+ * prompt fresh from `[...initialMessages, ...responseMessages]` and never persists
+ * a `prepareStep` messages override, so an instruction injected once would reach
+ * the driver for exactly one step and then vanish. Because the base `messages`
+ * arrive without the previous step's injection, re-appending the single rebuilt
+ * block never accumulates duplicates. Returns `{}` when no instructions exist.
  */
-export function drainInboxIntoStep(
+export function foldInstructionsIntoStep(
   inbox: LoopInbox,
+  standing: string[],
   messages: ModelMessage[],
 ): { messages: ModelMessage[] } | Record<string, never> {
-  const pending = inbox.drain();
-  if (pending.length === 0) return {};
+  standing.push(...inbox.drain());
+  if (standing.length === 0) return {};
   const injected: ModelMessage = {
     role: 'user',
-    content: `New instructions from the smart agent (mid-run):\n${pending
+    content: `Mid-run instructions from the caller (still in effect):\n${standing
       .map((message) => `- ${message}`)
       .join('\n')}\nFold these in, then continue.`,
   };
@@ -221,13 +230,16 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
     trail = [],
   } = options;
   let stepIndex = 0;
+  // Run-long list of mid-run caller instructions: drained from the inbox once,
+  // re-folded into EVERY step's prompt (the SDK never persists a prepareStep override).
+  const standing: string[] = [];
   return new ToolLoopAgent<never, BeltTools>({
     model,
     tools,
     instructions,
     stopWhen: [stepCountIs(maxSteps), hasToolCall('report')],
     prepareStep: ({ messages, stepNumber }) => {
-      const withInbox = drainInboxIntoStep(inbox, messages);
+      const withInbox = foldInstructionsIntoStep(inbox, standing, messages);
       const nudge = budgetNudge(stepNumber, maxSteps);
       if (!nudge) return withInbox;
       const base = 'messages' in withInbox ? withInbox.messages : messages;

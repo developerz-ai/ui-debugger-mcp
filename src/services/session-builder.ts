@@ -234,7 +234,7 @@ export async function buildSession(
     const agent = createDebugAgent({
       model: models.driver,
       tools: {
-        observe: withToolLog('observe', createObserveTool(adapter), logAgent),
+        observe: withToolLog('observe', createObserveTool(adapter, store), logAgent),
         act: withToolLog('act', createActTool(adapter, store), logAgent),
         look: withToolLog('look', createLookTool(adapter, models.vision, store), logAgent),
         report: withToolLog(

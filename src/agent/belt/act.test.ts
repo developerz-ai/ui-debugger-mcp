@@ -248,6 +248,12 @@ test('schema accepts a minimal click', () => {
   expect(ActInputSchema.safeParse({ action: 'click', target: '#x' }).success).toBe(true);
 });
 
+test('schema caps wait timeout at 60s — an uncapped wait would hang session teardown', () => {
+  expect(ActInputSchema.safeParse({ action: 'wait', timeout: 600_000 }).success).toBe(false);
+  expect(ActInputSchema.safeParse({ action: 'wait', timeout: 60_001 }).success).toBe(false);
+  expect(ActInputSchema.safeParse({ action: 'wait', timeout: 60_000 }).success).toBe(true);
+});
+
 // The flat schema can't encode per-action requirements, so `runAct` enforces them.
 test('type without text → throws AgentError (flat schema, runtime guard)', async () => {
   const { adapter, calls } = fakeAdapter(button);

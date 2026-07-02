@@ -71,8 +71,11 @@ export const ActInputSchema = z.object({
     .number()
     .int()
     .positive()
+    .max(60_000)
     .optional()
-    .describe('hard cap in ms; throws on expiry (action=wait)'),
+    .describe(
+      'hard cap in ms, at most 60000 (60s — teardown must never hang); throws on expiry (action=wait)',
+    ),
 });
 
 export type ActInput = z.infer<typeof ActInputSchema>;

@@ -4,7 +4,9 @@
  * One SQL-like reader, four "tables" picked by `kind`, each routed to one method
  * on the shared {@link Adapter} contract:
  *   - `tree`       → `readState`   (normalized UI nodes; DOM · a11y · view-hierarchy)
- *   - `screenshot` → `screenshot`  (PNG bytes, base64 — an evidence frame)
+ *   - `screenshot` → `screenshot`  (an evidence frame, SAVED to `screenshots/` — the
+ *     driver is a blind text model and the SDK re-sends tool results every step, so
+ *     the result carries the saved path, never the PNG bytes)
  *   - `console`    → `console`     (captured console/error log, newest first)
  *   - `network`    → `network`     (captured network exchanges, newest first)
  *
@@ -32,6 +34,7 @@ import type {
   NodeField,
 } from '../../adapters/contract.js';
 import { AgentError } from '../../errors.js';
+import type { EvidenceRecorder } from './look.js';
 
 /** The four observable channels `kind` selects (each routes to one contract method). */
 const OBSERVE_KINDS = ['tree', 'screenshot', 'console', 'network'] as const;
@@ -90,7 +93,7 @@ export type TreeNode = Partial<Node> & { target?: string };
 /** Structured `observe` result, discriminated on `kind` (mirrors the input channel). */
 export type ObserveResult =
   | { kind: 'tree'; count: number; nodes: TreeNode[] }
-  | { kind: 'screenshot'; encoding: 'png'; bytes: number; data: string }
+  | { kind: 'screenshot'; path: string; bytes: number }
   | { kind: 'console'; count: number; entries: ConsoleEntry[] }
   | { kind: 'network'; count: number; entries: NetworkEntry[] };
 
@@ -141,10 +144,12 @@ function baseSelector(node: Node): string | null {
  * `>> nth=` in document order — so the agent never has to invent a selector (the
  * #1 cause of wasted steps: a blind model guessing CSS that does not resolve).
  *
- * A `scoped` read (`within`/`filters`) returns a *subset*, so the `nth=` index —
- * and even a bare role/text selector — can resolve a different element when `act`
- * replays it with an unscoped `find`. In that case we emit no `target`: better the
- * agent falls back (visible text / `role "name"`) than act on the wrong node.
+ * A `scoped` read (`query`/`within`/`filters`) returns a *subset*, so the `nth=`
+ * index — and even a bare role/text selector — can resolve a different element when
+ * `act` replays it with an unscoped, document-wide `find` (e.g. header "Settings"
+ * instead of the sidebar "Settings" the narrowed read returned). In that case we
+ * emit no `target`: better the agent falls back (visible text / `role "name"`) than
+ * act on the wrong node.
  */
 function withTargets(nodes: Node[], fields?: readonly NodeField[], scoped = false): TreeNode[] {
   const seen = new Map<string, number>();
@@ -169,26 +174,30 @@ function pick<T, K extends keyof T>(obj: T, keys: readonly K[]): Pick<T, K> {
 
 /**
  * Route one `observe` call to the adapter and shape the result. Pure over the
- * {@link Adapter} seam (no `tool()` wrapper), so it unit-tests against a fake.
+ * {@link Adapter} + {@link EvidenceRecorder} seams (no `tool()` wrapper), so it
+ * unit-tests against fakes.
  */
-export async function runObserve(adapter: Adapter, input: ObserveInput): Promise<ObserveResult> {
+export async function runObserve(
+  adapter: Adapter,
+  recorder: EvidenceRecorder,
+  input: ObserveInput,
+): Promise<ObserveResult> {
   const { kind, query, fields, filters, limit, within } = input;
 
   switch (kind) {
     case 'tree': {
       const nodes = await adapter.readState({ query, filters, limit, within });
-      const scoped = within !== undefined || filters !== undefined;
+      const scoped = query !== undefined || within !== undefined || filters !== undefined;
       const projected = withTargets(nodes, fields, scoped);
       return { kind, count: projected.length, nodes: projected };
     }
     case 'screenshot': {
+      // Save the frame as evidence and return its path — never the base64 bytes:
+      // the driver is blind, and the SDK re-sends tool results on every later step,
+      // so an inlined PNG would permanently flood the text model's context.
       const png = await adapter.screenshot();
-      return {
-        kind,
-        encoding: 'png',
-        bytes: png.byteLength,
-        data: Buffer.from(png).toString('base64'),
-      };
+      const path = await recorder.saveScreenshot('observe', png);
+      return { kind, path, bytes: png.byteLength };
     }
     case 'console': {
       const entries = await adapter.console({ filters, limit });
@@ -205,12 +214,12 @@ export async function runObserve(adapter: Adapter, input: ObserveInput): Promise
   }
 }
 
-/** Build the `observe` tool bound to one adapter, for the debug agent's belt. */
-export function createObserveTool(adapter: Adapter) {
+/** Build the `observe` tool bound to one adapter + recorder, for the debug agent's belt. */
+export function createObserveTool(adapter: Adapter, recorder: EvidenceRecorder) {
   return tool({
     description:
-      'Read the target without mutating it. Pick a channel with kind (tree=UI nodes, screenshot=PNG evidence, console=logs, network=requests); compose with query/fields/filters/limit/within. Use it to inspect state before and after acting.',
+      'Read the target without mutating it. Pick a channel with kind (tree=UI nodes, screenshot=PNG evidence saved to screenshots/ — returns its path, console=logs, network=requests); compose with query/fields/filters/limit/within. Use it to inspect state before and after acting.',
     inputSchema: ObserveInputSchema,
-    execute: (input) => runObserve(adapter, input),
+    execute: (input) => runObserve(adapter, recorder, input),
   });
 }

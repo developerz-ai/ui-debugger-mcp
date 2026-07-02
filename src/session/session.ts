@@ -44,9 +44,10 @@ export interface SessionAdapter {
  * Post-verdict findings condenser — the summary actor. Given the run's terminal
  * findings, returns one actionable paragraph for the smart agent. Bound to the
  * summary model OUTSIDE the session (so the session stays model-blind); the session
- * invokes it only when the driver left `findings.summary` empty.
+ * invokes it only when the driver left `findings.summary` empty, passing its abort
+ * signal so teardown cancels the in-flight model call instead of abandoning it.
  */
-export type SummarizeStep = (findings: Findings) => Promise<string>;
+export type SummarizeStep = (findings: Findings, signal?: AbortSignal) => Promise<string>;
 
 /**
  * Outcome of the post-verdict replay attempt:
@@ -266,7 +267,9 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
       // value the persisted findings don't yet carry (e.g. `failed` over a stale
       // `running`), so the digest must reflect the final verdict, not the disk copy.
       const terminalFindings = { ...findings, status: this.#status };
-      const summary = await this.#summarize(terminalFindings);
+      // Threaded abort: `#raceAbort` stops WAITING on teardown, but only the signal
+      // actually cancels the in-flight model call instead of leaving it dangling.
+      const summary = await this.#summarize(terminalFindings, this.#abort.signal);
       if (!hasText(summary)) return;
       await this.#findingsStore.writeFindings({ ...terminalFindings, summary });
     } catch {

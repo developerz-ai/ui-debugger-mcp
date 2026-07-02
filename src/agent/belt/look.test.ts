@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { MockLanguageModelV3 } from 'ai/test';
 import type { Adapter } from '../../adapters/contract.js';
 import { AdapterError, AgentError } from '../../errors.js';
 import {
@@ -195,4 +196,46 @@ test('createLookTool exposes a described tool with an input schema', () => {
   const look = createLookTool(adapter, 'vision-model-id', recorder);
   expect(typeof look.description).toBe('string');
   expect(look.inputSchema).toBeDefined();
+});
+
+test('runLook forwards the abort signal into the vision seam', async () => {
+  const adapter = fakeAdapter(PNG);
+  const { generate, seen } = fakeVision(cleanReply);
+  const { recorder } = fakeRecorder();
+  const controller = new AbortController();
+  await runLook(adapter, generate, recorder, { question: 'q' }, controller.signal);
+  expect(seen[0]?.abortSignal).toBe(controller.signal);
+});
+
+test('createLookTool threads the tool abort signal into the vision generateText call', async () => {
+  const seenSignals: Array<AbortSignal | undefined> = [];
+  const model = new MockLanguageModelV3({
+    doGenerate: async ({ abortSignal }) => {
+      seenSignals.push(abortSignal);
+      return {
+        content: [{ type: 'text' as const, text: cleanReply }],
+        finishReason: { unified: 'stop' as const, raw: 'stop' },
+        usage: {
+          inputTokens: {
+            total: 1,
+            noCache: 1 as number | undefined,
+            cacheRead: undefined,
+            cacheWrite: undefined,
+          },
+          outputTokens: { total: 1, text: 1 as number | undefined, reasoning: undefined },
+        },
+        warnings: [] as [],
+      };
+    },
+  });
+  const { recorder } = fakeRecorder();
+  const look = createLookTool(fakeAdapter(PNG), model, recorder);
+  const controller = new AbortController();
+  const result = await look.execute?.(
+    { question: 'q' },
+    { toolCallId: 't1', messages: [], abortSignal: controller.signal },
+  );
+  // Without the signal a stalled vision provider would block session teardown.
+  expect(seenSignals).toEqual([controller.signal]);
+  expect((result as { description: string }).description).toBe('A blue button, centred.');
 });

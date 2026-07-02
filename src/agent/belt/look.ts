@@ -70,6 +70,8 @@ export type LookResult = VisionReply & {
 export interface VisionRequest {
   system: string;
   messages: ModelMessage[];
+  /** Aborts the in-flight vision call (threaded from the tool's execute options), so a stalled provider never blocks teardown. */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -176,6 +178,7 @@ export async function runLook(
   generate: VisionGenerate,
   recorder: EvidenceRecorder,
   input: LookInput,
+  abortSignal?: AbortSignal,
 ): Promise<LookResult> {
   const png = await adapter.screenshot();
   const { text } = await generate({
@@ -189,6 +192,7 @@ export async function runLook(
         ],
       },
     ],
+    abortSignal,
   });
   const reply = parseVisionReply(text);
   const screenshot = await recorder.saveScreenshot(lookLabel(input), png);
@@ -201,14 +205,17 @@ export function createLookTool(
   vision: LanguageModel,
   recorder: EvidenceRecorder,
 ) {
-  const generate: VisionGenerate = async ({ system, messages }) => {
-    const { text } = await generateText({ model: vision, system, messages });
+  // Forward the abort signal into the vision call: on end_session / wall-clock
+  // timeout the SDK aborts the tool's execute — without the signal a stalled
+  // vision provider would block Session.close() (abort + await run) indefinitely.
+  const generate: VisionGenerate = async ({ system, messages, abortSignal }) => {
+    const { text } = await generateText({ model: vision, system, messages, abortSignal });
     return { text };
   };
   return tool({
     description:
       'Ask the vision model to look at the current screen. Captures a screenshot and sends it with your question/expect to the multimodal "eyes", which judges how it looks (layout, alignment, colour, overlap, cut-off text). Returns { description, matches?, issues[] } with the screenshot saved as evidence. Use only when structure (observe) cannot answer — vision is slow and costly.',
     inputSchema: LookInputSchema,
-    execute: (input) => runLook(adapter, generate, recorder, input),
+    execute: (input, options) => runLook(adapter, generate, recorder, input, options.abortSignal),
   });
 }

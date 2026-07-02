@@ -93,6 +93,18 @@ test('summarize passes SUMMARY_SYSTEM_PROMPT and the findings digest to the gene
   expect(captured?.prompt).toContain('404 on /api/login');
 });
 
+test('summarize forwards the abort signal into the generate seam', async () => {
+  let captured: AbortSignal | undefined;
+  const fake = async (req: { system: string; prompt: string; abortSignal?: AbortSignal }) => {
+    captured = req.abortSignal;
+    return { text: 'ok' };
+  };
+  const findings: Findings = { status: 'passed', steps: [], bugs: [], visual: [] };
+  const controller = new AbortController();
+  await summarize(fake, findings, controller.signal);
+  expect(captured).toBe(controller.signal);
+});
+
 test('summarize throws AgentError when the generate seam returns an empty string', async () => {
   const fake = async () => ({ text: '' });
   const findings: Findings = { status: 'failed', steps: [], bugs: [], visual: [] };
