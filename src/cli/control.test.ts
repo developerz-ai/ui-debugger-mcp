@@ -69,6 +69,25 @@ test('stop on a dead server marks the run stopped', async () => {
   expect((await readState(stateJson))?.status).toBe('stopped');
 });
 
+test('stop on an already-ended run neither signals nor rewrites the terminal status', async () => {
+  // The pid is our own live process: before the guard, `stop` would SIGTERM the
+  // healthy idle server and relabel `ended` → `stopped`.
+  const stateJson = await seedState({ status: 'ended', pid: process.pid });
+  await runStop(cwd);
+  const out = logs.join('\n');
+  expect(out).toContain('no active debug run to stop');
+  expect(out).toContain("'1700000000000-0001' ended");
+  expect((await readState(stateJson))?.status).toBe('ended'); // terminal state preserved
+});
+
+test('stop on an already-stopped run is a no-op', async () => {
+  const stateJson = await seedState({ status: 'stopped' });
+  await runStop(cwd);
+  expect(logs.join('\n')).toContain('no active debug run to stop');
+  expect(logs.join('\n')).toContain("'1700000000000-0001' stopped");
+  expect((await readState(stateJson))?.status).toBe('stopped');
+});
+
 test('stop with a stale PID marks run stopped without signaling', async () => {
   // Requires /proc — Linux-only. On other platforms verifyIdentity returns 'unverifiable'
   // and would fall back to isAlive(process.pid) = true, then try to SIGTERM us.
