@@ -14,6 +14,8 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import type { ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { AdapterError } from '../../errors.js';
 import type { Bounds, Node } from '../contract.js';
 import type { Adb } from './adb.js';
@@ -30,6 +32,7 @@ import {
   keycodeFor,
   parseScreenSize,
   scrollSwipe,
+  splitTextForInput,
   startArgs,
   swipeArgs,
   tapArgs,
@@ -121,8 +124,19 @@ class FakeAdb implements Adb {
 
   async adb(args: string[]): Promise<string> {
     this.calls.push({ method: 'adb', args });
+    const key = `adb ${args.join(' ')}`;
+    if (this.responses.has(key)) return this.get(key);
+    // Default: a device is connected, so managed boots proceed.
+    if (args[0] === 'get-state') return 'device';
     return '';
   }
+}
+
+/** Minimal fake emulator child for the spawn seam — an EventEmitter with a pid. */
+function makeFakeEmulator(): ChildProcess {
+  const child = new EventEmitter() as unknown as ChildProcess;
+  (child as { pid?: number }).pid = 4242;
+  return child;
 }
 
 /** Fake UiAutomatorSource seam. */
@@ -646,8 +660,32 @@ describe('escapeInputText', () => {
     expect(escapeInputText('a|b')).toBe('a\\|b');
     expect(escapeInputText('a$b')).toBe('a\\$b');
   });
+  test('escapes # (mksh comment at word start)', () => {
+    expect(escapeInputText('#hashtag')).toBe('\\#hashtag');
+  });
+  test('escapes braces (mksh brace expansion)', () => {
+    expect(escapeInputText('{a,b}')).toBe('\\{a,b\\}');
+  });
   test('plain alphanumerics pass through', () => {
     expect(escapeInputText('hello123')).toBe('hello123');
+  });
+});
+
+describe('splitTextForInput', () => {
+  test('breaks between % and s so the device never sees a literal %s', () => {
+    expect(splitTextForInput('50%sale')).toEqual(['50%', 'sale']);
+  });
+  test('multiple %s occurrences all split', () => {
+    expect(splitTextForInput('%s%s')).toEqual(['%', 's%', 's']);
+  });
+  test('text without %s stays one chunk', () => {
+    expect(splitTextForInput('hello world')).toEqual(['hello world']);
+  });
+  test('lone % is untouched', () => {
+    expect(splitTextForInput('100%')).toEqual(['100%']);
+  });
+  test('empty text → no chunks', () => {
+    expect(splitTextForInput('')).toEqual([]);
   });
 });
 
@@ -794,6 +832,82 @@ describe('AndroidAdapter.create', () => {
   });
 });
 
+describe('AndroidAdapter managed boot', () => {
+  test('open boots the emulator via the spawn seam and starts the activity', async () => {
+    const adb = new FakeAdb();
+    const ui = new FakeUi([]);
+    let spawned: string[] = [];
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', avd: 'test_avd' },
+      adb,
+      ui,
+      spawn: (bin, args) => {
+        spawned = [bin, ...args];
+        return makeFakeEmulator();
+      },
+      bootWaitMs: 2000,
+    });
+    await adapter.open('com.example');
+    expect(spawned).toEqual(['emulator', '@test_avd']);
+    expect(adb.calls.some((c) => c.method === 'adb' && c.args[0] === 'get-state')).toBe(true);
+    expect(adb.calls.some((c) => c.args[0] === 'monkey')).toBe(true);
+  });
+
+  test('spawn failure (bad emulatorPath) rejects loud instead of crashing the process', async () => {
+    const adb = new FakeAdb();
+    // No device ever appears — the emulator never launched.
+    adb.setResponse('adb get-state', 'unknown');
+    const child = makeFakeEmulator();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', avd: 'test_avd', emulatorPath: '/nope/emulator' },
+      adb,
+      ui: new FakeUi([]),
+      spawn: () => {
+        queueMicrotask(() => child.emit('error', new Error('spawn /nope/emulator ENOENT')));
+        return child;
+      },
+      bootWaitMs: 2000,
+    });
+    const err = await adapter.open('com.example').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as AdapterError).message).toContain('failed to launch');
+  });
+
+  test('emulator exiting before boot rejects loud', async () => {
+    const adb = new FakeAdb();
+    adb.setResponse('adb get-state', 'unknown');
+    const child = makeFakeEmulator();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', avd: 'broken_avd' },
+      adb,
+      ui: new FakeUi([]),
+      spawn: () => {
+        queueMicrotask(() => child.emit('exit', 1, null));
+        return child;
+      },
+      bootWaitMs: 2000,
+    });
+    const err = await adapter.open('com.example').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as AdapterError).message).toContain('exited before boot');
+  });
+
+  test('no device within the boot deadline rejects instead of hanging forever', async () => {
+    const adb = new FakeAdb();
+    adb.setResponse('adb get-state', 'unknown'); // never becomes 'device'
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', avd: 'test_avd' },
+      adb,
+      ui: new FakeUi([]),
+      spawn: () => makeFakeEmulator(),
+      bootWaitMs: 50,
+    });
+    const err = await adapter.open('com.example').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as AdapterError).message).toContain('no device appeared');
+  });
+});
+
 describe('AndroidAdapter.readState', () => {
   test('returns shaped nodes from ui.dump', async () => {
     const nodes = [makeNode({ name: 'Submit' }), makeNode({ name: 'Cancel' })];
@@ -882,6 +996,14 @@ describe('AndroidAdapter.type', () => {
     const textCalls = adb.calls.filter((c) => c.args[1] === 'text');
     expect(textCalls).toHaveLength(0);
   });
+
+  test('literal %s in text is chunked across input text calls (no space mangling)', async () => {
+    const node = makeNode({ bounds: { x: 0, y: 0, width: 100, height: 50 } });
+    const { adapter, adb } = makeAdapter({ nodes: [node] });
+    await adapter.type('Save', '50%sale');
+    const textCalls = adb.calls.filter((c) => c.args[1] === 'text');
+    expect(textCalls.map((c) => c.args[2])).toEqual(['50%', 'sale']);
+  });
 });
 
 describe('AndroidAdapter.pressKey', () => {
@@ -969,7 +1091,7 @@ describe('AndroidAdapter.console', () => {
 
   test('applies limit', async () => {
     const { adapter, adb } = makeAdapter();
-    adb.setResponse('logcat -v epoch -t 2', RAW_LOGCAT);
+    adb.setResponse('logcat -v epoch -t 500', RAW_LOGCAT);
     const entries = await adapter.console({ limit: 2 });
     expect(entries.length).toBeLessThanOrEqual(2);
   });
@@ -979,6 +1101,26 @@ describe('AndroidAdapter.console', () => {
     adb.setResponse('logcat -v epoch -t 500', RAW_LOGCAT);
     const entries = await adapter.console({ filters: { level_eq: 'error' } });
     expect(entries.every((e) => e.level === 'error')).toBe(true);
+  });
+
+  test('limit never shrinks the raw logcat window (filters see the full tail)', async () => {
+    const { adapter, adb } = makeAdapter();
+    // The only error is the OLDER line — a limit-sized (1-line) window would miss it.
+    const oldErrorRaw =
+      '1546300800.000  1000  1001 E Crash: boom\n1546300801.000  1000  1001 I MyTag: hello\n';
+    adb.setResponse('logcat -v epoch -t 500', oldErrorRaw);
+    const entries = await adapter.console({ limit: 1, filters: { level_eq: 'error' } });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.level).toBe('error');
+  });
+
+  test('limit above the default tail widens the window', async () => {
+    const { adapter, adb } = makeAdapter();
+    adb.setResponse('logcat -v epoch -t 900', RAW_LOGCAT);
+    const entries = await adapter.console({ limit: 900 });
+    expect(entries.length).toBeGreaterThan(0);
+    const call = adb.calls.find((c) => c.args[0] === 'logcat');
+    expect(call?.args).toContain('900');
   });
 });
 

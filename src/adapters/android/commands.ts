@@ -54,17 +54,36 @@ export function tapArgs(x: number, y: number): string[] {
 }
 
 /**
- * Escape text for `input text` on the device shell: spaces → `%s` (literal space token),
- * and the shell-special chars get backslash-escaped so they reach the app verbatim.
+ * Escape text for `input text` on the device shell: spaces → `%s` (the tool's own
+ * space token), and the shell-special chars get backslash-escaped so they reach the
+ * app verbatim. `#` starts a comment and `{`/`}` brace-expand in mksh, so they need
+ * the same escaping — an unescaped leading `#` silently types nothing.
  */
 export function escapeInputText(text: string): string {
   let out = '';
   for (const ch of text) {
     if (ch === ' ') out += '%s';
-    else if ('()<>|;&*\\~"\'`$'.includes(ch)) out += `\\${ch}`;
+    else if ('()<>|;&*\\~"\'`$#{}'.includes(ch)) out += `\\${ch}`;
     else out += ch;
   }
   return out;
+}
+
+/**
+ * Split raw text into chunks safe for consecutive `input text` calls: the on-device
+ * tool replaces every literal `%s` with a space (its own space token), so a `%s` in
+ * user text would be silently mangled. Breaking the text between the `%` and the `s`
+ * keeps each chunk substitution-free; sequential calls append into the focused field.
+ */
+export function splitTextForInput(text: string): string[] {
+  const chunks: string[] = [];
+  let start = 0;
+  for (let cut = text.indexOf('%s', start); cut !== -1; cut = text.indexOf('%s', start)) {
+    chunks.push(text.slice(start, cut + 1)); // keep the '%', break before the 's'
+    start = cut + 1;
+  }
+  chunks.push(text.slice(start));
+  return chunks.filter((chunk) => chunk !== '');
 }
 
 /** `input text <escaped>` — types into the focused field. */
