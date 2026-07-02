@@ -111,11 +111,19 @@ export class DesktopAdapter implements Adapter {
   async open(target: string): Promise<void> {
     await this.#run('open', async () => {
       if (!this.#process) {
-        this.#process = spawn('/bin/sh', ['-c', this.#config.launch], {
+        const child = spawn('/bin/sh', ['-c', this.#config.launch], {
           env: this.#env,
           detached: true,
           stdio: 'ignore',
         });
+        this.#process = child;
+        // A dead app must not pin `#process`: clear it on exit/error so a later
+        // `open` relaunches and `close` never kills a recycled process group.
+        const clear = (): void => {
+          if (this.#process === child) this.#process = null;
+        };
+        child.once('exit', clear);
+        child.once('error', clear);
       }
       const match = this.#windowMatch(target);
       if (match) await this.#input.activateWindow(match, WINDOW_WAIT_MS);

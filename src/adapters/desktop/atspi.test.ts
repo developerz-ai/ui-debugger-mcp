@@ -223,3 +223,21 @@ test('BusctlAtspi.readTree fails loud on a malformed reply', async () => {
   const exec = async (): Promise<string> => 'garbage';
   await expect(new BusctlAtspi({ exec }).readTree()).rejects.toThrow(AdapterError);
 });
+
+test('BusctlAtspi.readTree survives a node without Component (GetExtents rejects)', async () => {
+  // Application roots / toolkit fillers don't implement Component — busctl exits
+  // non-zero on GetExtents. The walk must keep every node, with zero bounds there.
+  const bus = fakeBus();
+  const exec = async (args: string[]): Promise<string> => {
+    if (args.includes('GetExtents') && args[4] === '/app') {
+      throw Object.assign(new Error('busctl exited 1'), {
+        stderr: 'Unknown interface org.a11y.atspi.Component',
+      });
+    }
+    return bus.exec(args);
+  };
+  const nodes = await new BusctlAtspi({ exec }).readTree();
+  expect(nodes.map((n) => n.name)).toEqual(['My App', 'OK']);
+  expect(nodes[0]?.bounds).toEqual({ x: 0, y: 0, width: 0, height: 0 });
+  expect(nodes[1]?.bounds).toEqual({ x: 10, y: 20, width: 100, height: 40 });
+});

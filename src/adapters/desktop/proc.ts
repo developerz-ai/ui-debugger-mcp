@@ -23,9 +23,19 @@ const MAX_BUFFER = 16 * 1024 * 1024;
 /** Run a CLI tool, resolve its stdout, reject (loud) on a non-zero exit or a missing binary. */
 export type Exec = (cmd: string, args: string[]) => Promise<string>;
 
-/** A child env with `DISPLAY` overridden when a target display is configured (else inherit). */
+/**
+ * A child env with `DISPLAY` overridden when a target display is configured (else inherit).
+ * An explicit display also drops any inherited `WAYLAND_DISPLAY` — the user pointed us at
+ * an X11 display (e.g. Xvfb `:99`), so capture/input must not dispatch to the live
+ * Wayland session ({@link chooseCaptureTool} checks `WAYLAND_DISPLAY` first).
+ */
 export function desktopEnv(display?: string): NodeJS.ProcessEnv {
-  return display ? { ...process.env, DISPLAY: display } : { ...process.env };
+  const env = { ...process.env };
+  if (display) {
+    env.DISPLAY = display;
+    delete env.WAYLAND_DISPLAY;
+  }
+  return env;
 }
 
 /** The real {@link Exec}: `execFile` bound to a fixed child env. */
