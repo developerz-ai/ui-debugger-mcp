@@ -192,11 +192,17 @@ export class Xdotool implements PointerInput {
     const args = searchArgs(match);
     const start = Date.now();
     for (;;) {
-      // `search` exits non-zero when nothing matches (→ rejects); that means
-      // "not up yet", so keep polling. A MISSING xdotool (ENOENT) is fatal — loud.
+      // `search` exits non-zero with EMPTY stderr when nothing matches (→ rejects);
+      // that means "not up yet", so keep polling. Anything on stderr is a real
+      // failure (e.g. `Can't open display`) — fatal, loud. Missing xdotool too.
       const out = await this.#exec(XDOTOOL, args).catch((error: unknown) => {
         if (isEnoent(error)) {
           throw new AdapterError('desktop: `xdotool` not found on PATH (install xdotool)');
+        }
+        const stderr = (error as { stderr?: unknown }).stderr;
+        const detail = typeof stderr === 'string' ? stderr.trim() : '';
+        if (detail !== '') {
+          throw new AdapterError(`xdotool search failed: ${detail}`);
         }
         return '';
       });

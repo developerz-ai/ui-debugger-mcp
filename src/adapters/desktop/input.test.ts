@@ -11,6 +11,7 @@ import {
   scrollButton,
   searchArgs,
   typeArgs,
+  Xdotool,
 } from './input.js';
 
 // --- mapKeyChord ------------------------------------------------------------
@@ -97,4 +98,34 @@ test('searchArgs prefers title, falls back to class', () => {
 
 test('searchArgs throws when neither title nor class is given', () => {
   expect(() => searchArgs({})).toThrow(AdapterError);
+});
+
+// --- activateWindow -----------------------------------------------------------
+
+/** A rejecting exec shaped like a promisified `execFile` failure (carries `stderr`). */
+function rejectingExec(stderr: string): { exec: () => Promise<string>; calls: () => number } {
+  let calls = 0;
+  const exec = async (): Promise<string> => {
+    calls += 1;
+    throw Object.assign(new Error('Command failed: xdotool search'), { stderr });
+  };
+  return { exec, calls: () => calls };
+}
+
+test('activateWindow keeps polling on a no-match (empty stderr) and times out loud', async () => {
+  const fake = rejectingExec('');
+  const input = new Xdotool({ exec: fake.exec });
+  await expect(input.activateWindow({ title: 'App' }, 200)).rejects.toThrow(
+    /window not found within 200ms/,
+  );
+  expect(fake.calls()).toBeGreaterThan(1); // it polled, not failed on the first miss
+});
+
+test('activateWindow throws immediately when xdotool reports a real error on stderr', async () => {
+  const fake = rejectingExec("Error: Can't open display: :99\n");
+  const input = new Xdotool({ exec: fake.exec });
+  const promise = input.activateWindow({ title: 'App' }, 10_000);
+  await expect(promise).rejects.toThrow(AdapterError);
+  await expect(promise).rejects.toThrow(/Can't open display: :99/);
+  expect(fake.calls()).toBe(1); // no 10s poll masking the root cause
 });

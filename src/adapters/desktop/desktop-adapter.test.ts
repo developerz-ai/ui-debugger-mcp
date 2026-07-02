@@ -1,4 +1,7 @@
 import { expect, test } from 'bun:test';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DesktopTarget } from '../../config/schema.js';
 import { AdapterError } from '../../errors.js';
 import type { Node, ScrollDirection } from '../contract.js';
@@ -186,4 +189,37 @@ test('console and network are unsupported and throw loud', async () => {
 test('close is a no-op when nothing was launched', async () => {
   const { adapter } = build();
   await expect(adapter.close()).resolves.toBeUndefined();
+});
+
+// --- open (managed process lifecycle) -----------------------------------------
+
+test('open respawns the managed app after it exits', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'uidbg-adapter-'));
+  const file = join(dir, 'runs');
+  const runs = async (): Promise<number> => {
+    const text = await readFile(file, 'utf8').catch(() => '');
+    return text.split('\n').filter((line) => line.length > 0).length;
+  };
+  const adapter = DesktopAdapter.create({
+    config: { adapter: 'desktop', launch: `echo run >> ${JSON.stringify(file)}` },
+    atspi: new FakeAtspi([]),
+    input: new FakePointer(),
+    capture: new FakeCapture(),
+  });
+  try {
+    await adapter.open('App');
+    // The launch command exits immediately; the exit handler must clear the dead
+    // process so a later `open` respawns. Poll — before the fix the stale
+    // `#process` pins `open` to the corpse and the run count never reaches 2.
+    const start = Date.now();
+    while ((await runs()) < 2) {
+      expect(Date.now() - start).toBeLessThan(5000); // second open never respawned
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await adapter.open('App');
+    }
+    // A close after the app died on its own is a clean no-op (nothing to kill).
+    await expect(adapter.close()).resolves.toBeUndefined();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

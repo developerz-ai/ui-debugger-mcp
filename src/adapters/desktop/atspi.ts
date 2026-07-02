@@ -434,12 +434,17 @@ export class BusctlAtspi implements AtspiSource {
     const { enabled, visible } = stateFlags(
       parseStateWords(firstReturn(await this.#call(ref, A11Y_IFACE, 'GetState'), 'GetState')),
     );
-    const bounds = parseExtents(
-      firstReturn(
-        await this.#call(ref, COMPONENT_IFACE, 'GetExtents', ['u', String(COORD_SCREEN)]),
-        'GetExtents',
-      ),
-    );
+    // Application roots + some toolkit filler nodes don't implement Component,
+    // so busctl exits non-zero on GetExtents. Fall back to zero bounds instead
+    // of killing the whole walk; role/name/state failures above stay loud.
+    const extents = await this.#call(ref, COMPONENT_IFACE, 'GetExtents', [
+      'u',
+      String(COORD_SCREEN),
+    ]).catch(() => null);
+    const bounds =
+      extents === null
+        ? { x: 0, y: 0, width: 0, height: 0 }
+        : parseExtents(firstReturn(extents, 'GetExtents'));
     return { role, name, bounds, enabled, visible };
   }
 }
