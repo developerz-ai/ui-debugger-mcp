@@ -30,6 +30,8 @@ import type { SummarizeStep } from '../session/session.js';
 export interface SummaryRequest {
   system: string;
   prompt: string;
+  /** Aborts the in-flight summary call (the session's teardown signal), so a stalled model never blocks close. */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -89,10 +91,15 @@ export function findingsDigest(findings: Findings): string {
  * {@link SummaryGenerate} seam, so it unit-tests against a fake with no network.
  * @throws {AgentError} if the summary model returns a blank reply.
  */
-export async function summarize(generate: SummaryGenerate, findings: Findings): Promise<string> {
+export async function summarize(
+  generate: SummaryGenerate,
+  findings: Findings,
+  signal?: AbortSignal,
+): Promise<string> {
   const { text } = await generate({
     system: SUMMARY_SYSTEM_PROMPT,
     prompt: findingsDigest(findings),
+    abortSignal: signal,
   });
   const paragraph = text.trim();
   if (paragraph.length === 0) {
@@ -107,9 +114,11 @@ export async function summarize(generate: SummaryGenerate, findings: Findings): 
  * between deployments; everything else (prompt, digest) is owned in-repo.
  */
 export function createSummarize(model: LanguageModel): SummarizeStep {
-  const generate: SummaryGenerate = async ({ system, prompt }) => {
-    const { text } = await generateText({ model, system, prompt });
+  // Forward the session's teardown signal so an aborted close cancels the in-flight
+  // summary call instead of leaving a stalled model request dangling.
+  const generate: SummaryGenerate = async ({ system, prompt, abortSignal }) => {
+    const { text } = await generateText({ model, system, prompt, abortSignal });
     return { text };
   };
-  return (findings) => summarize(generate, findings);
+  return (findings, signal) => summarize(generate, findings, signal);
 }

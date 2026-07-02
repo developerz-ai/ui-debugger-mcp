@@ -10,7 +10,7 @@ import {
   budgetNudge,
   createDebugAgent,
   DEFAULT_MAX_STEPS,
-  drainInboxIntoStep,
+  foldInstructionsIntoStep,
   KICKOFF_PROMPT,
   type LoopInbox,
   type ProgressWriter,
@@ -55,13 +55,18 @@ const actResult = (label: string, screenshot: string) => ({
   output: { action: 'click', label, screenshot },
 });
 
-test('drainInboxIntoStep returns no override when the inbox is empty', () => {
-  expect(drainInboxIntoStep(fakeInbox(), [])).toEqual({});
+test('foldInstructionsIntoStep returns no override when nothing was ever injected', () => {
+  expect(foldInstructionsIntoStep(fakeInbox(), [], [])).toEqual({});
 });
 
-test('drainInboxIntoStep appends one mid-run user message, preserving prior messages', () => {
+test('foldInstructionsIntoStep appends one standing-instructions message, preserving prior messages', () => {
   const prior: ModelMessage[] = [{ role: 'user', content: 'go' }];
-  const out = drainInboxIntoStep(fakeInbox('check mobile view', 'skip login'), prior);
+  const standing: string[] = [];
+  const out = foldInstructionsIntoStep(
+    fakeInbox('check mobile view', 'skip login'),
+    standing,
+    prior,
+  );
   if (!('messages' in out)) throw new Error('expected a messages override');
   expect(out.messages).toHaveLength(2);
   expect(out.messages[0]).toEqual({ role: 'user', content: 'go' });
@@ -70,10 +75,23 @@ test('drainInboxIntoStep appends one mid-run user message, preserving prior mess
   const content = injected?.content;
   expect(typeof content).toBe('string');
   if (typeof content === 'string') {
-    expect(content).toContain('mid-run');
+    expect(content).toContain('Mid-run instructions');
     expect(content).toContain('check mobile view');
     expect(content).toContain('skip login');
   }
+  expect(standing).toEqual(['check mobile view', 'skip login']);
+});
+
+test('foldInstructionsIntoStep re-appends standing instructions after the inbox drained empty', () => {
+  const standing = ['check mobile view'];
+  // A later step: inbox already empty, base messages fresh from the SDK (no prior injection).
+  const out = foldInstructionsIntoStep(fakeInbox(), standing, [{ role: 'user', content: 'go' }]);
+  if (!('messages' in out)) throw new Error('expected a messages override');
+  expect(out.messages).toHaveLength(2);
+  const content = out.messages.at(-1)?.content;
+  expect(typeof content === 'string' && content.includes('check mobile view')).toBe(true);
+  // One rebuilt block from the persistent list — never accumulated duplicates.
+  expect(standing).toEqual(['check mobile view']);
 });
 
 test('stepTrailFrom lifts act results into steps and ignores everything else', () => {
@@ -321,8 +339,72 @@ test('mid-run injected message folds into the next model turn', async () => {
 
   // Call 2 MUST contain the injected message (prepareStep drained it before call 2)
   const call2Text = seenPrompts[1]?.join('\n') ?? '';
-  expect(call2Text).toContain('mid-run');
+  expect(call2Text).toContain('Mid-run instructions');
   expect(call2Text).toContain('check mobile view');
+});
+
+test('mid-run instructions persist into EVERY later step, without duplicating', async () => {
+  const { writer } = findingsTracker();
+  const belt = realBelt(writer);
+
+  const pending: string[] = [];
+  const inbox: LoopInbox = {
+    drain() {
+      const out = [...pending];
+      pending.length = 0;
+      return out;
+    },
+  };
+
+  const seenPrompts: string[][] = [];
+  let callCount = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      callCount++;
+      const texts: string[] = [];
+      for (const msg of opts.prompt) {
+        if (msg.role === 'user') {
+          for (const part of msg.content) {
+            if (part.type === 'text') texts.push(part.text);
+          }
+        }
+      }
+      seenPrompts.push(texts);
+
+      if (callCount === 1) {
+        // Injected after step 1 starts; the inbox drains it once, before call 2.
+        pending.push('also verify the footer links');
+        return toolCallResponse('c1', 'observe', { kind: 'tree' });
+      }
+      if (callCount < 4) return toolCallResponse(`c${callCount}`, 'observe', { kind: 'tree' });
+      return toolCallResponse('c4', 'report', { status: 'passed' });
+    },
+  });
+
+  const agent = createDebugAgent({
+    model,
+    tools: belt,
+    instructions: 'debug',
+    inbox,
+    progress: writer,
+    maxSteps: 10,
+  });
+
+  await runDebugLoop({ agent });
+  expect(callCount).toBe(4);
+
+  // Step 1: injected after the call started — absent.
+  expect(seenPrompts[0]?.join('\n')).not.toContain('verify the footer links');
+
+  // Steps 2, 3 AND 4: the instruction is still in effect — the inbox drained empty
+  // after step 2, but the standing list re-folds it into every subsequent prompt.
+  for (const call of [1, 2, 3]) {
+    const text = seenPrompts[call]?.join('\n') ?? '';
+    expect(text).toContain('Mid-run instructions');
+    expect(text).toContain('also verify the footer links');
+    // Exactly one occurrence: one rebuilt block per step, never accumulation.
+    expect(text.split('also verify the footer links').length - 1).toBe(1);
+  }
 });
 
 test('abort signal propagates: loop rejects when the model throws AbortError', async () => {

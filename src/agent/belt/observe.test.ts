@@ -8,7 +8,28 @@ import type {
   Query,
 } from '../../adapters/contract.js';
 import { AdapterError } from '../../errors.js';
+import type { EvidenceRecorder } from './look.js';
 import { createObserveTool, ObserveInputSchema, runObserve } from './observe.js';
+
+/** A fake {@link EvidenceRecorder} recording every saved frame. */
+function fakeEvidenceRecorder(): {
+  recorder: EvidenceRecorder;
+  saved: Array<{ label: string; data: Uint8Array }>;
+} {
+  const saved: Array<{ label: string; data: Uint8Array }> = [];
+  const recorder: EvidenceRecorder = {
+    saveScreenshot: async (label, data) => {
+      saved.push({ label, data });
+      return `screenshots/001-${label}.png`;
+    },
+  };
+  return { recorder, saved };
+}
+
+/** Shorthand: a throwaway recorder for reads that never save a frame. */
+function recorder(): EvidenceRecorder {
+  return fakeEvidenceRecorder().recorder;
+}
 
 /** Recorded opts the fake adapter was last called with (to assert param forwarding). */
 interface Recorder {
@@ -66,7 +87,7 @@ const sampleNode: Node = {
 
 test('tree → routes to readState, returns nodes + count + a ready target', async () => {
   const { adapter } = fakeAdapter({ nodes: [sampleNode] });
-  const res = await runObserve(adapter, { kind: 'tree' });
+  const res = await runObserve(adapter, recorder(), { kind: 'tree' });
   expect(res).toEqual({
     kind: 'tree',
     count: 1,
@@ -76,7 +97,7 @@ test('tree → routes to readState, returns nodes + count + a ready target', asy
 
 test('tree fields → projects only the requested columns, still attaches a target', async () => {
   const { adapter } = fakeAdapter({ nodes: [sampleNode] });
-  const res = await runObserve(adapter, { kind: 'tree', fields: ['role', 'name'] });
+  const res = await runObserve(adapter, recorder(), { kind: 'tree', fields: ['role', 'name'] });
   expect(res).toEqual({
     kind: 'tree',
     count: 1,
@@ -87,7 +108,7 @@ test('tree fields → projects only the requested columns, still attaches a targ
 test('tree → disambiguates repeated role+name with >> nth in document order', async () => {
   const dup: Node = { ...sampleNode, name: 'Add to cart' };
   const { adapter } = fakeAdapter({ nodes: [dup, dup, dup] });
-  const res = await runObserve(adapter, { kind: 'tree', fields: ['name'] });
+  const res = await runObserve(adapter, recorder(), { kind: 'tree', fields: ['name'] });
   const targets = (res as { nodes: Array<{ target?: string }> }).nodes.map((n) => n.target);
   expect(targets).toEqual([
     'role=button[name="Add to cart" i]',
@@ -99,27 +120,36 @@ test('tree → disambiguates repeated role+name with >> nth in document order', 
 test('tree → non-ARIA named node falls back to a text target', async () => {
   const div: Node = { role: 'generic', name: 'Hello', bounds: sampleNode.bounds, enabled: true };
   const { adapter } = fakeAdapter({ nodes: [div] });
-  const res = await runObserve(adapter, { kind: 'tree', fields: ['role'] });
+  const res = await runObserve(adapter, recorder(), { kind: 'tree', fields: ['role'] });
   expect((res as { nodes: Array<{ target?: string }> }).nodes[0]?.target).toBe('text=Hello');
 });
 
-test('tree scoped by within or filters → omits target (unscoped replay could miss)', async () => {
-  const scoped = await runObserve(fakeAdapter({ nodes: [sampleNode] }).adapter, {
+test('tree scoped by query, within or filters → omits target (unscoped replay could miss)', async () => {
+  const scoped = await runObserve(fakeAdapter({ nodes: [sampleNode] }).adapter, recorder(), {
     kind: 'tree',
     within: 'main',
   });
   expect((scoped as { nodes: Array<{ target?: string }> }).nodes[0]?.target).toBeUndefined();
 
-  const filtered = await runObserve(fakeAdapter({ nodes: [sampleNode] }).adapter, {
+  const filtered = await runObserve(fakeAdapter({ nodes: [sampleNode] }).adapter, recorder(), {
     kind: 'tree',
     filters: { visible_eq: true },
   });
   expect((filtered as { nodes: Array<{ target?: string }> }).nodes[0]?.target).toBeUndefined();
+
+  // A query narrows the node set exactly like within/filters do: the emitted
+  // nth= indices would be relative to the narrowed set, while act replays them
+  // document-wide — so query-narrowed reads must omit targets too.
+  const queried = await runObserve(fakeAdapter({ nodes: [sampleNode] }).adapter, recorder(), {
+    kind: 'tree',
+    query: '.sidebar button',
+  });
+  expect((queried as { nodes: Array<{ target?: string }> }).nodes[0]?.target).toBeUndefined();
 });
 
 test('tree forwards query/filters/limit/within to the adapter', async () => {
   const { adapter, rec } = fakeAdapter({ nodes: [] });
-  await runObserve(adapter, {
+  await runObserve(adapter, recorder(), {
     kind: 'tree',
     query: 'button',
     filters: { visible_eq: true },
@@ -134,23 +164,22 @@ test('tree forwards query/filters/limit/within to the adapter', async () => {
   });
 });
 
-test('screenshot → routes to screenshot, returns base64 png + byte count', async () => {
+test('screenshot → saves the frame as evidence, returns its path + byte count (never base64)', async () => {
   const png = new Uint8Array([1, 2, 3, 4]);
   const { adapter, rec } = fakeAdapter({ screenshot: png });
-  const res = await runObserve(adapter, { kind: 'screenshot' });
-  expect(res).toEqual({
-    kind: 'screenshot',
-    encoding: 'png',
-    bytes: 4,
-    data: Buffer.from(png).toString('base64'),
-  });
+  const { recorder: evidence, saved } = fakeEvidenceRecorder();
+  const res = await runObserve(adapter, evidence, { kind: 'screenshot' });
+  expect(res).toEqual({ kind: 'screenshot', path: 'screenshots/001-observe.png', bytes: 4 });
+  expect(saved).toEqual([{ label: 'observe', data: png }]);
   expect(rec.screenshots).toBe(1);
+  // The blind driver's context must never carry the frame bytes.
+  expect(JSON.stringify(res)).not.toContain(Buffer.from(png).toString('base64'));
 });
 
 test('console → returns entries + count, forwards filters/limit', async () => {
   const entry: ConsoleEntry = { level: 'error', text: 'boom', timestamp: 1 };
   const { adapter, rec } = fakeAdapter({ console: [entry] });
-  const res = await runObserve(adapter, {
+  const res = await runObserve(adapter, recorder(), {
     kind: 'console',
     filters: { level_eq: 'error' },
     limit: 10,
@@ -168,7 +197,7 @@ test('network → returns entries + count', async () => {
     timestamp: 2,
   };
   const { adapter } = fakeAdapter({ network: [entry] });
-  const res = await runObserve(adapter, { kind: 'network' });
+  const res = await runObserve(adapter, recorder(), { kind: 'network' });
   expect(res).toEqual({ kind: 'network', count: 1, entries: [entry] });
 });
 
@@ -177,9 +206,9 @@ test('adapter errors propagate (fail loud, no swallow)', async () => {
   adapter.console = async () => {
     throw new AdapterError('unknown console filter `bogus`');
   };
-  await expect(runObserve(adapter, { kind: 'console', filters: { bogus: 1 } })).rejects.toThrow(
-    AdapterError,
-  );
+  await expect(
+    runObserve(adapter, recorder(), { kind: 'console', filters: { bogus: 1 } }),
+  ).rejects.toThrow(AdapterError);
 });
 
 test('schema rejects an unknown kind', () => {
@@ -196,7 +225,7 @@ test('schema accepts a minimal tree read', () => {
 
 test('createObserveTool exposes a described tool with an input schema', () => {
   const { adapter } = fakeAdapter({});
-  const observe = createObserveTool(adapter);
+  const observe = createObserveTool(adapter, recorder());
   expect(typeof observe.description).toBe('string');
   expect(observe.inputSchema).toBeDefined();
 });
