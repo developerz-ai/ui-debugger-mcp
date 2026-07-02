@@ -56,13 +56,15 @@ const ROLE_NAME = /^([a-zA-Z][\w-]*)\s+["'“”](.+?)["'”“]$/;
 /**
  * CSS-ish, kept deliberately narrow so ordinary labels are not misread as selectors:
  *  - starts with `.`/`#`/`[`/`*`,
- *  - a `tag` immediately followed by `.`/`#`/`[`/`:` (e.g. `div.card`, `a:hover`),
+ *  - a `tag` followed by `#`/`[`, by `.` + a class-start char (`div.card`, but not
+ *    `Loading...` / `Loading.`), or by `:` + a pseudo-start char (`a:hover`, but not
+ *    `Error: payment failed`) — a selector-ish continuation, not trailing punctuation,
  *  - a combinator (`>`/`~`) flanked by simple selectors on BOTH sides — a tag or a
  *    `.`/`#`/`[`/`*` token — so `nav > a` is CSS while `Next >` and `A ~ B` stay text,
  *  - or a structural pseudo (`:has(`, `:nth-`, `::`).
  */
 const CSS_LIKE =
-  /^[.#[*]|^[a-zA-Z][\w-]*[.#:[]|(?:[a-z][\w-]*|[.#][\w-]+|\*|\])\s*[>~]\s*(?:[a-z][\w-]*|[.#[*])|:has\(|:nth-|::/;
+  /^[.#[*]|^[a-zA-Z][\w-]*(?:[#[]|\.[a-zA-Z_-]|:[a-zA-Z-])|(?:[a-z][\w-]*|[.#][\w-]+|\*|\])\s*[>~]\s*(?:[a-z][\w-]*|[.#[*])|:has\(|:nth-|::/;
 
 /**
  * Turn an agent-supplied target into a Playwright-resolvable selector string.

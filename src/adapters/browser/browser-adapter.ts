@@ -224,12 +224,48 @@ export function resolveTargetUrl(target: string, base?: string): string {
   }
 }
 
-/** Append the login-bypass query param (`?<param>=true`) when `debugLogin` is configured. */
+/**
+ * Append the login-bypass query param (`?<param>=true`) when `debugLogin` is configured.
+ * A relative `target` (no config `url` base to anchor it) can't carry a query param —
+ * fail loud with an {@link AdapterError} instead of leaking a raw `TypeError: Invalid URL`.
+ */
 export function appendDebugLogin(target: string, debugLogin?: { param: string }): string {
   if (!debugLogin) return target;
-  const url = new URL(target);
+  let url: URL;
+  try {
+    url = new URL(target);
+  } catch {
+    throw new AdapterError(
+      `cannot append debug-login param to relative target ${JSON.stringify(target)} — set the web target's \`url\` in .ui-debugger-mcp.json so it resolves to an absolute URL`,
+    );
+  }
   url.searchParams.set(debugLogin.param, 'true');
   return url.toString();
+}
+
+/**
+ * Milliseconds left until `deadline`, floored at 1 so an exhausted budget still
+ * hands Playwright a real timeout (0 means "no timeout" there) and fails fast.
+ * No deadline → `undefined` (Playwright's default applies). `now` is injectable
+ * for tests.
+ */
+export function remainingTimeout(deadline?: number, now: number = Date.now()): number | undefined {
+  if (deadline === undefined) return undefined;
+  return Math.max(1, deadline - now);
+}
+
+/**
+ * True when `point` falls outside a non-null `viewport`. Coordinate clicks use
+ * viewport-relative bounds (`getBoundingClientRect`), so an off-screen center
+ * dispatches a CDP click that lands on nothing — silently. Null viewport
+ * (e.g. some attach targets) → never outside; we can't judge.
+ */
+export function isOutsideViewport(
+  point: { x: number; y: number },
+  viewport: { width: number; height: number } | null,
+): boolean {
+  if (!viewport) return false;
+  return point.x < 0 || point.x > viewport.width || point.y < 0 || point.y > viewport.height;
 }
 
 /**
@@ -414,9 +450,10 @@ export class BrowserAdapter implements Adapter {
   }
 
   async open(target: string): Promise<void> {
-    const resolved = resolveTargetUrl(target, this.#config.url);
-    const url = appendDebugLogin(resolved, this.#config.debugLogin);
+    // Resolution lives inside `#run` so URL failures surface as AdapterError too.
     await this.#run('open', async () => {
+      const resolved = resolveTargetUrl(target, this.#config.url);
+      const url = appendDebugLogin(resolved, this.#config.debugLogin);
       await this.#page.goto(url);
     });
   }
@@ -434,8 +471,7 @@ export class BrowserAdapter implements Adapter {
         await this.#page.locator(normalizeQuery(target)).first().click();
         return;
       }
-      const { x, y, width, height } = target.bounds;
-      await this.#page.mouse.click(x + width / 2, y + height / 2);
+      await this.#clickBoundsCenter(target);
     });
   }
 
@@ -447,11 +483,26 @@ export class BrowserAdapter implements Adapter {
       if (typeof target === 'string') {
         await this.#page.locator(normalizeQuery(target)).first().click();
       } else {
-        const { x, y, width, height } = target.bounds;
-        await this.#page.mouse.click(x + width / 2, y + height / 2);
+        await this.#clickBoundsCenter(target);
       }
       await this.#page.keyboard.type(text);
     });
+  }
+
+  /**
+   * Coordinate click at a {@link Node}'s bounds center, shared by `click` and
+   * `type`. Bounds are viewport-relative, so an off-screen center would make CDP
+   * click nothing — fail loud instead so the agent knows to scroll first.
+   */
+  async #clickBoundsCenter(node: Node): Promise<void> {
+    const { x, y, width, height } = node.bounds;
+    const center = { x: x + width / 2, y: y + height / 2 };
+    if (isOutsideViewport(center, this.#page.viewportSize())) {
+      throw new AdapterError(
+        `element center (${Math.round(center.x)}, ${Math.round(center.y)}) is outside the viewport — scroll it into view first, then re-read its bounds`,
+      );
+    }
+    await this.#page.mouse.click(center.x, center.y);
   }
 
   async pressKey(key: string): Promise<void> {
@@ -495,6 +546,9 @@ export class BrowserAdapter implements Adapter {
     if (!opts.query && !opts.networkIdle) {
       throw new AdapterError('waitFor requires `query` and/or `networkIdle`');
     }
+    // `timeout` caps the WHOLE wait, not each phase — with both `query` and
+    // `networkIdle` set, the second wait only gets what's left of the budget.
+    const deadline = opts.timeout === undefined ? undefined : Date.now() + opts.timeout;
     await this.#run('waitFor', async () => {
       if (opts.query) {
         await this.#page
@@ -503,7 +557,7 @@ export class BrowserAdapter implements Adapter {
           .waitFor({ state: 'visible', timeout: opts.timeout });
       }
       if (opts.networkIdle) {
-        await this.#page.waitForLoadState('networkidle', { timeout: opts.timeout });
+        await this.#page.waitForLoadState('networkidle', { timeout: remainingTimeout(deadline) });
       }
     });
   }

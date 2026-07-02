@@ -5,7 +5,9 @@ import type { ScrollDirection } from '../contract.js';
 import {
   appendDebugLogin,
   applyNodeFilters,
+  isOutsideViewport,
   type RawNode,
+  remainingTimeout,
   resolveLaunchBinary,
   resolveTargetUrl,
   scrollDelta,
@@ -49,6 +51,12 @@ test('resolveTargetUrl passes an absolute URL through', () => {
   );
 });
 
+test('resolveTargetUrl passes a relative target through when there is no base', () => {
+  // Config `url` is optional — `goto` must receive the raw string and surface
+  // its own clear "invalid URL" error, not a mangled resolution.
+  expect(resolveTargetUrl('/login')).toBe('/login');
+});
+
 // --- appendDebugLogin -------------------------------------------------------
 
 test('appendDebugLogin returns url unchanged when no debugLogin', () => {
@@ -71,6 +79,56 @@ test('appendDebugLogin overrides a pre-existing value for the same param', () =>
   expect(appendDebugLogin('http://localhost:3000/?debug-ai=false', { param: 'debug-ai' })).toBe(
     'http://localhost:3000/?debug-ai=true',
   );
+});
+
+test('appendDebugLogin passes a relative target through when no debugLogin is configured', () => {
+  expect(appendDebugLogin('/login')).toBe('/login');
+});
+
+test('appendDebugLogin throws AdapterError (not TypeError) for a relative target', () => {
+  // Relative target + no config `url` base: fail loud with a pointer to the fix,
+  // never an uncaught `TypeError: Invalid URL`.
+  expect(() => appendDebugLogin('/login', { param: 'debug-ai' })).toThrow(AdapterError);
+  expect(() => appendDebugLogin('/login', { param: 'debug-ai' })).toThrow(/`url`/);
+});
+
+// --- remainingTimeout ---------------------------------------------------------
+
+test('remainingTimeout returns undefined when no deadline was set (Playwright default)', () => {
+  expect(remainingTimeout(undefined, 1_000)).toBeUndefined();
+});
+
+test('remainingTimeout returns the time left until the deadline', () => {
+  // A 30s cap shared across waitFor phases: the second wait only gets what's left.
+  expect(remainingTimeout(31_000, 1_000)).toBe(30_000);
+  expect(remainingTimeout(31_000, 25_000)).toBe(6_000);
+});
+
+test('remainingTimeout floors an exhausted budget at 1ms so the wait fails fast', () => {
+  // 0 means "no timeout" to Playwright — never hand it that.
+  expect(remainingTimeout(1_000, 1_000)).toBe(1);
+  expect(remainingTimeout(1_000, 5_000)).toBe(1);
+});
+
+// --- isOutsideViewport --------------------------------------------------------
+
+const VIEWPORT = { width: 1280, height: 720 };
+
+test('isOutsideViewport accepts points inside the viewport (edges inclusive)', () => {
+  expect(isOutsideViewport({ x: 640, y: 360 }, VIEWPORT)).toBe(false);
+  expect(isOutsideViewport({ x: 0, y: 0 }, VIEWPORT)).toBe(false);
+  expect(isOutsideViewport({ x: 1280, y: 720 }, VIEWPORT)).toBe(false);
+});
+
+test('isOutsideViewport flags a below-the-fold or off-screen center', () => {
+  expect(isOutsideViewport({ x: 640, y: 900 }, VIEWPORT)).toBe(true); // below the fold
+  expect(isOutsideViewport({ x: -5, y: 360 }, VIEWPORT)).toBe(true);
+  expect(isOutsideViewport({ x: 1500, y: 360 }, VIEWPORT)).toBe(true);
+  expect(isOutsideViewport({ x: 640, y: -10 }, VIEWPORT)).toBe(true);
+});
+
+test('isOutsideViewport never flags when the viewport is unknown (null)', () => {
+  expect(isOutsideViewport({ x: 9_999, y: 9_999 }, null)).toBe(false);
 });
 
 // --- applyNodeFilters -------------------------------------------------------
