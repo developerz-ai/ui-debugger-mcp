@@ -249,6 +249,60 @@ export function createLookExecute(
   };
 }
 
+/** Self-look output: the saved evidence plus the frame itself (base64) for the driver's own eyes. */
+export interface SelfLookResult {
+  /** Path to the screenshot saved as evidence. */
+  screenshot: string;
+  /** Raw frame size in bytes (before base64). */
+  bytes: number;
+  /** The question/expectation echoed back so the driver judges against it. */
+  prompt: string;
+  /** Base64 PNG of the frame — mapped to a `file-data` part via `toModelOutput`. */
+  frame: string;
+}
+
+/**
+ * Build `look` for a MULTIMODAL driver (self-look): when control + vision are the
+ * SAME model, a second blind vision call wastes a round-trip and drops the run's
+ * context — instead the tool returns the frame itself as multimodal tool output
+ * (`toModelOutput` → `content` with a `file-data` part), so the driver looks at
+ * the screenshot with its own eyes, in full conversation context.
+ *
+ * Older frames are pruned from the transcript by the loop (`pruneStaleFrames`) so
+ * repeated looks never stack images in the re-sent history — only the newest frame
+ * stays live.
+ */
+export function createSelfLookTool(adapter: Adapter, recorder: EvidenceRecorder) {
+  return tool({
+    description:
+      'Capture the current screen and LOOK at it yourself — the screenshot is attached to this tool result and you are multimodal. Judge layout, alignment, colour, overlap, cut-off text against your question/expect. Only the newest frame stays in context (older ones are pruned), so call again after the screen changes.',
+    inputSchema: LookInputSchema,
+    execute: async (input): Promise<SelfLookResult> => {
+      const png = await adapter.screenshot();
+      const screenshot = await recorder.saveScreenshot(lookLabel(input), png);
+      return {
+        screenshot,
+        bytes: png.byteLength,
+        prompt: buildPrompt(input),
+        frame: Buffer.from(png).toString('base64'),
+      };
+    },
+    toModelOutput: ({ output }) => ({
+      type: 'content',
+      value: [
+        {
+          type: 'text',
+          text:
+            `screenshot saved: ${output.screenshot}\n${output.prompt}\n` +
+            'The frame is attached — judge it yourself and record any visual findings ' +
+            `(cite ${output.screenshot} as the evidence path).`,
+        },
+        { type: 'file-data', data: output.frame, mediaType: 'image/png' },
+      ],
+    }),
+  });
+}
+
 /** Build the `look` tool bound to one adapter + vision model + recorder, for the belt. */
 export function createLookTool(
   adapter: Adapter,

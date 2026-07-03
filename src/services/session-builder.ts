@@ -18,7 +18,7 @@ import type { LanguageModel, Tool } from 'ai';
 import type { CaptureSink } from '../adapters/browser/cdp.js';
 import { createAdapter } from '../adapters/factory.js';
 import { createActTool } from '../agent/belt/act.js';
-import { createLookTool } from '../agent/belt/look.js';
+import { createLookTool, createSelfLookTool } from '../agent/belt/look.js';
 import { createObserveTool } from '../agent/belt/observe.js';
 import { createReportTool } from '../agent/belt/report.js';
 import { createDebugAgent, runDebugLoop } from '../agent/loop.js';
@@ -41,6 +41,12 @@ export interface BuilderModels {
   vision: LanguageModel;
   /** summary guy — condenses the terminal findings into one paragraph for the smart agent. */
   summary: LanguageModel;
+  /**
+   * Control + vision are the SAME multimodal model (probed at boot via the
+   * provider catalog): `look` hands the frame straight to the driver instead
+   * of a second blind vision call.
+   */
+  selfLook?: boolean;
 }
 
 /** What the builder needs that does not change between runs. */
@@ -236,7 +242,13 @@ export async function buildSession(
       tools: {
         observe: withToolLog('observe', createObserveTool(adapter, store), logAgent),
         act: withToolLog('act', createActTool(adapter, store), logAgent),
-        look: withToolLog('look', createLookTool(adapter, models.vision, store), logAgent),
+        look: withToolLog(
+          'look',
+          models.selfLook
+            ? createSelfLookTool(adapter, store)
+            : createLookTool(adapter, models.vision, store),
+          logAgent,
+        ),
         report: withToolLog(
           'report',
           createReportTool(store, () => trail),
