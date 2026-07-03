@@ -207,3 +207,38 @@ test('scrollDelta scales by the given amount', () => {
 test('scrollDelta throws on an unknown direction', () => {
   expect(() => scrollDelta('diagonal' as ScrollDirection, 600)).toThrow(AdapterError);
 });
+
+test('contrast_lt keeps only text nodes with contrast below the threshold', () => {
+  const base = { role: 'p', name: 'x', bounds: { x: 0, y: 0, width: 1, height: 1 }, enabled: true };
+  const invisible: RawNode = {
+    ...base,
+    visible: true,
+    style: { color: 'rgb(255, 255, 255)', backgroundColor: 'rgb(253, 253, 253)', contrast: 1.02 },
+  };
+  const readable: RawNode = {
+    ...base,
+    visible: true,
+    style: { color: 'rgb(0, 0, 0)', backgroundColor: 'rgb(255, 255, 255)', contrast: 21 },
+  };
+  const styleless: RawNode = { ...base, visible: true };
+  const out = applyNodeFilters([invisible, readable, styleless], { contrast_lt: 4.5 });
+  expect(out).toEqual([invisible]);
+});
+
+test('contrast_lt drops hidden low-contrast text (never rendered = not a finding)', () => {
+  const base = { role: 'p', name: 'x', bounds: { x: 0, y: 0, width: 1, height: 1 }, enabled: true };
+  const style = {
+    color: 'rgb(255, 255, 255)',
+    backgroundColor: 'rgb(253, 253, 253)',
+    contrast: 1.02,
+  };
+  const shown: RawNode = { ...base, visible: true, style };
+  const hidden: RawNode = { ...base, visible: false, style };
+  const out = applyNodeFilters([shown, hidden], { contrast_lt: 4.5 });
+  expect(out).toEqual([shown]);
+});
+
+test('contrast_lt rejects a non-number threshold', () => {
+  const nodes: RawNode[] = [];
+  expect(() => applyNodeFilters(nodes, { contrast_lt: 'low' })).toThrow(AdapterError);
+});

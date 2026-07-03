@@ -36,6 +36,12 @@ Never screenshot for information you can read from the tree or logs.
 - After each \`act\`, re-\`observe\` to confirm the effect before acting again.
 - If a step requires visual confirmation (looks good? aligned?), call \`look\`.
 - Record a visual finding any time \`look\` surfaces an issue; attach the screenshot path.
+- Repeated elements (e.g. several "Add to cart" buttons): test EACH instance and
+  report exactly which work and which fail. Never generalize one instance's
+  behavior to all of them.
+- If \`look\` reports it is unavailable for this run, do not call it again — finish
+  the structural checks and state in your report summary that visual checks could
+  not be performed (unverified, not passed).
 
 ## Mid-run instructions
 

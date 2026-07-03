@@ -65,3 +65,17 @@ test('empty string stays empty (caller decides what that means)', () => {
   expect(normalizeQuery('')).toBe('');
   expect(normalizeQuery('   ')).toBe('');
 });
+
+test('bare HTML tag names resolve as CSS, not text', () => {
+  expect(normalizeQuery('span')).toBe('span');
+  expect(normalizeQuery('img')).toBe('img');
+  expect(normalizeQuery('div')).toBe('div');
+  expect(normalizeQuery('Span')).toBe('span'); // case-insensitive
+  expect(normalizeQuery('  header ')).toBe('header');
+});
+
+test('multi-word or non-tag single words still fall back to text', () => {
+  expect(normalizeQuery('Contact')).toBe('text=Contact');
+  expect(normalizeQuery('span cart')).toBe('text=span cart');
+  expect(normalizeQuery('cart')).toBe('text=cart');
+});

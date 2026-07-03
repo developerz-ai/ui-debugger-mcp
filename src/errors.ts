@@ -77,6 +77,19 @@ export class AgentError extends UiDebuggerError {
   }
 }
 
+/**
+ * The configured vision model cannot take image input (text-only) — permanent for
+ * the run. `look` latches on it: later calls fail fast with the same guidance
+ * instead of burning a screenshot + provider round-trip per retry.
+ */
+export class VisionUnavailableError extends AgentError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VisionUnavailableError';
+    Object.setPrototypeOf(this, VisionUnavailableError.prototype);
+  }
+}
+
 export class ProviderError extends UiDebuggerError {
   constructor(message: string) {
     super(message);

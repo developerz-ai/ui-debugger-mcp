@@ -1,14 +1,17 @@
 import { expect, test } from 'bun:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { Adapter } from '../../adapters/contract.js';
-import { AdapterError, AgentError } from '../../errors.js';
+import { AdapterError, AgentError, VisionUnavailableError } from '../../errors.js';
 import {
+  createLookExecute,
   createLookTool,
   type EvidenceRecorder,
+  isImageRejection,
   LookInputSchema,
   runLook,
   type VisionGenerate,
   type VisionRequest,
+  visionUnavailableMessage,
 } from './look.js';
 
 /** A fake {@link Adapter} whose only meaningful method is `screenshot`. */
@@ -238,4 +241,69 @@ test('createLookTool threads the tool abort signal into the vision generateText 
   // Without the signal a stalled vision provider would block session teardown.
   expect(seenSignals).toEqual([controller.signal]);
   expect((result as { description: string }).description).toBe('A blue button, centred.');
+});
+
+test('isImageRejection matches the provider phrasings for text-only models', () => {
+  // z.ai coding endpoint (glm text models)
+  expect(isImageRejection("messages.content.type is invalid, allowed values: ['text']")).toBe(true);
+  // OpenRouter / OpenAI-compatible variants
+  expect(isImageRejection('This model does not support image input')).toBe(true);
+  expect(isImageRejection("model doesn't support vision")).toBe(true);
+  expect(isImageRejection('image input is not supported by this model')).toBe(true);
+  expect(isImageRejection('Invalid content type: image_url')).toBe(true);
+});
+
+test('isImageRejection stays quiet on transient/provider-neutral errors', () => {
+  expect(isImageRejection('rate limit exceeded')).toBe(false);
+  expect(isImageRejection('fetch failed')).toBe(false);
+  expect(isImageRejection('The operation was aborted')).toBe(false);
+  expect(isImageRejection('insufficient credits')).toBe(false);
+});
+
+test('visionUnavailableMessage names the model and tells the driver to stop calling look', () => {
+  const msg = visionUnavailableMessage(
+    'glm-5.2',
+    "content.type is invalid, allowed values: ['text']",
+  );
+  expect(msg).toContain("'glm-5.2'");
+  expect(msg).toContain('Do NOT call look again');
+  expect(msg).toContain('.ui-debugger-mcp.json');
+});
+
+test('createLookExecute latches VisionUnavailableError: later calls fail fast, no screenshot', async () => {
+  const order: string[] = [];
+  const adapter = fakeAdapter(PNG, order);
+  const generate: VisionGenerate = async () => {
+    order.push('generate');
+    throw new VisionUnavailableError('look is unavailable for this run: text-only vision model');
+  };
+  const { recorder } = fakeRecorder();
+  const execute = createLookExecute(adapter, generate, recorder);
+
+  await expect(execute({ question: 'q' })).rejects.toThrow(VisionUnavailableError);
+  // First call reached the adapter + provider…
+  expect(order).toEqual(['screenshot', 'generate']);
+
+  await expect(execute({ question: 'again' })).rejects.toThrow('look is unavailable');
+  // …the latched second call touched neither.
+  expect(order).toEqual(['screenshot', 'generate']);
+});
+
+test('createLookExecute does NOT latch transient errors — the next call retries fully', async () => {
+  const order: string[] = [];
+  const adapter = fakeAdapter(PNG, order);
+  let calls = 0;
+  const generate: VisionGenerate = async () => {
+    order.push('generate');
+    calls += 1;
+    if (calls === 1) throw new Error('rate limit exceeded');
+    return { text: cleanReply };
+  };
+  const { recorder } = fakeRecorder(order);
+  const execute = createLookExecute(adapter, generate, recorder);
+
+  await expect(execute({ question: 'q' })).rejects.toThrow('rate limit');
+  const result = await execute({ question: 'q' });
+  expect(result.description).toBe('A blue button, centred.');
+  expect(order).toEqual(['screenshot', 'generate', 'screenshot', 'generate', 'save']);
 });

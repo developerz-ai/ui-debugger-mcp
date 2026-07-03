@@ -19,10 +19,8 @@ input, and screenshots. Use it deliberately.
 
 | Domain      | What it gives you | Use via |
 |-------------|-------------------|---------|
-| \`Target\`    | enumerate/switch tabs and frames | \`observe({kind:"tree"})\` with \`within\` to scope to a frame |
 | \`Page\`      | navigate, wait for load, capture screenshot | \`act({action:"navigate"})\`, \`observe({kind:"screenshot"})\` |
 | \`DOM\`       | read/query the element tree, attributes, text | \`observe({kind:"tree"})\` |
-| \`Runtime\`   | evaluate JS in a context (e.g. read a value not in the DOM) | \`observe({kind:"tree", query:"Runtime.evaluate:..."})\` |
 | \`Network\`   | request/response status, failed requests, timing | \`observe({kind:"network"})\` |
 | \`Log\`       | browser console messages, JS errors | \`observe({kind:"console"})\` |
 
@@ -34,6 +32,37 @@ Always try the structured path before asking for vision:
 3. Use \`observe({kind:"console"})\` and \`observe({kind:"network"})\` proactively after
    each meaningful action — errors land there before they surface visually.
 4. Only after the tree gives you no answer: call \`look\` for pixels.
+
+### Composing tree queries
+
+- \`query\` accepts: a bare HTML tag (\`span\`, \`img\`), CSS (\`.cart span\`),
+  \`role "name"\` (\`button "Add to cart"\`), an explicit engine
+  (\`data-testid=cart-count\`, \`text=Subscribe\`), or plain visible text.
+- Elements with a \`data-testid\` always appear in the default (no-query) tree with
+  their \`testid\` — to read a counter/value, find its node and read \`name\` (the
+  text content). Re-observe the same node after acting to verify a change.
+- \`within\` scopes the read: pass a selector string or a node OBJECT exactly as a
+  previous observe returned it — never a JSON-stringified node.
+
+### Invisible text & contrast — no vision needed
+
+Text-bearing nodes carry a \`style\` column = \`{ color, backgroundColor, contrast }\`
+(WCAG ratio 1–21). It is omitted by default — request it via \`fields:["role","name","style"]\`
+or sweep all text in ONE call:
+\`observe({kind:"tree", query:"p, span, div, a, li", filters:{contrast_lt: 4.5}})\`
+(returns only hard-to-read text; empty = contrast is fine). Flag \`contrast < 4.5\`
+as a \`medium\` visual finding and \`contrast < 1.5\` as \`high\` (the text is
+effectively invisible). Always run one contrast sweep when the goal mentions
+readability, contrast, or visual polish.
+
+### Follow links by CLICKING them — never invent URLs
+
+The tree does not expose \`href\`s. To follow a link, \`act({action:"click"})\` its
+node. Do NOT fabricate a URL from a link's label (e.g. label "Help Center" →
+navigating to \`/help-center\`): a guessed URL that 404s is YOUR error, not a site
+bug. Only \`navigate\` to URLs given in the goal or seen in network entries. If a
+link's click target is hidden (e.g. inside a closed menu), hover/click the parent
+menu item first, then re-observe.
 
 ### Multi-frame / tab navigation
 
@@ -51,7 +80,8 @@ The app must have \`ALLOW_AI_DEBUG_LOGIN=true\` set in its environment.
 ### Selectors — use the node's \`target\`, don't invent one
 
 Most actionable nodes from \`observe({kind:"tree"})\` carry a ready-to-use \`target\`
-string (e.g. \`role=button[name="Add to cart" i]\`, with \`>> nth=N\` when names repeat).
+string (e.g. \`data-testid="cart-count"\` when the element has a test id, else
+\`role=button[name="Add to cart" i]\`, with \`>> nth=N\` when names repeat).
 When a node has a \`target\`, COPY it verbatim into \`act({action, target})\`.
 Do NOT hand-craft a selector — guessed CSS like \`button[name="..."]\` will not resolve.
 

@@ -23,7 +23,7 @@ import type { LanguageModel, ModelMessage } from 'ai';
 import { generateText, tool } from 'ai';
 import { z } from 'zod';
 import type { Adapter } from '../../adapters/contract.js';
-import { AgentError } from '../../errors.js';
+import { AgentError, VisionUnavailableError } from '../../errors.js';
 
 /** `look` input — both optional: ask a `question`, and/or state the `expect`ed look. */
 export const LookInputSchema = z.object({
@@ -135,6 +135,33 @@ function truncate(text: string, max = 200): string {
   return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
 }
 
+/**
+ * Provider messages that mean "this model cannot take image input" — a permanent
+ * condition for the run, not a transient failure. Covers the OpenAI-compatible
+ * phrasings seen in the wild, e.g. z.ai's
+ * `messages.content.type is invalid, allowed values: ['text']` and OpenRouter's
+ * "model does not support image input" variants.
+ */
+const IMAGE_REJECTION =
+  /content[._\s]?type[^.]{0,40}(invalid|unsupported|not (allowed|supported))|allowed values[^.]{0,20}'?text'?|does(n'?t| not) support (image|vision|multimodal)|(image|vision|multimodal)[^.]{0,40}(is |are )?not supported|unsupported (image|content) type|invalid content type/i;
+
+/** Whether a provider error says the vision model rejected image input (text-only model). */
+export function isImageRejection(message: string): boolean {
+  return IMAGE_REJECTION.test(message);
+}
+
+/** The latched, actionable message the driver gets when the vision model is text-only. */
+export function visionUnavailableMessage(modelId: string, providerMessage: string): string {
+  return (
+    `look is unavailable for this run: vision model '${modelId}' rejected image input ` +
+    `(provider said: ${JSON.stringify(truncate(providerMessage, 140))}). The configured ` +
+    'models.vision appears to be text-only — set it to a multimodal model in ' +
+    '.ui-debugger-mcp.json. Do NOT call look again this run; verify what you can from ' +
+    'observe (tree/console/network) and state in your report summary that visual checks ' +
+    'could not be performed.'
+  );
+}
+
 /** Pull the JSON object out of a reply — tolerant of ```json fences and stray prose. */
 function extractJson(text: string): string {
   const fenced = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(text);
@@ -199,23 +226,56 @@ export async function runLook(
   return { ...reply, screenshot };
 }
 
+/**
+ * Build `look`'s execute closure with the vision-unavailable latch: once a call
+ * dies on {@link VisionUnavailableError} (text-only vision model), every later
+ * call fails fast with the same guidance — no screenshot, no provider round-trip.
+ * Exported apart from the `tool()` wrapper so the latch unit-tests against fakes.
+ */
+export function createLookExecute(
+  adapter: Adapter,
+  generate: VisionGenerate,
+  recorder: EvidenceRecorder,
+) {
+  let unavailable: VisionUnavailableError | undefined;
+  return async (input: LookInput, abortSignal?: AbortSignal): Promise<LookResult> => {
+    if (unavailable) throw unavailable;
+    try {
+      return await runLook(adapter, generate, recorder, input, abortSignal);
+    } catch (e) {
+      if (e instanceof VisionUnavailableError) unavailable = e;
+      throw e;
+    }
+  };
+}
+
 /** Build the `look` tool bound to one adapter + vision model + recorder, for the belt. */
 export function createLookTool(
   adapter: Adapter,
   vision: LanguageModel,
   recorder: EvidenceRecorder,
 ) {
+  const modelId = typeof vision === 'string' ? vision : vision.modelId;
   // Forward the abort signal into the vision call: on end_session / wall-clock
   // timeout the SDK aborts the tool's execute — without the signal a stalled
   // vision provider would block Session.close() (abort + await run) indefinitely.
   const generate: VisionGenerate = async ({ system, messages, abortSignal }) => {
-    const { text } = await generateText({ model: vision, system, messages, abortSignal });
-    return { text };
+    try {
+      const { text } = await generateText({ model: vision, system, messages, abortSignal });
+      return { text };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (isImageRejection(message)) {
+        throw new VisionUnavailableError(visionUnavailableMessage(modelId, message));
+      }
+      throw e;
+    }
   };
+  const execute = createLookExecute(adapter, generate, recorder);
   return tool({
     description:
       'Ask the vision model to look at the current screen. Captures a screenshot and sends it with your question/expect to the multimodal "eyes", which judges how it looks (layout, alignment, colour, overlap, cut-off text). Returns { description, matches?, issues[] } with the screenshot saved as evidence. Use only when structure (observe) cannot answer — vision is slow and costly.',
     inputSchema: LookInputSchema,
-    execute: (input, options) => runLook(adapter, generate, recorder, input, options.abortSignal),
+    execute: (input, options) => execute(input, options.abortSignal),
   });
 }

@@ -54,6 +54,66 @@ const ARIA_ROLES = new Set([
 const ROLE_NAME = /^([a-zA-Z][\w-]*)\s+["'“”](.+?)["'”“]$/;
 
 /**
+ * HTML tag names a bare one-word query resolves as CSS. Without this, `span` or
+ * `img` fell through to `text=span` — matching nothing, silently — and the driver
+ * burned steps on empty reads. A page whose visible text is exactly one of these
+ * words loses the text match, but a structural read is what such a query means.
+ */
+const HTML_TAGS = new Set([
+  'a',
+  'article',
+  'aside',
+  'audio',
+  'blockquote',
+  'button',
+  'canvas',
+  'caption',
+  'code',
+  'details',
+  'dialog',
+  'div',
+  'fieldset',
+  'figure',
+  'footer',
+  'form',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'header',
+  'iframe',
+  'img',
+  'input',
+  'label',
+  'legend',
+  'li',
+  'main',
+  'nav',
+  'ol',
+  'option',
+  'p',
+  'pre',
+  'progress',
+  'section',
+  'select',
+  'span',
+  'summary',
+  'svg',
+  'table',
+  'tbody',
+  'td',
+  'textarea',
+  'tfoot',
+  'th',
+  'thead',
+  'tr',
+  'ul',
+  'video',
+]);
+
+/**
  * CSS-ish, kept deliberately narrow so ordinary labels are not misread as selectors:
  *  - starts with `.`/`#`/`[`/`*`,
  *  - a `tag` followed by `#`/`[`, by `.` + a class-start char (`div.card`, but not
@@ -72,8 +132,9 @@ const CSS_LIKE =
  * Resolution order (first match wins):
  *  1. explicit engine / XPath (`text=…`, `role=…`, `css=…`, `//…`) → verbatim
  *  2. `role "name"` → `role=<role>[name="<name>" i]` (case-insensitive)
- *  3. CSS-looking → verbatim CSS
- *  4. anything else (plain visible text) → `text=<query>` (case-insensitive substring)
+ *  3. bare HTML tag name (`span`, `img`, `div`) → verbatim CSS tag selector
+ *  4. CSS-looking → verbatim CSS
+ *  5. anything else (plain visible text) → `text=<query>` (case-insensitive substring)
  */
 export function normalizeQuery(raw: string): string {
   const q = raw.trim();
@@ -83,6 +144,12 @@ export function normalizeQuery(raw: string): string {
   const roleName = ROLE_NAME.exec(q);
   if (roleName?.[1] && roleName[2] && ARIA_ROLES.has(roleName[1].toLowerCase())) {
     return `role=${roleName[1].toLowerCase()}[name=${JSON.stringify(roleName[2])} i]`;
+  }
+
+  if (HTML_TAGS.has(q.toLowerCase())) return q.toLowerCase();
+  // A comma list of tags (`p, span`) is a CSS selector list, not visible text.
+  if (q.includes(',') && q.split(',').every((t) => HTML_TAGS.has(t.trim().toLowerCase()))) {
+    return q.toLowerCase();
   }
 
   if (CSS_LIKE.test(q)) return q;
