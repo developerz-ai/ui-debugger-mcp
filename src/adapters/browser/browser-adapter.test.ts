@@ -225,6 +225,19 @@ test('contrast_lt keeps only text nodes with contrast below the threshold', () =
   expect(out).toEqual([invisible]);
 });
 
+test('contrast_lt drops hidden low-contrast text (never rendered = not a finding)', () => {
+  const base = { role: 'p', name: 'x', bounds: { x: 0, y: 0, width: 1, height: 1 }, enabled: true };
+  const style = {
+    color: 'rgb(255, 255, 255)',
+    backgroundColor: 'rgb(253, 253, 253)',
+    contrast: 1.02,
+  };
+  const shown: RawNode = { ...base, visible: true, style };
+  const hidden: RawNode = { ...base, visible: false, style };
+  const out = applyNodeFilters([shown, hidden], { contrast_lt: 4.5 });
+  expect(out).toEqual([shown]);
+});
+
 test('contrast_lt rejects a non-number threshold', () => {
   const nodes: RawNode[] = [];
   expect(() => applyNodeFilters(nodes, { contrast_lt: 'low' })).toThrow(AdapterError);

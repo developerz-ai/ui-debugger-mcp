@@ -102,16 +102,25 @@ export interface RawNode extends Node {
  * so we type the handful of members the extractor touches; annotations are erased
  * at runtime, so this never reaches the browser.
  */
+interface DomDocument {
+  getElementById(id: string): DomEl | null;
+  documentElement: DomEl;
+  createElement(tag: string): DomEl;
+}
+
 interface DomEl {
   tagName: string;
   textContent: string | null;
   disabled?: boolean;
   labels?: ArrayLike<DomEl> | null;
   parentElement: DomEl | null;
-  ownerDocument: { getElementById(id: string): DomEl | null };
+  ownerDocument: DomDocument;
+  style: { backgroundColor: string };
   getAttribute(name: string): string | null;
   hasAttribute(name: string): boolean;
   getBoundingClientRect(): { x: number; y: number; width: number; height: number };
+  appendChild(child: DomEl): void;
+  removeChild(child: DomEl): void;
 }
 
 /**
@@ -162,7 +171,26 @@ const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
     };
   };
 
-  // Nearest opaque ancestor background; browsers paint the root canvas white.
+  // The viewport canvas ("backplate") — the fallback background when no opaque
+  // ancestor paints one. Browsers DARKEN this backplate for pages that opt into
+  // `color-scheme: dark`, so hard-coding white would mis-judge contrast there.
+  // Resolve the CSS system `Canvas` color under the root's used color scheme via
+  // a throwaway probe (appended + removed in the same synchronous turn — never
+  // painted), degrading to white when `Canvas` is unsupported. Cached: one probe
+  // per extraction, not per node.
+  let canvasFallback: Rgba | undefined;
+  const canvasBackground = (doc: DomDocument): Rgba => {
+    if (canvasFallback) return canvasFallback;
+    const probe = doc.createElement('div');
+    probe.style.backgroundColor = 'Canvas';
+    doc.documentElement.appendChild(probe);
+    const resolved = parseColor(getComputedStyle(probe).backgroundColor);
+    doc.documentElement.removeChild(probe);
+    canvasFallback = resolved && resolved.a >= 0.99 ? resolved : { r: 255, g: 255, b: 255, a: 1 };
+    return canvasFallback;
+  };
+
+  // Nearest opaque ancestor background; else the actual viewport canvas color.
   const effectiveBackground = (el: DomEl): Rgba => {
     let node: DomEl | null = el;
     while (node) {
@@ -170,7 +198,7 @@ const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
       if (bg && bg.a >= 0.99) return bg;
       node = node.parentElement;
     }
-    return { r: 255, g: 255, b: 255, a: 1 };
+    return canvasBackground(el.ownerDocument);
   };
 
   const luminance = (c: Rgba): number => {
@@ -440,10 +468,15 @@ export function applyNodeFilters(nodes: RawNode[], filters?: Filters): RawNode[]
         break;
       }
       case 'contrast_lt': {
-        // Keep only text nodes whose contrast is BELOW the threshold — the
-        // one-call "find unreadable text" sweep (nodes without style drop out).
+        // Keep only VISIBLE text nodes whose contrast is BELOW the threshold —
+        // the one-call "find unreadable text" sweep runs without `visible_eq`,
+        // so hidden nodes with coincidentally low contrast must drop out here or
+        // they surface as false "hard-to-read text" findings (nodes without
+        // style drop out too).
         const threshold = expectNumber(key, value);
-        out = out.filter((n) => n.style?.contrast !== undefined && n.style.contrast < threshold);
+        out = out.filter(
+          (n) => n.visible && n.style?.contrast !== undefined && n.style.contrast < threshold,
+        );
         break;
       }
       default:
