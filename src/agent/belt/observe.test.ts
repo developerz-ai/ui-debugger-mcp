@@ -7,9 +7,9 @@ import type {
   Node,
   Query,
 } from '../../adapters/contract.js';
-import { AdapterError } from '../../errors.js';
+import { AdapterError, AgentError } from '../../errors.js';
 import type { EvidenceRecorder } from './look.js';
-import { createObserveTool, ObserveInputSchema, runObserve } from './observe.js';
+import { coerceWithin, createObserveTool, ObserveInputSchema, runObserve } from './observe.js';
 
 /** A fake {@link EvidenceRecorder} recording every saved frame. */
 function fakeEvidenceRecorder(): {
@@ -228,4 +228,43 @@ test('createObserveTool exposes a described tool with an input schema', () => {
   const observe = createObserveTool(adapter, recorder());
   expect(typeof observe.description).toBe('string');
   expect(observe.inputSchema).toBeDefined();
+});
+
+test('tree → a node with a testid gets a data-testid target (beats role/name)', async () => {
+  const counted: Node = { ...sampleNode, role: 'span', name: '0', testid: 'cart-count' };
+  const { adapter } = fakeAdapter({ nodes: [counted] });
+  const res = await runObserve(adapter, recorder(), { kind: 'tree' });
+  expect((res as { nodes: Array<{ target?: string }> }).nodes[0]?.target).toBe(
+    'data-testid="cart-count"',
+  );
+});
+
+test('tree scoped → keeps a data-testid target (document-unique, survives scoping)', async () => {
+  const counted: Node = { ...sampleNode, role: 'span', name: '0', testid: 'cart-count' };
+  const { adapter } = fakeAdapter({ nodes: [counted, sampleNode] });
+  const res = await runObserve(adapter, recorder(), { kind: 'tree', query: 'header' });
+  const targets = (res as { nodes: Array<{ target?: string }> }).nodes.map((n) => n.target);
+  expect(targets).toEqual(['data-testid="cart-count"', undefined]);
+});
+
+test('coerceWithin parses a JSON-stringified node back into a node object', () => {
+  const asString = JSON.stringify(sampleNode);
+  expect(coerceWithin(asString)).toEqual(sampleNode);
+});
+
+test('coerceWithin passes selector strings and node objects through untouched', () => {
+  expect(coerceWithin('main')).toBe('main');
+  expect(coerceWithin(sampleNode)).toBe(sampleNode);
+  expect(coerceWithin(undefined)).toBeUndefined();
+});
+
+test('coerceWithin fails loud on JSON-looking garbage (never a silent empty read)', () => {
+  expect(() => coerceWithin('{not json')).toThrow(AgentError);
+  expect(() => coerceWithin('{"foo": 1}')).toThrow(AgentError);
+});
+
+test('tree with a JSON-string within scopes the adapter read by the parsed node', async () => {
+  const { adapter, rec } = fakeAdapter({ nodes: [sampleNode] });
+  await runObserve(adapter, recorder(), { kind: 'tree', within: JSON.stringify(sampleNode) });
+  expect(rec.readState?.within).toEqual(sampleNode);
 });

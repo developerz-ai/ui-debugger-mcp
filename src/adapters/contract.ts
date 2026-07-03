@@ -40,6 +40,23 @@ export interface Node {
   bounds: Bounds;
   /** Interactable — `false` when disabled/readonly. */
   enabled: boolean;
+  /** Stable test hook (`data-testid` on web); absent when the element carries none. */
+  testid?: string;
+  /**
+   * Computed text style (web, text-bearing nodes only) — lets the blind driver
+   * catch invisible/low-contrast text structurally, without spending vision.
+   */
+  style?: NodeStyle;
+}
+
+/** Computed colour info for a text-bearing {@link Node} (web adapter). */
+export interface NodeStyle {
+  /** Computed CSS text colour, e.g. `rgb(255, 255, 255)`. */
+  color: string;
+  /** Effective background behind the element (nearest opaque ancestor). */
+  backgroundColor: string;
+  /** WCAG contrast ratio text-vs-background (1–21). < 4.5 hard to read; < 1.5 ≈ invisible. */
+  contrast?: number;
 }
 
 /** Selectable {@link Node} columns for the `fields` projection (a `SELECT` whitelist). */

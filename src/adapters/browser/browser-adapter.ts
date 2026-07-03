@@ -81,10 +81,16 @@ const DEFAULT_SCROLL_STEP = 600;
 
 /** Interactive + semantic elements `readState` surfaces when no `query` is given. */
 const DEFAULT_SELECTOR =
-  'a[href], button, input, select, textarea, [role], [tabindex], [onclick], [contenteditable="true"], summary, label, h1, h2, h3, h4, h5, h6';
+  'a[href], button, input, select, textarea, [role], [tabindex], [onclick], [contenteditable="true"], summary, label, h1, h2, h3, h4, h5, h6, [data-testid], p, img';
 
 /** Whitelisted `filters` keys for this adapter — anything else is rejected, not ignored. */
-export const NODE_FILTER_KEYS = ['visible_eq', 'enabled_eq', 'role_in', 'name_contains'] as const;
+export const NODE_FILTER_KEYS = [
+  'visible_eq',
+  'enabled_eq',
+  'role_in',
+  'name_contains',
+  'contrast_lt',
+] as const;
 
 /** A {@link Node} plus the computed `visible` flag backing the `visible_eq` filter. */
 export interface RawNode extends Node {
@@ -101,6 +107,7 @@ interface DomEl {
   textContent: string | null;
   disabled?: boolean;
   labels?: ArrayLike<DomEl> | null;
+  parentElement: DomEl | null;
   ownerDocument: { getElementById(id: string): DomEl | null };
   getAttribute(name: string): string | null;
   hasAttribute(name: string): boolean;
@@ -112,7 +119,12 @@ interface DomEl {
  * Resolves to the page global at runtime — the extractor below is serialized into
  * the page, so this stays a free identifier, never a module reference.
  */
-declare function getComputedStyle(el: DomEl): { display: string; visibility: string };
+declare function getComputedStyle(el: DomEl): {
+  display: string;
+  visibility: string;
+  color: string;
+  backgroundColor: string;
+};
 
 /**
  * Browser-side element → {@link RawNode} extractor. Playwright serializes this and
@@ -122,6 +134,70 @@ declare function getComputedStyle(el: DomEl): { display: string; visibility: str
  */
 const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
   const clean = (s: string | null | undefined): string => (s ?? '').replace(/\s+/g, ' ').trim();
+
+  interface Rgba {
+    r: number;
+    g: number;
+    b: number;
+    a: number;
+  }
+
+  const parseColor = (value: string | null | undefined): Rgba | null => {
+    const m = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+%?))?\s*\)$/.exec(
+      value ?? '',
+    );
+    if (!m?.[1] || !m[2] || !m[3]) return null;
+    const rawAlpha = m[4];
+    const a =
+      rawAlpha === undefined
+        ? 1
+        : rawAlpha.endsWith('%')
+          ? Number.parseFloat(rawAlpha) / 100
+          : Number.parseFloat(rawAlpha);
+    return {
+      r: Number.parseFloat(m[1]),
+      g: Number.parseFloat(m[2]),
+      b: Number.parseFloat(m[3]),
+      a,
+    };
+  };
+
+  // Nearest opaque ancestor background; browsers paint the root canvas white.
+  const effectiveBackground = (el: DomEl): Rgba => {
+    let node: DomEl | null = el;
+    while (node) {
+      const bg = parseColor(getComputedStyle(node).backgroundColor);
+      if (bg && bg.a >= 0.99) return bg;
+      node = node.parentElement;
+    }
+    return { r: 255, g: 255, b: 255, a: 1 };
+  };
+
+  const luminance = (c: Rgba): number => {
+    const chan = (v: number): number => {
+      const s = v / 255;
+      return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
+  };
+
+  // WCAG ratio (1–21), with a translucent foreground blended over the background.
+  const contrastRatio = (fg: Rgba, bg: Rgba): number => {
+    const blended: Rgba =
+      fg.a >= 1
+        ? fg
+        : {
+            r: fg.r * fg.a + bg.r * (1 - fg.a),
+            g: fg.g * fg.a + bg.g * (1 - fg.a),
+            b: fg.b * fg.a + bg.b * (1 - fg.a),
+            a: 1,
+          };
+    const l1 = luminance(blended);
+    const l2 = luminance(bg);
+    const hi = Math.max(l1, l2);
+    const lo = Math.min(l1, l2);
+    return Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100;
+  };
 
   const implicitRole = (el: DomEl): string => {
     const tag = el.tagName.toLowerCase();
@@ -190,7 +266,9 @@ const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
   return elements.map((el) => {
     const r = el.getBoundingClientRect();
     const style = getComputedStyle(el);
-    return {
+    const testid = clean(el.getAttribute('data-testid'));
+    const text = clean(el.textContent);
+    const node: RawNode = {
       role: clean(el.getAttribute('role')) || implicitRole(el),
       name: accessibleName(el),
       bounds: {
@@ -208,6 +286,19 @@ const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
         !el.hasAttribute('hidden') &&
         el.getAttribute('aria-hidden') !== 'true',
     };
+    if (testid) node.testid = testid;
+    if (text) {
+      const fg = parseColor(style.color);
+      if (fg) {
+        const bg = effectiveBackground(el);
+        node.style = {
+          color: style.color,
+          backgroundColor: `rgb(${bg.r}, ${bg.g}, ${bg.b})`,
+          contrast: contrastRatio(fg, bg),
+        };
+      }
+    }
+    return node;
   });
 };
 
@@ -305,6 +396,13 @@ function expectString(key: string, value: FilterValue): string {
   return value;
 }
 
+function expectNumber(key: string, value: FilterValue): number {
+  if (typeof value !== 'number') {
+    throw new AdapterError(`filter \`${key}\` expects a number`);
+  }
+  return value;
+}
+
 function expectStringArray(key: string, value: FilterValue): string[] {
   if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
     throw new AdapterError(`filter \`${key}\` expects a string[]`);
@@ -341,6 +439,13 @@ export function applyNodeFilters(nodes: RawNode[], filters?: Filters): RawNode[]
         out = out.filter((n) => n.name.toLowerCase().includes(needle));
         break;
       }
+      case 'contrast_lt': {
+        // Keep only text nodes whose contrast is BELOW the threshold — the
+        // one-call "find unreadable text" sweep (nodes without style drop out).
+        const threshold = expectNumber(key, value);
+        out = out.filter((n) => n.style?.contrast !== undefined && n.style.contrast < threshold);
+        break;
+      }
       default:
         throw new AdapterError(
           `unknown filter \`${key}\` for browser adapter (allowed: ${NODE_FILTER_KEYS.join(', ')})`,
@@ -364,7 +469,15 @@ function centerWithin(node: RawNode, region: Bounds): boolean {
 
 /** Drop the internal `visible` flag — the public contract returns plain {@link Node}s. */
 function toNode(node: RawNode): Node {
-  return { role: node.role, name: node.name, bounds: node.bounds, enabled: node.enabled };
+  const out: Node = {
+    role: node.role,
+    name: node.name,
+    bounds: node.bounds,
+    enabled: node.enabled,
+  };
+  if (node.testid) out.testid = node.testid;
+  if (node.style) out.style = node.style;
+  return out;
 }
 
 interface AdapterHandles {

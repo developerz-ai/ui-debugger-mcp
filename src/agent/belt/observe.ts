@@ -40,7 +40,27 @@ import type { EvidenceRecorder } from './look.js';
 const OBSERVE_KINDS = ['tree', 'screenshot', 'console', 'network'] as const;
 
 /** Selectable {@link Node} columns — the `fields` projection whitelist (contract-level). */
-const NODE_FIELDS = ['role', 'name', 'bounds', 'enabled'] as const satisfies readonly NodeField[];
+const NODE_FIELDS = [
+  'role',
+  'name',
+  'bounds',
+  'enabled',
+  'testid',
+  'style',
+] as const satisfies readonly NodeField[];
+
+/**
+ * Columns a no-`fields` read returns. `style` (colour + contrast per text node)
+ * is opt-in only — on a 200-node default read it would triple the payload the
+ * text driver re-reads every step for data it rarely needs.
+ */
+const DEFAULT_PROJECTION = [
+  'role',
+  'name',
+  'bounds',
+  'enabled',
+  'testid',
+] as const satisfies readonly NodeField[];
 
 /** One `filters` predicate value; arrays back `_in`-style set membership (matches `FilterValue`). */
 const FilterValueSchema = z.union([z.string(), z.number(), z.boolean(), z.array(z.string())]);
@@ -59,6 +79,7 @@ const NodeSchema = z.object({
   name: z.string(),
   bounds: BoundsSchema,
   enabled: z.boolean(),
+  testid: z.string().optional(),
 });
 
 /** `observe` input — flat + SQL-like; `kind` picks the table, the rest compose the read. */
@@ -82,7 +103,9 @@ export const ObserveInputSchema = z.object({
   within: z
     .union([z.string(), NodeSchema])
     .optional()
-    .describe('tree scope: restrict to a subtree/region (a selector or a node)'),
+    .describe(
+      'tree scope: restrict to a subtree/region (a selector string, or a node OBJECT exactly as observe returned it — not a JSON string)',
+    ),
 });
 
 export type ObserveInput = z.infer<typeof ObserveInputSchema>;
@@ -131,6 +154,8 @@ const ARIA_ROLES = new Set([
  * `null` for an unnamed, non-semantic node (the agent targets those by other means).
  */
 function baseSelector(node: Node): string | null {
+  // A test hook beats everything: document-unique, stable across renames/moves.
+  if (node.testid) return `data-testid=${JSON.stringify(node.testid)}`;
   const name = node.name.trim();
   if (node.role && ARIA_ROLES.has(node.role) && name) {
     return `role=${node.role}[name=${JSON.stringify(name)} i]`;
@@ -148,14 +173,19 @@ function baseSelector(node: Node): string | null {
  * index — and even a bare role/text selector — can resolve a different element when
  * `act` replays it with an unscoped, document-wide `find` (e.g. header "Settings"
  * instead of the sidebar "Settings" the narrowed read returned). In that case we
- * emit no `target`: better the agent falls back (visible text / `role "name"`) than
- * act on the wrong node.
+ * emit no `target` — EXCEPT a `data-testid` one, which is document-unique and
+ * survives any scoping. Otherwise, better the agent falls back (visible text /
+ * `role "name"`) than act on the wrong node.
  */
 function withTargets(nodes: Node[], fields?: readonly NodeField[], scoped = false): TreeNode[] {
   const seen = new Map<string, number>();
+  const projection = fields && fields.length > 0 ? fields : DEFAULT_PROJECTION;
   return nodes.map((node) => {
-    const projected: TreeNode = fields && fields.length > 0 ? pick(node, fields) : { ...node };
-    if (scoped) return projected;
+    const projected: TreeNode = pick(node, projection);
+    if (scoped) {
+      if (node.testid) projected.target = `data-testid=${JSON.stringify(node.testid)}`;
+      return projected;
+    }
     const base = baseSelector(node);
     if (!base) return projected;
     const k = seen.get(base) ?? 0;
@@ -168,8 +198,35 @@ function withTargets(nodes: Node[], fields?: readonly NodeField[], scoped = fals
 /** Pick a subset of keys off an object (a typed `SELECT cols`) for the `fields` projection. */
 function pick<T, K extends keyof T>(obj: T, keys: readonly K[]): Pick<T, K> {
   const out = {} as Pick<T, K>;
-  for (const key of keys) out[key] = obj[key];
+  // Skip absent optionals (testid/style) so they never serialize as explicit nulls.
+  for (const key of keys) if (obj[key] !== undefined) out[key] = obj[key];
   return out;
+}
+
+/**
+ * Accept a JSON-*stringified* node for `within`. Drivers routinely paste the node
+ * back as a string (`within: "{\"role\": …}"`); before this coercion that string
+ * fell through as a selector, normalized to `text={"role"…}`, matched nothing, and
+ * returned an empty tree with no clue why — the single biggest step-waster observed.
+ * Garbage-that-looks-like-JSON fails loud instead of silently reading the whole page.
+ */
+export function coerceWithin(within: ObserveInput['within']): ObserveInput['within'] {
+  if (typeof within !== 'string' || !within.trimStart().startsWith('{')) return within;
+  let data: unknown;
+  try {
+    data = JSON.parse(within);
+  } catch {
+    throw new AgentError(
+      'observe `within` looks like a JSON node but does not parse — pass the node OBJECT exactly as observe returned it, or a selector string',
+    );
+  }
+  const parsed = NodeSchema.safeParse(data);
+  if (!parsed.success) {
+    throw new AgentError(
+      'observe `within` was a JSON string but not a valid node (needs role/name/bounds/enabled) — pass a node from a previous observe, or a selector string',
+    );
+  }
+  return parsed.data;
 }
 
 /**
@@ -186,8 +243,9 @@ export async function runObserve(
 
   switch (kind) {
     case 'tree': {
-      const nodes = await adapter.readState({ query, filters, limit, within });
-      const scoped = query !== undefined || within !== undefined || filters !== undefined;
+      const scope = coerceWithin(within);
+      const nodes = await adapter.readState({ query, filters, limit, within: scope });
+      const scoped = query !== undefined || scope !== undefined || filters !== undefined;
       const projected = withTargets(nodes, fields, scoped);
       return { kind, count: projected.length, nodes: projected };
     }
