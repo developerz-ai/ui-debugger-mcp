@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+import { supportsImageInput } from './agent/capabilities.js';
 import { resolveModels } from './agent/models.js';
-import { createOpenRouterProvider } from './agent/provider.js';
+import { createOpenRouterProvider, resolveProviderConfig } from './agent/provider.js';
 import { runStatus, runStop } from './cli/control.js';
 import { runHelp, runVersion } from './cli/help.js';
 import { runInit } from './cli/init.js';
@@ -52,11 +53,23 @@ async function main(): Promise<void> {
     await ensureWorkspace(workspace);
 
     // Resolve provider + per-role models (driver, vision, summary)
-    const provider = createOpenRouterProvider({
+    const providerOptions = {
       apiKey: config.provider.apiKey,
       baseURL: config.provider.baseUrl,
-    });
+    };
+    const provider = createOpenRouterProvider(providerOptions);
     const roleModels = resolveModels(provider, config.models);
+
+    // Self-look: control + vision on the SAME model AND the provider catalog
+    // confirms it takes image input → `look` hands the frame to the driver
+    // itself (full context, no second call). Unknown capability (null) keeps
+    // the safe separate-call path — its vision latch fails soft, while an
+    // image pushed at a text-only driver would poison every later step.
+    let selfLook = false;
+    if (config.models.driver === config.models.vision) {
+      const { apiKey, baseURL } = resolveProviderConfig(providerOptions);
+      selfLook = (await supportsImageInput(baseURL, apiKey, config.models.driver)) === true;
+    }
 
     // Wire the debug session service
     const manager = new SessionManager<Session>();
@@ -66,6 +79,7 @@ async function main(): Promise<void> {
         driver: roleModels.driver,
         vision: roleModels.vision,
         summary: roleModels.summary,
+        selfLook,
       },
       workspace,
     });

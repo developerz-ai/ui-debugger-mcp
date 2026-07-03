@@ -98,6 +98,68 @@ export function foldInstructionsIntoStep(
   return { messages: [...messages, injected] };
 }
 
+/** What a pruned frame collapses to — tells the driver how to get a fresh one. */
+export const STALE_FRAME_NOTE = '[stale frame removed — call look again for a fresh screenshot]';
+
+/** Whether a tool-result part carries a self-look frame (`content` output with `file-data`). */
+function isLookFrame(part: unknown): boolean {
+  if (typeof part !== 'object' || part === null) return false;
+  const p = part as {
+    type?: string;
+    toolName?: string;
+    output?: { type?: string; value?: unknown };
+  };
+  return (
+    p.type === 'tool-result' &&
+    p.toolName === 'look' &&
+    p.output?.type === 'content' &&
+    Array.isArray(p.output.value) &&
+    p.output.value.some((v) => (v as { type?: string })?.type === 'file-data')
+  );
+}
+
+/** Collapse every `file-data` part of a look tool-result to the stale-frame note. */
+function stripFrame(message: ModelMessage): ModelMessage {
+  if (!Array.isArray(message.content)) return message;
+  const content = message.content.map((part) => {
+    if (!isLookFrame(part)) return part;
+    const p = part as { output: { value: Array<{ type?: string }> } };
+    return {
+      ...part,
+      output: {
+        ...p.output,
+        value: p.output.value.map((v) =>
+          v?.type === 'file-data' ? { type: 'text' as const, text: STALE_FRAME_NOTE } : v,
+        ),
+      },
+    };
+  });
+  return { ...message, content } as ModelMessage;
+}
+
+/**
+ * Keep only the NEWEST self-look frame in the transcript. The SDK re-sends every
+ * tool result on every step, so each `look` image would otherwise ride along for
+ * the rest of the run — N looks × M steps of image tokens. Rebuilt per step in
+ * `prepareStep` (overrides never persist), like the instruction fold. Returns the
+ * SAME array when there is at most one frame, preserving the no-change fast path.
+ */
+export function pruneStaleFrames(messages: ModelMessage[]): ModelMessage[] {
+  const frameIndexes: number[] = [];
+  messages.forEach((message, index) => {
+    if (
+      message.role === 'tool' &&
+      Array.isArray(message.content) &&
+      message.content.some(isLookFrame)
+    ) {
+      frameIndexes.push(index);
+    }
+  });
+  if (frameIndexes.length <= 1) return messages;
+  const stale = new Set(frameIndexes.slice(0, -1));
+  return messages.map((message, index) => (stale.has(index) ? stripFrame(message) : message));
+}
+
 /** Steps left at or below which the driver is nudged to wrap up and `report`. */
 export const BUDGET_WARN = 6;
 
@@ -239,11 +301,14 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
     instructions,
     stopWhen: [stepCountIs(maxSteps), hasToolCall('report')],
     prepareStep: ({ messages, stepNumber }) => {
-      const withInbox = foldInstructionsIntoStep(inbox, standing, messages);
+      // Self-look frame hygiene first: only the newest screenshot stays live.
+      const pruned = pruneStaleFrames(messages);
+      const withInbox = foldInstructionsIntoStep(inbox, standing, pruned);
+      const base = 'messages' in withInbox ? withInbox.messages : pruned;
       const nudge = budgetNudge(stepNumber, maxSteps);
-      if (!nudge) return withInbox;
-      const base = 'messages' in withInbox ? withInbox.messages : messages;
-      return { messages: [...base, { role: 'user', content: nudge }] };
+      if (nudge) return { messages: [...base, { role: 'user', content: nudge }] };
+      if (base === messages) return {};
+      return { messages: base };
     },
     onStepFinish: async (step) => {
       stepIndex += 1;

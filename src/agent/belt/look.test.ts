@@ -5,6 +5,7 @@ import { AdapterError, AgentError, VisionUnavailableError } from '../../errors.j
 import {
   createLookExecute,
   createLookTool,
+  createSelfLookTool,
   type EvidenceRecorder,
   isImageRejection,
   LookInputSchema,
@@ -306,4 +307,31 @@ test('createLookExecute does NOT latch transient errors — the next call retrie
   const result = await execute({ question: 'q' });
   expect(result.description).toBe('A blue button, centred.');
   expect(order).toEqual(['screenshot', 'generate', 'screenshot', 'generate', 'save']);
+});
+
+test('createSelfLookTool returns the frame itself and maps it to multimodal tool output', async () => {
+  const adapter = fakeAdapter(PNG);
+  const { recorder, saved } = fakeRecorder();
+  const selfLook = createSelfLookTool(adapter, recorder);
+  const output = (await selfLook.execute?.(
+    { question: 'is the button centred?' },
+    { toolCallId: 't1', messages: [] },
+  )) as { screenshot: string; bytes: number; prompt: string; frame: string };
+
+  expect(saved).toHaveLength(1);
+  expect(output.bytes).toBe(PNG.byteLength);
+  expect(output.frame).toBe(Buffer.from(PNG).toString('base64'));
+  expect(output.prompt).toContain('is the button centred?');
+
+  const modelOutput = await selfLook.toModelOutput?.({
+    toolCallId: 't1',
+    input: { question: 'is the button centred?' },
+    output,
+  });
+  expect(modelOutput?.type).toBe('content');
+  const value = (modelOutput as { value: Array<{ type: string }> }).value;
+  expect(value.map((v) => v.type)).toEqual(['text', 'file-data']);
+  const media = value[1] as unknown as { data: string; mediaType: string };
+  expect(media.mediaType).toBe('image/png');
+  expect(media.data).toBe(output.frame);
 });
