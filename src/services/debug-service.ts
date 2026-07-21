@@ -8,6 +8,11 @@
  * seam — so the orchestration here unit-tests with no browser or network. The MCP
  * handlers stay thin: validate input, call straight through to a method here.
  *
+ * One run per project holds *across processes* too: the manager only knows this
+ * server's memory, so `start` also consults the `state.json` breadcrumb and
+ * refuses when another live server already owns a run here (a dead owner's stale
+ * breadcrumb never blocks).
+ *
  * Sessions are keyed by cwd, but the tools speak `session_id`. Every id-bearing
  * call resolves the active session for the cwd and fails loud
  * ({@link SessionNotFoundError}) when the id does not match, so a stale id never
@@ -174,8 +179,10 @@ export class DebugService implements DebugApi {
   /**
    * Open a run: assemble the session, take the profile lock, point the adapter at
    * the target, and kick the loop off in the background. Fails loud if a run is
-   * already active for this cwd ({@link SessionBusyError}); never leaks a launched
-   * browser — a lost lock race or a failed `open` tears the session back down.
+   * already active for this cwd ({@link SessionBusyError}) — whether it belongs to
+   * this server (the manager / in-flight guard) or to another live one (the
+   * `state.json` breadcrumb); never leaks a launched browser — a lost lock race or
+   * a failed `open` tears the session back down.
    *
    * `timeout` is wall-clock from HERE: the deadline is fixed on entry and the
    * remaining budget is threaded into the build and the first navigation, so a slow
@@ -203,6 +210,7 @@ export class DebugService implements DebugApi {
     const remaining = (): number => Math.max(0, deadline - this.#now());
 
     try {
+      await this.#assertNoForeignRun(cwd);
       const id = generateSessionId(this.#now());
       const built = await this.#build({ id, target, goal, criteria, url, timeoutMs: remaining() });
 
@@ -242,6 +250,24 @@ export class DebugService implements DebugApi {
     } finally {
       this.#starting = false;
     }
+  }
+
+  /**
+   * The other half of the one-run gate: another *live* server process holding a
+   * run on this project. The manager only sees this process's memory, so without
+   * this a second MCP client on the same cwd would launch a second run onto the
+   * same profile/emulator and overwrite the live breadcrumb (leaving the CLI
+   * pointing at the wrong pid). A dead or PID-recycled owner does not count — a
+   * crashed server's stale `running` file must never wedge the project shut.
+   */
+  async #assertNoForeignRun(cwd: string): Promise<void> {
+    const foreign = await this.#state.foreignRun();
+    if (foreign === null) return;
+    throw new SessionBusyError(
+      `Another ui-debugger-mcp server (pid ${foreign.pid}) already has a debug session ` +
+        `('${foreign.sessionId}') active for '${cwd}'. End it (or run 'ui-debugger-mcp stop') ` +
+        'before starting another — one run per project at a time.',
+    );
   }
 
   /**
