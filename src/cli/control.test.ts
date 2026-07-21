@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Findings } from '../findings/schema.js';
 import { captureIdentity } from '../session/process-identity.js';
 import type { StateFile } from '../session/state-file.js';
 import { readState, writeState } from '../session/state-file.js';
@@ -57,6 +58,25 @@ test('status prints the run identity + a dead-server line', async () => {
   expect(out).toContain('1700000000000-0001');
   expect(out).toContain('target:   web');
   expect(out).toContain('unknown (server died)'); // state says running but pid is not alive
+});
+
+test('status reports real findings counts from a written findings.json', async () => {
+  const stateJson = await seedState(); // status: 'running', server dead
+  const state = await readState(stateJson);
+  if (!state) throw new Error('seedState did not write a readable state.json');
+  await mkdir(state.sessionDir, { recursive: true });
+  const findings: Findings = {
+    status: 'passed',
+    steps: [{ step: 'open', ok: true }],
+    bugs: [{ kind: 'flow', detail: 'dead button' }],
+    visual: [],
+    summary: 'one bug found',
+  };
+  await writeFile(join(state.sessionDir, 'findings.json'), JSON.stringify(findings), 'utf8');
+
+  await runStatus(cwd);
+  const out = logs.join('\n');
+  expect(out).toContain('1 bugs, 0 visual, 1 steps');
 });
 
 test('stop reports nothing to do when there is no state', async () => {

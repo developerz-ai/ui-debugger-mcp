@@ -170,6 +170,18 @@ test('tryReadFindings returns findings after write', async () => {
   expect(result?.status).toBe('passed');
 });
 
+test('tryReadFindings still throws FindingsError when the file exists but is corrupt', async () => {
+  // Presence is normal (null) only when absent — a present-but-corrupt file must
+  // never be swallowed alongside it.
+  await store.writeFindings(VALID_FINDINGS);
+  const ws = workspacePaths('/project/my-app', tmpDir);
+  const sp = sessionPaths(ws, 'test-session-001');
+  await import('node:fs/promises').then((fs) =>
+    fs.writeFile(sp.findingsJson, 'not-json!!', 'utf8'),
+  );
+  await expect(store.tryReadFindings()).rejects.toBeInstanceOf(FindingsError);
+});
+
 // --- failed / running status -------------------------------------------------
 
 test('writeFindings accepts failed status with bugs', async () => {

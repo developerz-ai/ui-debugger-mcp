@@ -4,7 +4,7 @@ import { supportsImageInput } from './agent/capabilities.js';
 import { resolveModels } from './agent/models.js';
 import { createOpenRouterProvider, resolveProviderConfig } from './agent/provider.js';
 import { runStatus, runStop } from './cli/control.js';
-import { runHelp, runVersion } from './cli/help.js';
+import { printUsage, runHelp, runVersion } from './cli/help.js';
 import { runInit } from './cli/init.js';
 import { loadConfig } from './config/load.js';
 import { NAME, VERSION } from './index.js';
@@ -44,10 +44,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Unknown subcommand → print usage and exit.
+  // Unknown subcommand → print usage and exit 1 (runHelp() would exit 0 first).
   if (subcmd !== undefined) {
     console.error(`${NAME}: unknown subcommand '${subcmd}'.`);
-    runHelp();
+    printUsage();
     process.exit(1);
   }
 

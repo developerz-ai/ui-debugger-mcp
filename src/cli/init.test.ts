@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { ConfigSchema } from '../config/schema.js';
 import { runInit } from './init.js';
 
 const TMP = join(import.meta.dir, '__test_init_tmp__');
@@ -25,6 +26,13 @@ test('writes .ui-debugger-mcp.json when absent', () => {
   expect(parsed).toHaveProperty('models');
   expect(parsed).toHaveProperty('targets.web');
   expect(parsed.targets.web.adapter).toBe('browser');
+});
+
+test('the starter config validates against ConfigSchema', () => {
+  runInit(TMP);
+  const configPath = join(TMP, '.ui-debugger-mcp.json');
+  const parsed = JSON.parse(readFileSync(configPath, 'utf8'));
+  expect(ConfigSchema.safeParse(parsed).success).toBe(true);
 });
 
 test('does not overwrite existing .ui-debugger-mcp.json', () => {
