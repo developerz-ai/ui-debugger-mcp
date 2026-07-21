@@ -1,5 +1,11 @@
 import { expect, test } from 'bun:test';
-import { captureIdentity, parseStartTicks, verifyIdentity } from './process-identity.js';
+import {
+  captureIdentity,
+  isPidAlive,
+  ownerAlive,
+  parseStartTicks,
+  verifyIdentity,
+} from './process-identity.js';
 
 // `/proc` is Linux-only; skip the live-process cases elsewhere (CI is Linux).
 const linuxOnly = process.platform === 'linux' ? test : test.skip;
@@ -38,4 +44,34 @@ linuxOnly('verifyIdentity flags a recycled PID as stale', () => {
 linuxOnly('verifyIdentity reports a vanished PID as gone', () => {
   // 999_999_999 is effectively never a live process.
   expect(verifyIdentity(999_999_999, { startTicks: 123 })).toBe('gone');
+});
+
+test('isPidAlive sees this process and not a vanished one', () => {
+  expect(isPidAlive(process.pid)).toBe(true);
+  expect(isPidAlive(999_999_999)).toBe(false);
+});
+
+test('ownerAlive falls back to a liveness probe when the fingerprint is unverifiable', () => {
+  expect(ownerAlive(process.pid, { startTicks: null })).toEqual({
+    check: 'unverifiable',
+    alive: true,
+  });
+  expect(ownerAlive(999_999_999, { startTicks: null })).toEqual({
+    check: 'unverifiable',
+    alive: false,
+  });
+});
+
+linuxOnly('ownerAlive: our own live process matches', () => {
+  expect(ownerAlive(process.pid, captureIdentity())).toEqual({ check: 'match', alive: true });
+});
+
+linuxOnly('ownerAlive: a recycled or vanished PID is dead, however live the PID looks', () => {
+  const ticks = captureIdentity().startTicks ?? 0;
+  // Live PID, wrong fingerprint — an unrelated process inherited it.
+  expect(ownerAlive(process.pid, { startTicks: ticks + 1 })).toEqual({
+    check: 'stale',
+    alive: false,
+  });
+  expect(ownerAlive(999_999_999, { startTicks: ticks })).toEqual({ check: 'gone', alive: false });
 });

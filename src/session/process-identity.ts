@@ -93,3 +93,34 @@ export function verifyIdentity(pid: number, recorded: ProcessIdentity): Identity
   if (live.kind === 'unknown') return 'unverifiable';
   return live.ticks === recorded.startTicks ? 'match' : 'stale';
 }
+
+/** Whether `pid` is a live process this user can see (`kill(pid, 0)`). */
+export function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM = the process exists but is owned by another user — still "alive".
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Is the process a breadcrumb records *genuinely* still our server — not an
+ * unrelated process that inherited a recycled PID?
+ *
+ * A verified `match` is alive; a `stale` (recycled) or `gone` PID is dead. When
+ * the identity can't be verified (non-Linux, or none recorded), fall back to a
+ * bare liveness probe — best effort, same as before this guard existed. The
+ * `check` comes back too so callers can say *why* (a recycled PID reads very
+ * differently from a clean exit).
+ */
+export function ownerAlive(
+  pid: number,
+  recorded: ProcessIdentity,
+): { check: IdentityCheck; alive: boolean } {
+  const check = verifyIdentity(pid, recorded);
+  if (check === 'match') return { check, alive: true };
+  if (check === 'stale' || check === 'gone') return { check, alive: false };
+  return { check, alive: isPidAlive(pid) };
+}

@@ -98,6 +98,64 @@ test('create closes a just-launched context when post-connect setup throws (no z
   expect(closes).toBe(1); // the half-built context was closed, not leaked
 });
 
+// --- create/open (the run's wall-clock budget) --------------------------------
+
+test('a launch + first navigation spend the run budget, not Playwright’s own defaults', async () => {
+  let launchTimeout: number | undefined;
+  let gotoTimeout: number | undefined;
+  const page = {
+    ...fakePage(),
+    goto: async (_url: string, opts?: { timeout?: number }) => {
+      gotoTimeout = opts?.timeout;
+    },
+  };
+  const chromium = fakeLauncher({
+    launchPersistentContext: async (_dir: string, opts?: { timeout?: number }) => {
+      launchTimeout = opts?.timeout;
+      return { pages: () => [page], close: async () => undefined };
+    },
+  });
+
+  const adapter = await BrowserAdapter.create({
+    config: webTarget(),
+    profileDir: '/tmp/unused-profile',
+    chromium,
+    timeoutMs: 4_000,
+  });
+  await adapter.open('http://localhost:5173', 2_500);
+
+  expect(launchTimeout).toBe(4_000);
+  expect(gotoTimeout).toBe(2_500);
+});
+
+test('a budget wider than the adapter default never extends it', async () => {
+  let launchTimeout: number | undefined;
+  let gotoTimeout: number | undefined;
+  const page = {
+    ...fakePage(),
+    goto: async (_url: string, opts?: { timeout?: number }) => {
+      gotoTimeout = opts?.timeout;
+    },
+  };
+  const chromium = fakeLauncher({
+    launchPersistentContext: async (_dir: string, opts?: { timeout?: number }) => {
+      launchTimeout = opts?.timeout;
+      return { pages: () => [page], close: async () => undefined };
+    },
+  });
+
+  const adapter = await BrowserAdapter.create({
+    config: webTarget(),
+    profileDir: '/tmp/unused-profile',
+    chromium,
+    timeoutMs: 300_000,
+  });
+  await adapter.open('http://localhost:5173', 300_000);
+
+  expect(launchTimeout).toBe(30_000);
+  expect(gotoTimeout).toBe(30_000);
+});
+
 // --- create (attach cdpUrl path) ---------------------------------------------
 
 test('create (attach) reuses the browser’s existing context/page instead of opening new ones', async () => {

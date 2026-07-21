@@ -50,8 +50,11 @@ class FakePointer implements PointerInput {
   async scroll(direction: ScrollDirection, repeat: number): Promise<void> {
     this.calls.push(`scroll:${direction}:${repeat}`);
   }
-  async activateWindow(match: WindowMatch): Promise<void> {
+  /** Per-call window-wait cap — how much of the run's budget `open` handed down. */
+  readonly waits: number[] = [];
+  async activateWindow(match: WindowMatch, timeoutMs: number): Promise<void> {
     this.calls.push(`activate:${JSON.stringify(match)}`);
+    this.waits.push(timeoutMs);
   }
 }
 
@@ -280,6 +283,22 @@ test('open resolves once the window activates while the app stays up', async () 
   await expect(adapter.open('App')).resolves.toBeUndefined();
   expect(input.calls).toEqual(['activate:{"title":"App"}']);
   await expect(adapter.close()).resolves.toBeUndefined(); // kills the group
+});
+
+test('open waits for the window no longer than the run has budget left', async () => {
+  const input = new FakePointer();
+  const adapter = DesktopAdapter.create({
+    config: { adapter: 'desktop', launch: 'sleep 5', window: { title: 'App' } },
+    atspi: new FakeAtspi([]),
+    input,
+    capture: new FakeCapture(),
+  });
+
+  await adapter.open('App', 2_500); // tighter than the adapter's own 10s wait
+  await adapter.open('App'); // no budget → the adapter's own wait stands
+
+  expect(input.waits).toEqual([2_500, 10_000]);
+  await expect(adapter.close()).resolves.toBeUndefined();
 });
 
 test('open refuses to launch when there is no window to drive', async () => {

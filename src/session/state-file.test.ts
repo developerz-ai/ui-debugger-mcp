@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { captureIdentity } from './process-identity.js';
 import type { StateFile } from './state-file.js';
 import { FileStatePort, markStatus, readState, writeState } from './state-file.js';
 import { workspacePaths } from './workspace.js';
@@ -96,6 +97,70 @@ test('FileStatePort.clear marks the run ended', async () => {
   await port.record({ sessionId: 's', target: 'web', goal: 'g' });
   await port.clear();
   expect((await readState(ws.stateJson))?.status).toBe('ended');
+});
+
+// --- foreignRun: the cross-process one-run gate -----------------------------
+
+/** A workspace + port pair; `pid` is the *port's* own process id. */
+function portFor(pid: number) {
+  const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
+  return { ws, port: new FileStatePort(ws, { pid }) };
+}
+
+test('foreignRun reports a running breadcrumb owned by another live server', async () => {
+  // A different server's pid, alive and verifiable: this very process.
+  const { ws, port } = portFor(1);
+  await writeState(ws.stateJson, {
+    ...SAMPLE,
+    pid: process.pid,
+    identity: captureIdentity(process.pid),
+  });
+
+  expect(await port.foreignRun()).toEqual({ pid: process.pid, sessionId: SAMPLE.sessionId });
+});
+
+test('foreignRun ignores our own breadcrumb (the in-process gate owns that case)', async () => {
+  const { ws, port } = portFor(process.pid);
+  await writeState(ws.stateJson, {
+    ...SAMPLE,
+    pid: process.pid,
+    identity: captureIdentity(process.pid),
+  });
+
+  expect(await port.foreignRun()).toBeNull();
+});
+
+test('foreignRun ignores a dead server: a crashed run never wedges the project', async () => {
+  const { ws, port } = portFor(1);
+  // 999_999_999 is effectively never a live process — the stale `running` file
+  // a SIGKILLed server leaves behind.
+  await writeState(ws.stateJson, { ...SAMPLE, pid: 999_999_999 });
+
+  expect(await port.foreignRun()).toBeNull();
+});
+
+test('foreignRun ignores a recycled PID (live, but not our server)', async () => {
+  const { ws, port } = portFor(1);
+  const ticks = captureIdentity(process.pid).startTicks;
+  if (ticks === null) return; // non-Linux: no fingerprint to mismatch
+  await writeState(ws.stateJson, {
+    ...SAMPLE,
+    pid: process.pid,
+    identity: { startTicks: ticks + 1 },
+  });
+
+  expect(await port.foreignRun()).toBeNull();
+});
+
+test('foreignRun ignores terminal breadcrumbs and a missing state file', async () => {
+  const { ws, port } = portFor(1);
+  expect(await port.foreignRun()).toBeNull(); // nothing recorded yet
+
+  const live = { ...SAMPLE, pid: process.pid, identity: captureIdentity(process.pid) };
+  await writeState(ws.stateJson, { ...live, status: 'ended' });
+  expect(await port.foreignRun()).toBeNull();
+  await writeState(ws.stateJson, { ...live, status: 'stopped' });
+  expect(await port.foreignRun()).toBeNull();
 });
 
 test('the written file is valid pretty JSON ending in a newline', async () => {

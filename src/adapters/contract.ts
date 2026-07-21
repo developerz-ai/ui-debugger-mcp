@@ -164,8 +164,14 @@ export interface NetworkEntry {
  * the adapter controls only the first tab — multi-tab scenarios are not supported.
  */
 export interface Adapter {
-  /** Go to the app: navigate to a URL (web) · launch/focus the window (desktop) · start the activity (android). */
-  open(target: string): Promise<void>;
+  /**
+   * Go to the app: navigate to a URL (web) · launch/focus the window (desktop) · start the activity (android).
+   *
+   * `timeoutMs` is the caller's REMAINING wall-clock budget for the run: the adapter
+   * shortens its own wait to fit inside it and never extends past its own default
+   * (see `capWait`). Omit it for the adapter default.
+   */
+  open(target: string, timeoutMs?: number): Promise<void>;
 
   /** Resolve the first node matching {@link Query}; `null` if none match. */
   find(opts: Query): Promise<Node | null>;

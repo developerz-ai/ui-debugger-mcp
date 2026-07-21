@@ -21,6 +21,8 @@ import { DesktopAdapter } from './desktop/desktop-adapter.js';
  * @param config — the resolved `.ui-debugger-mcp.json` config
  * @param profileDir — absolute path to persistent profile dir (for managed browser adapter)
  * @param onLog — optional sink for streaming console/network logs to findings store
+ * @param timeoutMs — the run's remaining wall-clock budget for getting the target up;
+ *   only the browser launches/connects here, so only it shortens its wait by it
  * @returns the wired Adapter instance
  * @throws TargetNotFoundError if targetName doesn't exist in config.targets
  * @throws AdapterError if the adapter type is not yet implemented
@@ -30,6 +32,7 @@ export async function createAdapter(
   config: Config,
   profileDir: string,
   onLog?: BrowserAdapterInit['onLog'],
+  timeoutMs?: number,
 ): Promise<Adapter> {
   const target = config.targets[targetName];
 
@@ -39,15 +42,17 @@ export async function createAdapter(
 
   switch (target.adapter) {
     case 'browser':
-      return BrowserAdapter.create({ config: target, profileDir, onLog });
+      return BrowserAdapter.create({ config: target, profileDir, onLog, timeoutMs });
 
     case 'desktop':
       // Desktop is managed-only (no attach handle), so `profileDir`/`onLog` don't apply.
+      // Nothing launches here either — `open` spawns the app, and caps itself there.
       return DesktopAdapter.create({ config: target });
 
     case 'android':
       // Managed (boot `emulator @avd`) unless `adbSerial` attaches — `create` reads that
       // off the config. No page profile or CDP log sink applies, so neither is threaded.
+      // The emulator boots in `open`, which is where the run budget caps it.
       return AndroidAdapter.create({ config: target });
 
     default: {

@@ -19,6 +19,7 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import type { DesktopTarget } from '../../config/schema.js';
 import { AdapterError, UiDebuggerError } from '../../errors.js';
+import { capWait } from '../budget.js';
 import type {
   Adapter,
   Bounds,
@@ -129,7 +130,7 @@ export class DesktopAdapter implements Adapter {
    * spawning, and a `launch` command that dies (bad binary → 127, crash → signal)
    * rejects with that exit code as soon as it happens — not after the window timeout.
    */
-  async open(target: string): Promise<void> {
+  async open(target: string, timeoutMs?: number): Promise<void> {
     await this.#run('open', async () => {
       const match = this.#windowMatch(target);
       if (!match) {
@@ -139,9 +140,10 @@ export class DesktopAdapter implements Adapter {
         );
       }
       const { died } = this.#launch();
-      const activated = this.#input.activateWindow(match, WINDOW_WAIT_MS);
+      // The window wait fits inside the run's remaining cap when that is the shorter one.
+      const activated = this.#input.activateWindow(match, capWait(WINDOW_WAIT_MS, timeoutMs));
       // Pre-handle the loser: when the child dies first, the window wait keeps polling
-      // (bounded by WINDOW_WAIT_MS) and its later rejection must not go unhandled.
+      // (bounded by the cap above) and its later rejection must not go unhandled.
       activated.catch(() => {});
       await Promise.race([activated, died]);
     });

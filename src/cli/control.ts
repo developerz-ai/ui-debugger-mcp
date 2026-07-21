@@ -18,42 +18,9 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { loadWorkspaceDir } from '../config/load.js';
 import { FindingsSchema } from '../findings/schema.js';
-import type { IdentityCheck, ProcessIdentity } from '../session/process-identity.js';
-import { verifyIdentity } from '../session/process-identity.js';
+import { ownerAlive } from '../session/process-identity.js';
 import { markStatus, readState } from '../session/state-file.js';
 import { resolveProject, workspacePaths } from '../session/workspace.js';
-
-/** Whether `pid` is a live process this user can see (`kill(pid, 0)`). */
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM = the process exists but is owned by another user — still "alive".
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-/**
- * Is the recorded server *genuinely* still alive — not an unrelated process that
- * inherited a recycled PID? A verified `match` is alive; a `stale` PID (recycled)
- * or a `gone` PID is dead. When the identity can't be verified (non-Linux), fall
- * back to a bare liveness probe — best effort, same as before this guard existed.
- */
-function serverAlive(pid: number, check: IdentityCheck): boolean {
-  if (check === 'match') return true;
-  if (check === 'stale' || check === 'gone') return false;
-  return isAlive(pid);
-}
-
-/** Resolve the recorded run's liveness, guarding against PID reuse. */
-function checkServer(
-  pid: number,
-  identity: ProcessIdentity,
-): { check: IdentityCheck; alive: boolean } {
-  const check = verifyIdentity(pid, identity);
-  return { check, alive: serverAlive(pid, check) };
-}
 
 /** Read + validate a session's `findings.json`; `null` when absent/malformed. */
 async function readFindings(sessionDir: string) {
@@ -83,7 +50,7 @@ export async function runStatus(cwd = process.cwd()): Promise<void> {
     return;
   }
 
-  const { check, alive } = checkServer(state.pid, state.identity);
+  const { check, alive } = ownerAlive(state.pid, state.identity);
   const findings = await readFindings(state.sessionDir);
   // Server up + nothing settled yet → trust findings' live status; else the recorded terminal.
   const verdict =
@@ -125,7 +92,7 @@ export async function runStop(cwd = process.cwd()): Promise<void> {
     return;
   }
 
-  const { check, alive } = checkServer(state.pid, state.identity);
+  const { check, alive } = ownerAlive(state.pid, state.identity);
 
   // The recorded PID is alive but now owns an *unrelated* process (it was recycled
   // after our server died). Signaling it would kill an innocent process — don't.

@@ -28,7 +28,9 @@ export function getFindingsTool(service: DebugApi): McpTool {
           description:
             'Poll the run: status (running|passed|failed) plus structured findings — the step trail, ' +
             'functional bugs, visual/UX feedback, summary, and evidence paths (screenshots, logs). ' +
-            'Pass wait (ms) to long-poll until the run settles; pass fields to return only some keys.',
+            'Pass wait (ms) to long-poll until the run settles; pass fields to return only some keys. ' +
+            'A run that auto-ended (wall-clock timeout or client disconnect) stays readable under its ' +
+            'id until end_session or the next start_debug.',
           inputSchema: {
             session_id: z.string().min(1).describe('The id returned by start_debug.'),
             wait: z
@@ -42,6 +44,7 @@ export function getFindingsTool(service: DebugApi): McpTool {
               ),
             fields: z
               .array(FindingsField)
+              .min(1)
               .optional()
               .describe(
                 'Project a subset of findings keys (e.g. ["status","bugs"]). Omit for the whole object.',

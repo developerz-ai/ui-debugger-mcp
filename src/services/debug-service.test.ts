@@ -1,3 +1,10 @@
+/**
+ * The conversational surface: start / send / get_findings / describe / end.
+ *
+ * The wall-clock cap, auto-end retention, the `state.json` breadcrumb and the
+ * cross-process gate live in `debug-service.lifecycle.test.ts`.
+ */
+
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -13,9 +20,8 @@ import {
 import { FindingsStore } from '../session/findings-store.js';
 import { SessionManager } from '../session/manager.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
-import type { StatePort } from '../session/state-file.js';
 import { _resetCounter, sessionPaths, workspacePaths } from '../session/workspace.js';
-import { DebugService } from './debug-service.js';
+import { DEFAULT_SESSION_TIMEOUT_MS, DebugService } from './debug-service.js';
 import type { BuiltSession, SessionBuilder } from './session-builder.js';
 
 const CWD = '/project/app';
@@ -50,7 +56,14 @@ const idleRun: LoopRunner = ({ signal }) =>
   });
 
 interface BuildLog {
-  params: Array<{ id: string; target: string; goal: string; criteria?: string }>;
+  params: Array<{
+    id: string;
+    target: string;
+    goal: string;
+    criteria?: string;
+    url?: string;
+    timeoutMs?: number;
+  }>;
   adapters: FakeAdapter[];
   openCalls: number;
 }
@@ -70,14 +83,14 @@ afterEach(async () => {
 });
 
 /** A fake session builder backed by a real `Session` (FakeAdapter + temp store). */
-function fakeBuilder(opts: { openFails?: boolean; closeFails?: boolean; run?: LoopRunner } = {}): {
+function fakeBuilder(opts: { openFails?: boolean; run?: LoopRunner } = {}): {
   build: SessionBuilder;
   log: BuildLog;
 } {
   const log: BuildLog = { params: [], adapters: [], openCalls: 0 };
   const build: SessionBuilder = async (params) => {
     log.params.push({ ...params });
-    const adapter = new FakeAdapter(opts.closeFails ?? false);
+    const adapter = new FakeAdapter();
     log.adapters.push(adapter);
     const store = new FindingsStore(sessionPaths(workspacePaths(CWD, tmpDir), params.id));
     const session = new Session<SessionAdapter>({
@@ -104,6 +117,9 @@ function makeService(build: SessionBuilder): DebugService {
   return new DebugService({ manager, config: CONFIG, cwd: CWD, build, now: () => NOW });
 }
 
+/** Resolve after `ms` — let an armed wall-clock timer fire. */
+const tick = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 // --- start ------------------------------------------------------------------
 
 test('start assembles, locks the cwd, opens, and runs in the background', async () => {
@@ -118,6 +134,8 @@ test('start assembles, locks the cwd, opens, and runs in the background', async 
     target: 'web',
     goal: 'log in',
     criteria: 'cart has 1',
+    url: undefined,
+    timeoutMs: DEFAULT_SESSION_TIMEOUT_MS,
   });
   expect(log.openCalls).toBe(1);
   expect(manager.has(CWD)).toBe(true);
@@ -163,65 +181,6 @@ test('start tears the session down and frees the lock when open fails', async ()
   await expect(svc.start({ target: 'web', goal: 'x' })).rejects.toThrow(AdapterError);
   expect(manager.has(CWD)).toBe(false);
   expect(log.adapters[0]?.closeCalls).toBe(1);
-});
-
-// --- timeout ----------------------------------------------------------------
-
-/** Resolve after `ms` — let an armed wall-clock timer fire. */
-const tick = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
-test('a run auto-ends when its wall-clock timeout fires (frees the lock + closes the adapter)', async () => {
-  const { build, log } = fakeBuilder();
-  const svc = new DebugService({
-    manager,
-    config: CONFIG,
-    cwd: CWD,
-    build,
-    now: () => NOW,
-    defaultTimeoutMs: 20,
-  });
-
-  await svc.start({ target: 'web', goal: 'x' });
-  expect(manager.has(CWD)).toBe(true);
-
-  await tick(60);
-  expect(manager.has(CWD)).toBe(false);
-  expect(log.adapters[0]?.closeCalls).toBe(1);
-});
-
-test('a per-run timeout overrides the default', async () => {
-  const { build } = fakeBuilder();
-  const svc = new DebugService({
-    manager,
-    config: CONFIG,
-    cwd: CWD,
-    build,
-    now: () => NOW,
-    defaultTimeoutMs: 10_000,
-  });
-
-  await svc.start({ target: 'web', goal: 'x', timeoutMs: 20 });
-  await tick(60);
-  expect(manager.has(CWD)).toBe(false);
-});
-
-test('ending a run cancels its timeout (no auto-end fires afterward)', async () => {
-  const { build, log } = fakeBuilder();
-  const svc = new DebugService({
-    manager,
-    config: CONFIG,
-    cwd: CWD,
-    build,
-    now: () => NOW,
-    defaultTimeoutMs: 20,
-  });
-
-  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
-  await svc.end({ session_id });
-  expect(log.adapters[0]?.closeCalls).toBe(1); // closed exactly once, by end()
-
-  await tick(60); // the (now-cancelled) timer would have fired here
-  expect(log.adapters[0]?.closeCalls).toBe(1); // still once — timeout did not re-close
 });
 
 // --- send -------------------------------------------------------------------
@@ -332,37 +291,4 @@ test('end aborts the run, closes the adapter, and frees the lock', async () => {
   expect(manager.has(CWD)).toBe(false);
   expect(log.adapters[0]?.closeCalls).toBe(1);
   await expect(svc.end({ session_id })).rejects.toThrow(SessionNotFoundError);
-});
-
-/** A `StatePort` spy counting `clear()` calls. */
-function spyState(): { state: StatePort; clears: () => number } {
-  let clears = 0;
-  const state: StatePort = {
-    async record() {},
-    async clear() {
-      clears += 1;
-    },
-  };
-  return { state, clears: () => clears };
-}
-
-test('end clears state.json even when the session close throws (error still propagates)', async () => {
-  const { build } = fakeBuilder({ closeFails: true });
-  const { state, clears } = spyState();
-  const svc = new DebugService({ manager, config: CONFIG, cwd: CWD, build, state, now: () => NOW });
-  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
-
-  await expect(svc.end({ session_id })).rejects.toThrow(AdapterError);
-  expect(clears()).toBe(1); // no stale `running` breadcrumb for the CLI to SIGTERM
-  expect(manager.has(CWD)).toBe(false);
-});
-
-test('endActive clears state.json even when the session close throws', async () => {
-  const { build } = fakeBuilder({ closeFails: true });
-  const { state, clears } = spyState();
-  const svc = new DebugService({ manager, config: CONFIG, cwd: CWD, build, state, now: () => NOW });
-  await svc.start({ target: 'web', goal: 'x' });
-
-  await expect(svc.endActive()).rejects.toThrow(AdapterError);
-  expect(clears()).toBe(1);
 });

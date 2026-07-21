@@ -16,7 +16,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { z } from 'zod';
-import { captureIdentity, ProcessIdentitySchema } from './process-identity.js';
+import { captureIdentity, ownerAlive, ProcessIdentitySchema } from './process-identity.js';
 import { sessionPaths, type WorkspacePaths } from './workspace.js';
 
 /** `state.json` shape — the breadcrumb a separate CLI process reads. */
@@ -67,18 +67,34 @@ export interface RunState {
   goal: string;
 }
 
+/** A run another live server owns for this workspace — the cross-process busy signal. */
+export interface ForeignRun {
+  /** The other server's process id (it is provably alive). */
+  pid: number;
+  /** The run it has active. */
+  sessionId: string;
+}
+
 /** The seam {@link DebugService} writes run lifecycle through (no-op in tests). */
 export interface StatePort {
   /** Record a freshly-opened run as `running`. */
   record(run: RunState): Promise<void>;
   /** Mark the active run `ended` (clean end). */
   clear(): Promise<void>;
+  /**
+   * The run a *different, live* server holds on this workspace, if any — the
+   * cross-process half of the one-run gate. `null` when nobody else owns it.
+   */
+  foreignRun(): Promise<ForeignRun | null>;
 }
 
-/** Default port: writes nothing (keeps the service fs-free under unit test). */
+/** Default port: writes nothing, sees nobody (keeps the service fs-free under unit test). */
 export const noopStatePort: StatePort = {
   async record() {},
   async clear() {},
+  async foreignRun() {
+    return null;
+  },
 };
 
 /** fs-backed {@link StatePort} — drops the breadcrumb to `<workspace>/state.json`. */
@@ -110,6 +126,25 @@ export class FileStatePort implements StatePort {
 
   async clear(): Promise<void> {
     await markStatus(this.#workspace.stateJson, 'ended', this.#now()).catch(() => undefined);
+  }
+
+  /**
+   * Who else is debugging this workspace? Only a breadcrumb that is `running`,
+   * written by a pid that is *not* ours, and whose owner is provably still alive
+   * ({@link ownerAlive} — a recycled or dead pid does not count) reports a
+   * foreign run. Everything else is `null`: nobody to collide with.
+   *
+   * Advisory, not a lock: the breadcrumb is written once a run is open, so two
+   * servers starting within the same launch window can still both get through.
+   * It closes the common case (a second MCP client on the same project) without
+   * a lock file, and Chrome's own profile lock still backstops managed web runs.
+   */
+  async foreignRun(): Promise<ForeignRun | null> {
+    const state = await readState(this.#workspace.stateJson);
+    if (state?.status !== 'running') return null; // absent, malformed, or already terminal
+    if (state.pid === this.#pid) return null; // our own breadcrumb — the in-process gate rules
+    if (!ownerAlive(state.pid, state.identity).alive) return null; // crashed server, stale file
+    return { pid: state.pid, sessionId: state.sessionId };
   }
 }
 

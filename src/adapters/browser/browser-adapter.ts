@@ -22,6 +22,7 @@ import type { Browser, BrowserContext, Page } from 'playwright-core';
 import { chromium } from 'playwright-core';
 import type { WebTarget } from '../../config/schema.js';
 import { AdapterError, UiDebuggerError } from '../../errors.js';
+import { capWait } from '../budget.js';
 import type {
   Adapter,
   Bounds,
@@ -48,6 +49,15 @@ export { applyNodeFilters, NODE_FILTER_KEYS } from './filters.js';
 
 /** System Chrome channel used as the last resort when no binary can be resolved. */
 const DEFAULT_CHANNEL = 'chrome';
+
+/**
+ * Playwright's own defaults for launching/connecting and for a navigation, restated
+ * so the run budget can only SHORTEN them (`capWait`). Left implicit, these two sit
+ * OUTSIDE the caller's cap and a `start_debug` with `timeout: 10` could still burn a
+ * minute before the driver takes its first step.
+ */
+const LAUNCH_TIMEOUT_MS = 30_000;
+const NAV_TIMEOUT_MS = 30_000;
 
 /** Detect the Playwright-managed Chromium binary; null if it isn't installed. */
 function detectManagedChromium(): string | null {
@@ -202,6 +212,11 @@ export interface BrowserAdapterInit {
   onLog?: CaptureSink;
   /** Override the Playwright launcher/connector (test seam) — defaults to the real `chromium`. */
   chromium?: ChromiumLauncher;
+  /**
+   * The run's remaining wall-clock budget (ms) for getting Chrome up. Shortens the
+   * launch/connect wait so it fits inside the caller's `timeout`; omit for the default.
+   */
+  timeoutMs?: number;
 }
 
 /**
@@ -231,10 +246,11 @@ export class BrowserAdapter implements Adapter {
     const launcher = init.chromium ?? chromium;
     // Nothing raw escapes: launch, connect and post-connect wiring all leave here as
     // AdapterError (header contract). Cleanup of a half-built adapter happens below.
+    const wait = capWait(LAUNCH_TIMEOUT_MS, init.timeoutMs);
     try {
       return cdpUrl
-        ? await BrowserAdapter.#attach(init.config, launcher, init.onLog)
-        : await BrowserAdapter.#launch(init.config, init.profileDir, launcher, init.onLog);
+        ? await BrowserAdapter.#attach(init.config, launcher, wait, init.onLog)
+        : await BrowserAdapter.#launch(init.config, init.profileDir, launcher, wait, init.onLog);
     } catch (error) {
       throw createFailure(
         error,
@@ -247,6 +263,7 @@ export class BrowserAdapter implements Adapter {
     config: WebTarget,
     profileDir: string,
     launcher: ChromiumLauncher,
+    timeout: number,
     onLog?: CaptureSink,
   ): Promise<BrowserAdapter> {
     // Still CDP: Playwright drives Chromium exclusively over the DevTools Protocol
@@ -255,6 +272,7 @@ export class BrowserAdapter implements Adapter {
     // managed and attach speak the same protocol, only the transport differs.
     const context = await launcher.launchPersistentContext(profileDir, {
       headless: config.headless,
+      timeout,
       ...resolveLaunchBinary(config),
     });
     // Chrome is LIVE from here on and holds the profile lock — a throw past this point
@@ -269,12 +287,13 @@ export class BrowserAdapter implements Adapter {
   static async #attach(
     config: WebTarget,
     launcher: ChromiumLauncher,
+    timeout: number,
     onLog?: CaptureSink,
   ): Promise<BrowserAdapter> {
     if (!config.cdpUrl) {
       throw new AdapterError('attach mode requires `cdpUrl`');
     }
-    const browser = await launcher.connectOverCDP(config.cdpUrl);
+    const browser = await launcher.connectOverCDP(config.cdpUrl, { timeout });
     // Cleanup here drops the CONNECTION only — same disconnect semantics `close()`
     // relies on, so a failed attach never stops a browser we did not start.
     return closeOnFailure(browser, async () => {
@@ -292,12 +311,13 @@ export class BrowserAdapter implements Adapter {
     return capture;
   }
 
-  async open(target: string): Promise<void> {
+  async open(target: string, timeoutMs?: number): Promise<void> {
     // Resolution lives inside `#run` so URL failures surface as AdapterError too.
     await this.#run('open', async () => {
       const resolved = resolveTargetUrl(target, this.#config.url);
       const url = appendDebugLogin(resolved, this.#config.debugLogin);
-      await this.#page.goto(url);
+      // The first navigation spends the run's budget, not a fresh 30s of its own.
+      await this.#page.goto(url, { timeout: capWait(NAV_TIMEOUT_MS, timeoutMs) });
     });
   }
 
