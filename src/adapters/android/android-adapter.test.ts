@@ -33,6 +33,7 @@ import {
   parseScreenSize,
   scrollSwipe,
   splitTextForInput,
+  splitTextLines,
   startArgs,
   swipeArgs,
   tapArgs,
@@ -643,6 +644,32 @@ describe('startArgs', () => {
   test('whitespace-only → throws AdapterError', () => {
     expect(() => startArgs('   ')).toThrow(AdapterError);
   });
+  test('shell metacharacters in the target → throws AdapterError (injection)', () => {
+    expect(() => startArgs('com.app/.Main; rm -rf /sdcard')).toThrow(AdapterError);
+    expect(() => startArgs('com.app/.Main && reboot')).toThrow(AdapterError);
+    expect(() => startArgs('com.app$(id)')).toThrow(AdapterError);
+    expect(() => startArgs('com.app/.Main`id`')).toThrow(AdapterError);
+    expect(() => startArgs('com.app | tee /sdcard/x')).toThrow(AdapterError);
+    expect(() => startArgs('com.app\nreboot')).toThrow(AdapterError);
+  });
+  test('inner class components (pkg/.Outer$Inner) still launch', () => {
+    expect(startArgs('com.example/.Main$Inner')).toEqual([
+      'am',
+      'start',
+      '-W',
+      '-n',
+      'com.example/.Main$Inner',
+    ]);
+  });
+  test('fully qualified component form launches', () => {
+    expect(startArgs('com.example/com.example.ui.MainActivity')).toEqual([
+      'am',
+      'start',
+      '-W',
+      '-n',
+      'com.example/com.example.ui.MainActivity',
+    ]);
+  });
 });
 
 describe('tapArgs', () => {
@@ -666,8 +693,34 @@ describe('escapeInputText', () => {
   test('escapes braces (mksh brace expansion)', () => {
     expect(escapeInputText('{a,b}')).toBe('\\{a,b\\}');
   });
+  test('escapes glob/history/legacy chars', () => {
+    expect(escapeInputText('a?b')).toBe('a\\?b');
+    expect(escapeInputText('[a]')).toBe('\\[a\\]');
+    expect(escapeInputText('hi!')).toBe('hi\\!');
+    expect(escapeInputText('a^b')).toBe('a\\^b');
+    expect(escapeInputText('a=b')).toBe('a\\=b');
+  });
   test('plain alphanumerics pass through', () => {
     expect(escapeInputText('hello123')).toBe('hello123');
+  });
+  test('control chars → throws AdapterError (device-shell injection)', () => {
+    expect(() => escapeInputText('hi\nrm -rf /sdcard')).toThrow(AdapterError);
+    expect(() => escapeInputText('hi\rreboot')).toThrow(AdapterError);
+    expect(() => escapeInputText('hi\tthere')).toThrow(AdapterError);
+    expect(() => escapeInputText('hi\x00there')).toThrow(AdapterError);
+    expect(() => escapeInputText('hi\x1bthere')).toThrow(AdapterError);
+  });
+});
+
+describe('splitTextLines', () => {
+  test('splits on \\n, \\r\\n and lone \\r', () => {
+    expect(splitTextLines('a\nb\r\nc\rd')).toEqual(['a', 'b', 'c', 'd']);
+  });
+  test('text without line breaks stays one line', () => {
+    expect(splitTextLines('hello world')).toEqual(['hello world']);
+  });
+  test('trailing newline yields a trailing empty line', () => {
+    expect(splitTextLines('hi\n')).toEqual(['hi', '']);
   });
 });
 
@@ -1003,6 +1056,27 @@ describe('AndroidAdapter.type', () => {
     await adapter.type('Save', '50%sale');
     const textCalls = adb.calls.filter((c) => c.args[1] === 'text');
     expect(textCalls.map((c) => c.args[2])).toEqual(['50%', 'sale']);
+  });
+
+  test('newline → ENTER keyevent between lines, never in the shell argv', async () => {
+    const node = makeNode({ bounds: { x: 0, y: 0, width: 100, height: 50 } });
+    const { adapter, adb } = makeAdapter({ nodes: [node] });
+    await adapter.type('Save', 'hi\nrm -rf /sdcard');
+    const ops = adb.calls.filter((c) => c.args[0] === 'input').map((c) => c.args.slice(1));
+    expect(ops).toEqual([
+      ['tap', '50', '25'],
+      ['text', 'hi'],
+      ['keyevent', 'KEYCODE_ENTER'],
+      ['text', 'rm%s-rf%s/sdcard'],
+    ]);
+    expect(adb.calls.every((c) => c.args.every((a) => !a.includes('\n')))).toBe(true);
+  });
+
+  test('other control chars → AdapterError, nothing typed', async () => {
+    const node = makeNode({ bounds: { x: 0, y: 0, width: 100, height: 50 } });
+    const { adapter, adb } = makeAdapter({ nodes: [node] });
+    await expect(adapter.type('Save', 'hi\tthere')).rejects.toThrow(AdapterError);
+    expect(adb.calls.filter((c) => c.args[1] === 'text')).toHaveLength(0);
   });
 });
 

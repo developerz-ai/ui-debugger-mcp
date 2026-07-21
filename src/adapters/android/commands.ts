@@ -32,14 +32,27 @@ export function centerOf(bounds: Bounds): { x: number; y: number } {
 // --- launch -----------------------------------------------------------------
 
 /**
+ * A launch target: a package (`com.example`) or a component (`com.example/.MainActivity`).
+ * Agent-supplied, and adb joins argv into one **device-shell** string — so anything
+ * outside package/class syntax (`;`, spaces, `$(…)`) would run as a shell command.
+ */
+const LAUNCH_TARGET = /^[\w.]+(\/[\w.$]+)?$/;
+
+/**
  * Build the `open` launch command. A component (`pkg/.Activity`) starts that activity
  * directly (`am start -W`); a bare package launches its default activity via `monkey`.
+ * Rejects anything that isn't {@link LAUNCH_TARGET} — never escapes-and-hopes.
  */
 export function startArgs(target: string): string[] {
   const t = target.trim();
   if (t === '') {
     throw new AdapterError(
       'android open requires an activity component (pkg/.Activity) or a package',
+    );
+  }
+  if (!LAUNCH_TARGET.test(t)) {
+    throw new AdapterError(
+      `android open target ${JSON.stringify(target)} is not a package or component — expected pkg.name or pkg.name/.Activity`,
     );
   }
   if (t.includes('/')) return ['am', 'start', '-W', '-n', t];
@@ -54,19 +67,46 @@ export function tapArgs(x: number, y: number): string[] {
 }
 
 /**
+ * Chars mksh treats specially — backslash-escaped so they reach the app verbatim.
+ * `#` starts a comment and `{`/`}` brace-expand, so they need it too: an unescaped
+ * leading `#` silently types nothing. `?[]` glob, `!` is history, `^`/`=` are legacy
+ * pipe/assignment forms — escaping them costs nothing and closes the guesswork.
+ */
+const SHELL_SPECIAL = '()<>|;&*\\~"\'`$#{}?[]!^=';
+
+/**
  * Escape text for `input text` on the device shell: spaces → `%s` (the tool's own
- * space token), and the shell-special chars get backslash-escaped so they reach the
- * app verbatim. `#` starts a comment and `{`/`}` brace-expand in mksh, so they need
- * the same escaping — an unescaped leading `#` silently types nothing.
+ * space token), {@link SHELL_SPECIAL} chars backslash-escaped.
+ *
+ * Control chars (< 0x20) are **rejected**, not escaped: adb joins argv into one
+ * device-shell string, where a raw `\n` ends the `input text` command and runs the
+ * rest as a shell command. They can't be typed anyway — the adapter turns line
+ * breaks into `KEYCODE_ENTER` presses; other control chars belong to `pressKey`.
  */
 export function escapeInputText(text: string): string {
   let out = '';
   for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code < 0x20) {
+      throw new AdapterError(
+        `android type: control character ${JSON.stringify(ch)} cannot be typed — use pressKey (e.g. 'enter', 'tab')`,
+      );
+    }
     if (ch === ' ') out += '%s';
-    else if ('()<>|;&*\\~"\'`$#{}'.includes(ch)) out += `\\${ch}`;
+    else if (SHELL_SPECIAL.includes(ch)) out += `\\${ch}`;
     else out += ch;
   }
   return out;
+}
+
+/**
+ * Split `type` text on its line breaks (`\n`, `\r\n`, `\r`). The adapter types each
+ * line and presses `KEYCODE_ENTER` between them, so a newline behaves like a real
+ * keyboard instead of reaching the device shell. Line breaks are the one control
+ * char with an obvious keyboard meaning; the rest throw in {@link escapeInputText}.
+ */
+export function splitTextLines(text: string): string[] {
+  return text.split(/\r\n|[\n\r]/);
 }
 
 /**

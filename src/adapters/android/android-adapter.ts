@@ -40,6 +40,7 @@ import {
   parseScreenSize,
   scrollSwipe,
   splitTextForInput,
+  splitTextLines,
   startArgs,
   swipeArgs,
   tapArgs,
@@ -231,12 +232,16 @@ export class AndroidAdapter implements Adapter {
 
   async type(target: NodeRef, text: string): Promise<void> {
     // Contract: focus the target first, then type. Tap its center to focus.
-    // Text goes out in %s-safe chunks — one `input text` per chunk (they append).
+    // Line breaks become ENTER presses (a raw \n would reach the device shell);
+    // each line goes out in %s-safe chunks — one `input text` per chunk (they append).
     await this.#run('type', async () => {
       const { x, y } = centerOf((await this.#resolve(target)).bounds);
       await this.#adb.shell(tapArgs(x, y));
-      for (const chunk of splitTextForInput(text)) {
-        await this.#adb.shell(textArgs(chunk));
+      for (const [index, line] of splitTextLines(text).entries()) {
+        if (index > 0) await this.#adb.shell(keyArgs('enter'));
+        for (const chunk of splitTextForInput(line)) {
+          await this.#adb.shell(textArgs(chunk));
+        }
       }
     });
   }
