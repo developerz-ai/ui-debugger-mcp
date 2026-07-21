@@ -1,29 +1,61 @@
 /**
  * Unit tests for the ADB transport (`adb.ts`) — the one module that actually spawns.
  *
- * No emulator and no `adb` binary needed: {@link AdbCli} takes a `bin` seam, so the
- * tests point it at `sh`/`sleep` and assert on real subprocess behaviour — argv shape
- * (flags before the subcommand), binary-safe `exec-out`, and the loud {@link AdbError}
- * for every failure mode (missing binary, non-zero exit, timeout expiry).
+ * Two seams, two kinds of test. Argv shape is a pure property, so it is asserted through
+ * the {@link AdbExec} seam — recording the argv the transport *would* have spawned, never
+ * at the mercy of a child's stdout on a loaded CI box. Everything that only a real
+ * subprocess can prove — binary-safe `exec-out`, and the loud {@link AdbError} for a
+ * missing binary, a non-zero exit and a timeout expiry — still spawns, via the `bin` seam
+ * pointed at `sh`/`sleep` (no emulator and no `adb` binary needed).
  */
 
 import { expect, test } from 'bun:test';
 import { AdbError } from '../../errors.js';
-import { AdbCli, pendingStateOrThrow } from './adb.js';
+import { AdbCli, type AdbExec, pendingStateOrThrow } from './adb.js';
+
+/** A recording {@link AdbExec}: captures every argv, answers with the given stdout bytes. */
+function recorder(stdout: Uint8Array = new Uint8Array()) {
+  const calls: { bin: string; args: string[]; timeoutMs: number }[] = [];
+  const exec: AdbExec = async (bin, args, timeoutMs) => {
+    calls.push({ bin, args, timeoutMs });
+    return stdout;
+  };
+  return { calls, exec };
+}
 
 // ---------------------------------------------------------------------------
 // AdbCli — argv shape
 // ---------------------------------------------------------------------------
 
 test('shell puts the device flags before the subcommand', async () => {
-  // `sh -c '<script>' a b c` → $0=a, $@=b c, so the echo prints the argv tail verbatim.
-  const cli = new AdbCli(['-c', 'echo "$0 $*"'], { bin: 'sh' });
-  expect((await cli.shell(['input', 'tap', '1', '2'])).trim()).toBe('shell input tap 1 2');
+  const { calls, exec } = recorder();
+  await new AdbCli(['-s', 'emulator-5554'], { exec }).shell(['input', 'tap', '1', '2']);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.bin).toBe('adb');
+  expect(calls[0]?.args).toEqual(['-s', 'emulator-5554', 'shell', 'input', 'tap', '1', '2']);
+});
+
+test('execOut puts the device flags before exec-out', async () => {
+  const { calls, exec } = recorder();
+  await new AdbCli(['-s', 'emulator-5554'], { exec }).execOut(['screencap', '-p']);
+  expect(calls[0]?.args).toEqual(['-s', 'emulator-5554', 'exec-out', 'screencap', '-p']);
 });
 
 test('adb passes top-level args through unchanged', async () => {
-  const cli = new AdbCli(['-c', 'echo "$0 $*"'], { bin: 'sh' });
-  expect((await cli.adb(['emu', 'kill'])).trim()).toBe('emu kill');
+  const { calls, exec } = recorder();
+  await new AdbCli(['-s', 'emulator-5554'], { exec }).adb(['emu', 'kill']);
+  expect(calls[0]?.args).toEqual(['-s', 'emulator-5554', 'emu', 'kill']);
+});
+
+test('every call carries the configured binary and timeout', async () => {
+  const { calls, exec } = recorder();
+  await new AdbCli([], { exec, bin: '/opt/adb', timeoutMs: 1234 }).shell(['getprop']);
+  expect(calls[0]).toMatchObject({ bin: '/opt/adb', timeoutMs: 1234 });
+});
+
+test('text channels decode the bytes as UTF-8', async () => {
+  const { exec } = recorder(new TextEncoder().encode('café ☕\n'));
+  expect(await new AdbCli([], { exec }).shell(['getprop'])).toBe('café ☕\n');
 });
 
 test('execOut returns raw bytes (binary-safe, not UTF-8 mangled)', async () => {

@@ -7,6 +7,9 @@
  * live in the pure builders beside it (`commands.ts`, `uiautomator.ts`) so they stay
  * unit-testable without spawning. {@link AdbCli} is injected as a seam in tests.
  *
+ * One subprocess call underneath ({@link AdbExec}, injectable) resolving raw bytes; the
+ * text channels decode UTF-8 on top, so `exec-out` stays binary-safe by construction.
+ *
  * Three channels, mirroring `adb`'s own surface:
  *   - {@link Adb.shell}   — `adb shell <cmd>` → text (am/input/uiautomator/getprop/logcat).
  *   - {@link Adb.execOut} — `adb exec-out <cmd>` → **raw bytes** (binary-safe `screencap -p`).
@@ -48,6 +51,9 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  */
 const KILL_SIGNAL = 'SIGKILL';
 
+/** Decoder for the text channels — one instance, `adb` speaks UTF-8. */
+const DECODER = new TextDecoder();
+
 /**
  * `adb` failure phrases that mean "the device is not up **yet**" — the only rejection a
  * boot poll may retry. Deliberately narrow: a missing binary, an ambiguous target
@@ -66,12 +72,33 @@ export function pendingStateOrThrow(error: unknown): string {
   throw error;
 }
 
+/**
+ * The one subprocess call the transport makes — resolves **raw stdout bytes** (text
+ * channels decode on top, so `exec-out` stays binary-safe). Injectable so argv-shape
+ * tests assert the argv they would have spawned instead of spawning: a real child's
+ * stdout is at the mercy of the machine, and argv ordering is a pure property.
+ */
+export type AdbExec = (bin: string, args: string[], timeoutMs: number) => Promise<Uint8Array>;
+
+/** The real {@link AdbExec}: `execFile`, capped, buffer-encoded (never UTF-8 mangled). */
+export const execFileBytes: AdbExec = async (bin, args, timeoutMs) => {
+  const { stdout } = await pExecFile(bin, args, {
+    encoding: 'buffer',
+    maxBuffer: MAX_BUFFER,
+    timeout: timeoutMs,
+    killSignal: KILL_SIGNAL,
+  });
+  return Uint8Array.from(stdout);
+};
+
 /** Construction knobs for {@link AdbCli} — also the seams unit tests drive it through. */
 export interface AdbCliOptions {
   /** Per-call timeout in ms (default {@link DEFAULT_TIMEOUT_MS}). */
   timeoutMs?: number;
   /** Binary to invoke (default `adb`). */
   bin?: string;
+  /** Subprocess runner (default {@link execFileBytes}). */
+  exec?: AdbExec;
 }
 
 /** The ADB transport the adapter depends on — implemented by {@link AdbCli}, faked in tests. */
@@ -92,11 +119,13 @@ export class AdbCli implements Adb {
   readonly #flags: string[];
   readonly #timeoutMs: number;
   readonly #bin: string;
+  readonly #exec: AdbExec;
 
   constructor(flags: string[], options: AdbCliOptions = {}) {
     this.#flags = flags;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#bin = options.bin ?? ADB;
+    this.#exec = options.exec ?? execFileBytes;
   }
 
   shell(command: string[]): Promise<string> {
@@ -107,29 +136,18 @@ export class AdbCli implements Adb {
     return this.#text(args);
   }
 
-  async execOut(command: string[]): Promise<Uint8Array> {
-    const args = ['exec-out', ...command];
-    try {
-      const { stdout } = await pExecFile(this.#bin, [...this.#flags, ...args], {
-        encoding: 'buffer',
-        maxBuffer: MAX_BUFFER,
-        timeout: this.#timeoutMs,
-        killSignal: KILL_SIGNAL,
-      });
-      return Uint8Array.from(stdout);
-    } catch (error) {
-      throw this.#wrap(args, error);
-    }
+  execOut(command: string[]): Promise<Uint8Array> {
+    return this.#bytes(['exec-out', ...command]);
   }
 
+  /** UTF-8 view of the byte read — `adb`'s text channels (`am`, `getprop`, `logcat`) are UTF-8. */
   async #text(args: string[]): Promise<string> {
+    return DECODER.decode(await this.#bytes(args));
+  }
+
+  async #bytes(args: string[]): Promise<Uint8Array> {
     try {
-      const { stdout } = await pExecFile(this.#bin, [...this.#flags, ...args], {
-        maxBuffer: MAX_BUFFER,
-        timeout: this.#timeoutMs,
-        killSignal: KILL_SIGNAL,
-      });
-      return stdout;
+      return await this.#exec(this.#bin, [...this.#flags, ...args], this.#timeoutMs);
     } catch (error) {
       throw this.#wrap(args, error);
     }
