@@ -42,6 +42,26 @@ On npmjs.com:
 2. Publish a GitHub Release (or **Actions → release → Run workflow**).
 3. The workflow installs, builds, and runs `npm publish` over OIDC. No token.
 
+## Registry publication (mcp-publisher)
+
+This package is registered in the official [MCP Registry](https://modelcontextprotocol.io/registry).
+
+Before the first registry publish:
+
+```sh
+npx mcp-publisher init                 # Create or update .mcp-publisher.json
+npx mcp-publisher login                # Authenticate (one-time)
+```
+
+On each release, after npm publish completes:
+
+```sh
+npx mcp-publisher publish              # Submit to the registry
+```
+
+The `server.json` file (committed to git) contains the registry metadata (`registryType: npm`,
+`transport: stdio`, environment variables with `isSecret` markers).
+
 ## Requirements baked into the workflow
 
 - `permissions: id-token: write` — lets npm mint the OIDC token.

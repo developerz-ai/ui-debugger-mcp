@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/servers/main/server-schema.json",
+  "name": "@developerz.ai/ui-debugger-mcp",
+  "description": "Autonomous UI debugging MCP server. Give a goal; a fast agent drives the browser/desktop, finds bugs + visual issues, and reports back.",
+  "registryType": "npm",
+  "transport": "stdio",
+  "command": "ui-debugger-mcp",
+  "env": {
+    "OPENAI_API_KEY": {
+      "required": true,
+      "description": "API key for the LLM provider (OpenRouter default)",
+      "isSecret": true
+    },
+    "OPENAI_BASE_URL": {
+      "required": false,
+      "description": "Base URL for the LLM provider (defaults to OpenRouter)",
+      "isSecret": false
+    }
+  }
+}
