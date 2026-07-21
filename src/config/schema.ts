@@ -40,10 +40,17 @@ const WindowMatchSchema = z.strictObject({
   class: z.string().optional(), // WM_CLASS
 });
 
-/** Desktop target — X11/Wayland adapter (reserved; not yet driven). Managed launch. */
+/**
+ * Desktop target — X11/Xvfb + Wayland adapter. Managed launch.
+ *
+ * **Launch must stay foreground** (no daemonization via `detached:true`, `&`, `nohup`).
+ * The adapter spawns the command and latches its exit code to detect launch failures.
+ * Daemonized apps orphan the process group → `close()` can't kill them and the
+ * profile lock persists.
+ */
 export const DesktopTargetSchema = z.strictObject({
   adapter: z.literal('desktop'),
-  launch: z.string(), // command that starts the app (managed)
+  launch: z.string(), // command that starts the app (managed, must stay foreground)
   window: WindowMatchSchema.optional(), // which window to drive; omit → `open` must supply a title
   display: z.string().nullish(), // X11 DISPLAY, e.g. ":99" for Xvfb; null = inherit env
 });

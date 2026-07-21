@@ -28,24 +28,25 @@ The story names the target: *"on **mobile**, log in and …"*.
 Every adapter implements the same small interface so the agent loop is
 adapter-blind:
 
-| Op          | Web (CDP)            | Desktop (x11/wayland)        | Mobile (ADB)            |
+| Op          | Web (CDP)            | Desktop (X11/XWayland)       | Mobile (ADB)            |
 |-------------|----------------------|------------------------------|-------------------------|
 | `open`      | navigate to url      | launch / focus the window    | launch activity / app   |
 | `find`      | DOM selector         | a11y node, else vision       | uiautomator node, else vision |
 | `click`     | CDP input            | synthesized pointer event    | `input tap`             |
 | `type`      | CDP input            | synthesized key event        | `input text`            |
 | `readState` | DOM snapshot         | AT-SPI a11y tree, else OCR   | uiautomator dump, else OCR |
-| `screenshot`| CDP capture          | compositor screenshot        | `screencap`             |
+| `screenshot`| CDP capture          | X11/Xvfb or grim (Wayland)   | `screencap`             |
 | `waitFor`   | DOM / network idle   | poll a11y / pixels           | poll hierarchy / pixels |
 
 Web is precise (DOM). Desktop prefers the **accessibility tree**; mobile the
 **view hierarchy**. When a target exposes neither, the adapter **falls back to
 vision** (screenshot + coordinates).
 
-> Linux tooling per adapter (X11 vs Wayland input, screenshots, AT-SPI) is
+> Linux tooling per adapter (X11 vs Wayland capture, screenshots, AT-SPI) is
 > worked out in [`desktop-control.md`](desktop-control.md). Short version:
 > a11y-tree-first everywhere it exists, vision as the universal fallback,
-> X11/Xvfb container as the low-friction default and native Wayland as hard mode.
+> X11/Xvfb container as the low-friction default. Wayland capture via `grim`
+> (wlroots) is supported; native-Wayland input via libei/ydotool is future work.
 
 ## Why this matters
 

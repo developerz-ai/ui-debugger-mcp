@@ -49,6 +49,9 @@ compositor-specific.
 | **wtype / virtual-keyboard** | ❌ | wlroots only | **refused by GNOME & KDE.** Don't rely on it. |
 | **kdotool** (KWin) / **wlrctl** (wlroots) | — | compositor-specific | window mgmt only. No portable Wayland window API exists. |
 
+**This codebase:** `xdotool` for X11/XWayland (the proven, container-friendly path).
+Native-Wayland input via libei/ydotool is future work. See `src/adapters/desktop/input.ts` + `capture.ts`.
+
 ## Reading desktop state — AT-SPI2
 
 The Linux a11y tree over **D-Bus** (`org.a11y.atspi`). **Display-agnostic** —

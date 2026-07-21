@@ -47,7 +47,7 @@ Smart agent fixes code, asks again. Loop until the UI works. No human clicking.
 | Target  | Adapter        | Protocol            | Reads              |
 |---------|----------------|---------------------|--------------------|
 | web     | browser        | CDP                 | DOM                |
-| desktop | desktop        | x11/wayland input   | a11y tree / vision |
+| desktop | desktop        | X11/Xvfb; Wayland: wlroots capture (`grim`) only, no native input | a11y tree / vision |
 | mobile  | android        | ADB (uiautomator)   | view hierarchy / vision |
 
 Three adapters, one shared contract. Story names the target. iOS out of scope on Linux.
