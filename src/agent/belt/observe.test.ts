@@ -188,6 +188,28 @@ test('console → returns entries + count, forwards filters/limit', async () => 
   expect(rec.console).toEqual({ filters: { level_eq: 'error' }, limit: 10 });
 });
 
+test('console/network default to a bounded tail — chatty pages never flood context', async () => {
+  const { adapter, rec } = fakeAdapter({});
+  await runObserve(adapter, recorder(), { kind: 'console' });
+  await runObserve(adapter, recorder(), { kind: 'network', filters: { status_gte: 400 } });
+  expect(rec.console).toEqual({ filters: undefined, limit: 50 });
+  expect(rec.network).toEqual({ filters: { status_gte: 400 }, limit: 50 });
+});
+
+test('an explicit log limit wins over the default — including 0', async () => {
+  const { adapter, rec } = fakeAdapter({});
+  await runObserve(adapter, recorder(), { kind: 'console', limit: 200 });
+  expect(rec.console?.limit).toBe(200);
+  await runObserve(adapter, recorder(), { kind: 'network', limit: 0 });
+  expect(rec.network?.limit).toBe(0);
+});
+
+test('tree limit is NOT defaulted — the adapter owns the tree cap', async () => {
+  const { adapter, rec } = fakeAdapter({});
+  await runObserve(adapter, recorder(), { kind: 'tree' });
+  expect(rec.readState?.limit).toBeUndefined();
+});
+
 test('network → returns entries + count', async () => {
   const entry: NetworkEntry = {
     method: 'GET',
@@ -252,15 +274,48 @@ test('coerceWithin parses a JSON-stringified node back into a node object', () =
   expect(coerceWithin(asString)).toEqual(sampleNode);
 });
 
-test('coerceWithin passes selector strings and node objects through untouched', () => {
+test('coerceWithin passes selector strings and complete nodes through untouched', () => {
   expect(coerceWithin('main')).toBe('main');
-  expect(coerceWithin(sampleNode)).toBe(sampleNode);
+  expect(coerceWithin(sampleNode)).toEqual(sampleNode);
   expect(coerceWithin(undefined)).toBeUndefined();
 });
 
 test('coerceWithin fails loud on JSON-looking garbage (never a silent empty read)', () => {
   expect(() => coerceWithin('{not json')).toThrow(AgentError);
   expect(() => coerceWithin('{"foo": 1}')).toThrow(AgentError);
+});
+
+test('schema accepts a fields-projected node as within (role + name is enough)', () => {
+  const parsed = ObserveInputSchema.safeParse({
+    kind: 'tree',
+    within: { role: 'navigation', name: 'Main' },
+  });
+  expect(parsed.success).toBe(true);
+});
+
+test('a within node without bounds scopes by its selector — adapters scope by region only', async () => {
+  const { adapter, rec } = fakeAdapter({ nodes: [sampleNode] });
+  const projected = { role: 'navigation', name: 'Main' };
+  expect(coerceWithin(projected)).toBe('role=navigation[name="Main" i]');
+  expect(coerceWithin({ role: 'span', name: '0', testid: 'cart' })).toBe('data-testid="cart"');
+  // …and the derived selector is what reaches the adapter.
+  await runObserve(adapter, recorder(), { kind: 'tree', within: projected });
+  expect(rec.readState?.within).toBe('role=navigation[name="Main" i]');
+});
+
+test('a within node with bounds but no enabled still scopes by its region', () => {
+  const { bounds } = sampleNode;
+  expect(coerceWithin({ role: 'button', name: 'Save', bounds })).toEqual({
+    role: 'button',
+    name: 'Save',
+    bounds,
+    enabled: true,
+  });
+});
+
+test('a within node with neither bounds nor a name fails loud, never a whole-page read', () => {
+  expect(() => coerceWithin({ role: 'generic', name: '  ' })).toThrow(AgentError);
+  expect(() => coerceWithin(JSON.stringify({ role: 'generic', name: '' }))).toThrow(AgentError);
 });
 
 test('tree with a JSON-string within scopes the adapter read by the parsed node', async () => {

@@ -160,11 +160,34 @@ test('wait → waitFor with all conditions, label lists them', async () => {
   expect(res.label).toBe('wait for "#ready" + network idle + 5000ms');
 });
 
-test('wait with no conditions → labels next frame', async () => {
+test('wait on networkIdle alone → no target needed', async () => {
+  const { adapter, calls } = fakeAdapter(null);
+  const { recorder } = fakeRecorder();
+  const res = await runAct(adapter, recorder, { action: 'wait', networkIdle: true });
+  expect(calls.waitFor).toEqual([{ query: undefined, networkIdle: true, timeout: undefined }]);
+  expect(res.label).toBe('wait for network idle');
+});
+
+test('bare wait is rejected by the belt, not by the adapter', async () => {
+  const { adapter, calls } = fakeAdapter(null);
+  const { recorder } = fakeRecorder();
+  // A timeout alone is a sleep: still no condition, still rejected.
+  for (const input of [{}, { networkIdle: false }, { target: '' }, { timeout: 1000 }] as const) {
+    await expect(runAct(adapter, recorder, { action: 'wait', ...input })).rejects.toThrow(
+      /act 'wait' requires 'target'.*'networkIdle'/,
+    );
+  }
+  expect(calls.waitFor).toEqual([]);
+});
+
+test('a rejected bare wait still lands on the trail as a failed step', async () => {
   const { adapter } = fakeAdapter(null);
   const { recorder } = fakeRecorder();
-  const res = await runAct(adapter, recorder, { action: 'wait' });
-  expect(res.label).toBe('wait for next frame');
+  const trail = createActTrail();
+  await expect(runAct(adapter, recorder, { action: 'wait' }, trail)).rejects.toThrow(AgentError);
+  expect(trail.steps[0]?.step).toBe('wait');
+  expect(trail.steps[0]?.ok).toBe(false);
+  expect(trail.steps[0]?.note).toContain("act 'wait' requires");
 });
 
 test('records the post-action frame: screenshot is taken AFTER the action', async () => {

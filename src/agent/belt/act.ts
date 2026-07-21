@@ -10,7 +10,7 @@
  *   - `click`    → `find` + `click`   (resolve the node, then click it)
  *   - `type`     → `find` + `type`    (resolve the field, then type into it)
  *   - `navigate` → `open`             (go to a URL / window / activity)
- *   - `wait`     → `waitFor`          (block on a node / network idle / timeout)
+ *   - `wait`     → `waitFor`          (block on a node and/or network idle, capped by timeout)
  *   - `key`      → `pressKey`         (press a key / chord on the focused element)
  *   - `scroll`   → `scroll`           (wheel the viewport, or a `target`-scoped region)
  *
@@ -55,7 +55,7 @@ export const ActInputSchema = z.object({
     .string()
     .optional()
     .describe(
-      'what to act on — CSS, role+name (button "Save"), or visible text (web); navigate: URL/window/activity; wait: selector to await; scroll: region to scroll within (optional)',
+      'what to act on — CSS, role+name (button "Save"), or visible text (web); navigate: URL/window/activity; wait: selector to await (required unless networkIdle); scroll: region to scroll within (optional)',
     ),
   text: z.string().optional().describe('text to type (action=type)'),
   key: z
@@ -70,7 +70,7 @@ export const ActInputSchema = z.object({
   networkIdle: z
     .boolean()
     .optional()
-    .describe('wait until in-flight requests settle (action=wait, web)'),
+    .describe('wait until in-flight requests settle (action=wait, web); needed if no target'),
   timeout: z
     .number()
     .int()
@@ -124,14 +124,18 @@ function describeNode(node: Node): string {
   return name ? `${node.role} ${JSON.stringify(name)}` : node.role;
 }
 
-/** Describe what a `wait` is blocking on, for the step label. */
+/**
+ * Describe what a `wait` is blocking on, for the step label. Never empty — the belt
+ * rejects a `wait` with no condition before it gets here.
+ */
 function describeWait(query?: string, networkIdle?: boolean, timeout?: number): string {
-  const parts = [
+  return [
     query ? JSON.stringify(query) : undefined,
     networkIdle ? 'network idle' : undefined,
     timeout ? `${timeout}ms` : undefined,
-  ].filter((part): part is string => part !== undefined);
-  return parts.length > 0 ? parts.join(' + ') : 'next frame';
+  ]
+    .filter((part): part is string => part !== undefined)
+    .join(' + ');
 }
 
 /**
@@ -184,6 +188,16 @@ async function performAct(adapter: Adapter, input: ActInput): Promise<string> {
       return `navigate to ${target}`;
     }
     case 'wait': {
+      // Every adapter needs something to block on — a bare `wait` can only throw
+      // (`waitFor requires query and/or networkIdle`). Reject it HERE so the driver
+      // gets a steering message from its own tool, and the dead step lands on the
+      // trail, instead of an adapter error it has to decode. A `timeout` alone is a
+      // sleep, which the loop has no use for.
+      if (!input.target && input.networkIdle !== true) {
+        throw new AgentError(
+          "act 'wait' requires 'target' (a selector to wait for) and/or 'networkIdle': true",
+        );
+      }
       await adapter.waitFor({
         query: input.target,
         networkIdle: input.networkIdle,

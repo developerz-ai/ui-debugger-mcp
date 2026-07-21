@@ -32,6 +32,7 @@ import type {
   NetworkEntry,
   Node,
   NodeField,
+  NodeRef,
 } from '../../adapters/contract.js';
 import { AgentError } from '../../errors.js';
 import type { EvidenceRecorder } from './look.js';
@@ -62,6 +63,15 @@ const DEFAULT_PROJECTION = [
   'testid',
 ] as const satisfies readonly NodeField[];
 
+/**
+ * Rows a no-`limit` `console`/`network` read returns (newest first, so the cap keeps
+ * what just happened). The ring buffers hold 1000 entries each (`browser/cdp.ts`), the
+ * driver is told to check both channels after acting, and the SDK re-sends every tool
+ * result on every later step — so one unbounded read on a chatty page costs
+ * entries × remaining steps of context. An explicit `limit` (including `0`) still wins.
+ */
+const DEFAULT_LOG_LIMIT = 50;
+
 /** One `filters` predicate value; arrays back `_in`-style set membership (matches `FilterValue`). */
 const FilterValueSchema = z.union([z.string(), z.number(), z.boolean(), z.array(z.string())]);
 
@@ -73,14 +83,24 @@ const BoundsSchema = z.object({
   height: z.number(),
 });
 
-/** A {@link Node} echoed back as a `within` scope (the alternative to a selector string). */
+/**
+ * A {@link Node} echoed back as a `within` scope (the alternative to a selector string).
+ *
+ * `bounds`/`enabled` are OPTIONAL: a `fields:["role","name"]` read — what the web
+ * addendum recommends for slim reads — returns neither, and rejecting the very node
+ * observe just handed back is the kind of contradiction that burns steps. Role + name
+ * are enough; {@link coerceWithin} turns a region-less node into a selector.
+ */
 const NodeSchema = z.object({
   role: z.string(),
   name: z.string(),
-  bounds: BoundsSchema,
-  enabled: z.boolean(),
+  bounds: BoundsSchema.optional(),
+  enabled: z.boolean().optional(),
   testid: z.string().optional(),
 });
+
+/** A `within` node as the driver may pass it — possibly projected down to role + name. */
+type WithinNode = z.infer<typeof NodeSchema>;
 
 /** `observe` input — flat + SQL-like; `kind` picks the table, the rest compose the read. */
 export const ObserveInputSchema = z.object({
@@ -99,12 +119,17 @@ export const ObserveInputSchema = z.object({
     .describe(
       'WHERE-style predicates, e.g. { visible_eq: true } | { status_gte: 400 }; per-channel',
     ),
-  limit: z.number().int().nonnegative().optional().describe('cap how many rows return'),
+  limit: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe(`cap how many rows return (console/network default ${DEFAULT_LOG_LIMIT})`),
   within: z
     .union([z.string(), NodeSchema])
     .optional()
     .describe(
-      'tree scope: restrict to a subtree/region (a selector string, or a node OBJECT exactly as observe returned it — not a JSON string)',
+      'tree scope: restrict to a subtree/region (a selector string, or a node OBJECT exactly as observe returned it — role + name is enough, not a JSON string)',
     ),
 });
 
@@ -153,7 +178,7 @@ const ARIA_ROLES = new Set([
  * Role + accessible name when the role is ARIA-addressable, else the visible text.
  * `null` for an unnamed, non-semantic node (the agent targets those by other means).
  */
-function baseSelector(node: Node): string | null {
+function baseSelector(node: Pick<Node, 'role' | 'name' | 'testid'>): string | null {
   // A test hook beats everything: document-unique, stable across renames/moves.
   if (node.testid) return `data-testid=${JSON.stringify(node.testid)}`;
   const name = node.name.trim();
@@ -204,14 +229,39 @@ function pick<T, K extends keyof T>(obj: T, keys: readonly K[]): Pick<T, K> {
 }
 
 /**
- * Accept a JSON-*stringified* node for `within`. Drivers routinely paste the node
- * back as a string (`within: "{\"role\": …}"`); before this coercion that string
- * fell through as a selector, normalized to `text={"role"…}`, matched nothing, and
- * returned an empty tree with no clue why — the single biggest step-waster observed.
- * Garbage-that-looks-like-JSON fails loud instead of silently reading the whole page.
+ * A `within` node as a contract {@link NodeRef}: its on-screen region when it has one,
+ * else the selector its testid/role/name resolve to — the same string `observe` would
+ * have attached to that node as `target`.
+ *
+ * Adapters scope a {@link Node} `within` by `bounds` ALONE, so a region-less node has
+ * to become a selector or it would silently read nothing. `enabled` is never read when
+ * scoping; the contract just requires the field, so a projection that dropped it
+ * defaults to `true` rather than throwing away an exact region.
  */
-export function coerceWithin(within: ObserveInput['within']): ObserveInput['within'] {
-  if (typeof within !== 'string' || !within.trimStart().startsWith('{')) return within;
+function scopeOf(node: WithinNode): NodeRef {
+  const { bounds } = node;
+  if (bounds !== undefined) return { ...node, bounds, enabled: node.enabled ?? true };
+  const selector = baseSelector(node);
+  if (selector) return selector;
+  throw new AgentError(
+    'observe `within` node has no `bounds` and no name/testid to resolve it — re-read with `fields` including "bounds", or pass a selector string',
+  );
+}
+
+/**
+ * Resolve `within` to something the {@link Adapter} contract takes — a selector string
+ * or a {@link Node}. Two coercions, each fixing a shape drivers actually produce:
+ *
+ *  - a JSON-*stringified* node (`within: "{\"role\": …}"`). Before this it fell through
+ *    as a selector, normalized to `text={"role"…}`, matched nothing, and returned an
+ *    empty tree with no clue why — the single biggest step-waster observed.
+ *    Garbage-that-looks-like-JSON fails loud instead of reading the whole page.
+ *  - a node projected without `bounds` (`fields:["role","name"]`) → {@link scopeOf}.
+ */
+export function coerceWithin(within: ObserveInput['within']): NodeRef | undefined {
+  if (within === undefined) return undefined;
+  if (typeof within !== 'string') return scopeOf(within);
+  if (!within.trimStart().startsWith('{')) return within;
   let data: unknown;
   try {
     data = JSON.parse(within);
@@ -223,10 +273,10 @@ export function coerceWithin(within: ObserveInput['within']): ObserveInput['with
   const parsed = NodeSchema.safeParse(data);
   if (!parsed.success) {
     throw new AgentError(
-      'observe `within` was a JSON string but not a valid node (needs role/name/bounds/enabled) — pass a node from a previous observe, or a selector string',
+      'observe `within` was a JSON string but not a valid node (needs role + name) — pass a node from a previous observe, or a selector string',
     );
   }
-  return parsed.data;
+  return scopeOf(parsed.data);
 }
 
 /**
@@ -257,12 +307,14 @@ export async function runObserve(
       const path = await recorder.saveScreenshot('observe', png);
       return { kind, path, bytes: png.byteLength };
     }
+    // Both log channels default to a bounded tail (see DEFAULT_LOG_LIMIT); an explicit
+    // `limit` — including `0` — passes through, invalid ones still die in the adapter.
     case 'console': {
-      const entries = await adapter.console({ filters, limit });
+      const entries = await adapter.console({ filters, limit: limit ?? DEFAULT_LOG_LIMIT });
       return { kind, count: entries.length, entries };
     }
     case 'network': {
-      const entries = await adapter.network({ filters, limit });
+      const entries = await adapter.network({ filters, limit: limit ?? DEFAULT_LOG_LIMIT });
       return { kind, count: entries.length, entries };
     }
     default: {
