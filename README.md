@@ -106,6 +106,10 @@ Install like any local MCP server — one entry in your `.mcp.json`:
 }
 ```
 
+It's also published in the official [MCP Registry](https://modelcontextprotocol.io/registry) as
+`io.github.developerz-ai/ui-debugger-mcp` — any client that browses the registry (instead of a
+hand-written `.mcp.json` entry) can find and install it by that name.
+
 Then add a per-project `.ui-debugger-mcp.json` describing the app to debug
 (models, targets, urls). The fastest way is the `init` command:
 
@@ -190,6 +194,14 @@ It's a **conversation**, not a remote control — five fat tools, not one-per-cl
 A run is **always time-capped**: `start_debug`'s `timeout` (seconds) overrides the
 default 300s, so a session can never hang forever — it auto-ends and frees the
 profile lock when the cap fires.
+
+Every tool result carries **both** a pretty-printed text block and a typed
+`structuredContent` payload validated against a declared `outputSchema` — parse
+the structured half, don't scrape the text. Tools also declare MCP annotations
+(`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) so clients
+can render/gate them correctly, and evidence paths (screenshots, `replay.mp4`,
+logs) ride as `resource_link` content items, not inline strings. Full shapes in
+[`docs/reference.md`](docs/reference.md).
 
 Typical loop from a smart agent:
 
