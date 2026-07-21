@@ -120,7 +120,7 @@ function compactInput(input: unknown): string {
  * as a tool-error and the run just churns. The wrapper is transparent: same
  * input/output, it only observes.
  */
-function withToolLog(name: string, t: Tool, log: (line: string) => void): Tool {
+export function withToolLog(name: string, t: Tool, log: (line: string) => void): Tool {
   const original = t.execute;
   if (!original) return t;
   return {

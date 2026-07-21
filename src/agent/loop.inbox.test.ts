@@ -229,6 +229,78 @@ test('mid-run instructions persist into EVERY later step, without duplicating', 
   }
 });
 
+test('prepareStep folds mid-run instructions AND the budget nudge together, nudge appended after the fold', async () => {
+  // Isolated unit tests cover `budgetNudge` and `foldInstructionsIntoStep` alone
+  // (see loop.test.ts); this drives them together through the real `prepareStep`
+  // wired up by `createDebugAgent`, on a step where BOTH fire in the same turn —
+  // `maxSteps: 3` keeps every step inside `BUDGET_WARN`'s window from the start.
+  const { writer } = findingsTracker();
+  const belt = realBelt(writer);
+
+  const pending: string[] = [];
+  const inbox: LoopInbox = {
+    drain() {
+      const out = [...pending];
+      pending.length = 0;
+      return out;
+    },
+  };
+
+  const seenPrompts: string[][] = [];
+  let callCount = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      callCount++;
+      const texts: string[] = [];
+      for (const msg of opts.prompt) {
+        if (msg.role === 'user') {
+          for (const part of msg.content) {
+            if (part.type === 'text') texts.push(part.text);
+          }
+        }
+      }
+      seenPrompts.push(texts);
+
+      if (callCount === 1) {
+        // Injected after step 1 starts — step 2's prepareStep drains it AND
+        // budgetNudge fires for step 2 (remaining = 3 - 1 = 2 <= BUDGET_WARN).
+        pending.push('check the mobile layout too');
+        return toolCallResponse('c1', 'observe', { kind: 'tree' });
+      }
+      return toolCallResponse('c2', 'report', { status: 'passed' });
+    },
+  });
+
+  const agent = createDebugAgent({
+    model,
+    tools: belt,
+    instructions: 'debug',
+    inbox,
+    progress: writer,
+    maxSteps: 3,
+  });
+
+  await runDebugLoop({ agent });
+  expect(callCount).toBe(2);
+
+  // Step 1 (stepNumber 0, remaining 3): budget nudge fires, but nothing was
+  // injected into the inbox yet — no standing-instructions block.
+  const call1 = seenPrompts[0] ?? [];
+  expect(call1.some((t) => t.includes('Step budget almost spent'))).toBe(true);
+  expect(call1.some((t) => t.includes('Mid-run instructions'))).toBe(false);
+
+  // Step 2 (stepNumber 1, remaining 2): BOTH fire in the same turn.
+  const call2 = seenPrompts[1] ?? [];
+  const foldIndex = call2.findIndex((t) => t.includes('Mid-run instructions'));
+  const nudgeIndex = call2.findIndex((t) => t.includes('Step budget almost spent'));
+  expect(foldIndex).toBeGreaterThanOrEqual(0);
+  expect(nudgeIndex).toBeGreaterThanOrEqual(0);
+  expect(call2[foldIndex]).toContain('check the mobile layout too');
+  // Ordering matches `createDebugAgent`'s `prepareStep`: the inbox fold builds
+  // `base` first, the nudge is appended as one more message AFTER `base`.
+  expect(foldIndex).toBeLessThan(nudgeIndex);
+});
+
 test('abort signal propagates: loop rejects when the model throws AbortError', async () => {
   const { writer } = findingsTracker();
   const belt = realBelt(writer);

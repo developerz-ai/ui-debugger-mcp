@@ -4,8 +4,10 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { chromium } from 'playwright-core';
+import { z } from 'zod';
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import { AdapterError, ConfigError, TargetNotFoundError } from '../errors.js';
@@ -15,6 +17,7 @@ import {
   makeSessionBuilder,
   resolveRunTarget,
   type SessionBuilderDeps,
+  withToolLog,
 } from './session-builder.js';
 
 // --- resolveRunTarget (per-run URL: "the boss tells the driver where to go") ---
@@ -235,4 +238,83 @@ test('makeSessionBuilder binds the deps into a per-run builder', async () => {
   await expect(build({ id: 's1', target: 'ghost', goal: 'x' })).rejects.toThrow(
     TargetNotFoundError,
   );
+});
+
+// --- withToolLog -------------------------------------------------------------
+// `withToolLog` wraps every belt tool with logging via a spread (`{ ...t, execute }`).
+// That spread is what carries `toModelOutput` through unchanged — the self-look
+// tool (`belt/look.ts`) relies on `toModelOutput` surviving the wrap to turn its
+// base64 frame into a multimodal `file-data` part; `pruneStaleFrames` (`loop.ts`)
+// then keys off that same shape to drop stale screenshots from later turns. Losing
+// the wrap (e.g. rebuilding the tool object field-by-field instead of spreading)
+// would silently degrade self-look to plain JSON output with no test failing
+// elsewhere, since nothing else exercises `withToolLog` directly.
+
+test('withToolLog preserves toModelOutput unchanged (load-bearing for self-look frame pruning)', async () => {
+  const selfLookLike = tool({
+    description: 'look',
+    inputSchema: z.object({}),
+    execute: async () => ({ frame: 'YWJj' }),
+    toModelOutput: ({ output }) => ({
+      type: 'content',
+      value: [{ type: 'file-data' as const, data: output.frame, mediaType: 'image/png' }],
+    }),
+  });
+
+  const wrapped = withToolLog('look', selfLookLike, () => {});
+
+  // Same function reference — the spread carries it through untouched.
+  expect(wrapped.toModelOutput).toBe(selfLookLike.toModelOutput);
+
+  const modelOutput = await wrapped.toModelOutput?.({
+    toolCallId: 't1',
+    input: {},
+    output: { frame: 'YWJj' },
+  });
+  expect(modelOutput).toEqual({
+    type: 'content',
+    value: [{ type: 'file-data', data: 'YWJj', mediaType: 'image/png' }],
+  });
+});
+
+test('withToolLog logs the input on call and returns the original output unchanged', async () => {
+  const lines: string[] = [];
+  const t = tool({
+    description: 'observe',
+    inputSchema: z.object({ kind: z.string() }),
+    execute: async (input) => ({ echoed: input.kind }),
+  });
+
+  const wrapped = withToolLog('observe', t, (line) => lines.push(line));
+  const out = await wrapped.execute?.({ kind: 'tree' }, { toolCallId: 'c1', messages: [] });
+
+  expect(out).toEqual({ echoed: 'tree' });
+  expect(lines).toEqual(['observe {"kind":"tree"}']);
+});
+
+test('withToolLog logs an ERROR line and rethrows when execute throws', async () => {
+  const lines: string[] = [];
+  const boom = new Error('selector not found');
+  const t = tool({
+    description: 'act',
+    inputSchema: z.object({ action: z.string() }),
+    execute: async (): Promise<{ ok: boolean }> => {
+      throw boom;
+    },
+  });
+
+  const wrapped = withToolLog('act', t, (line) => lines.push(line));
+  await expect(
+    wrapped.execute?.({ action: 'click' }, { toolCallId: 'c1', messages: [] }),
+  ).rejects.toThrow(boom);
+
+  expect(lines).toEqual(['act {"action":"click"}', 'act ERROR selector not found']);
+});
+
+test('withToolLog returns the tool unchanged when it has no execute function', () => {
+  const t = tool({ description: 'no-op', inputSchema: z.object({}) });
+  const wrapped = withToolLog('noop', t, () => {
+    throw new Error('log must never be called for a tool with no execute');
+  });
+  expect(wrapped).toBe(t);
 });
