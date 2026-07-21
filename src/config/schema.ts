@@ -32,18 +32,26 @@ export const WebTargetSchema = z.strictObject({
 /**
  * Which window to drive once the app is up. Matched by WM properties
  * (X11: xdotool `--name`/`--class`; AT-SPI: application name). Omit a field to
- * leave it unconstrained; omit the whole object to drive the launched window.
+ * leave it unconstrained; omit the whole object only when `open` is given the
+ * window title itself — with neither, `open` fails loud instead of driving nothing.
  */
 const WindowMatchSchema = z.strictObject({
   title: z.string().optional(), // WM_NAME / title substring
   class: z.string().optional(), // WM_CLASS
 });
 
-/** Desktop target — X11/Wayland adapter (reserved; not yet driven). Managed launch. */
+/**
+ * Desktop target — X11/Xvfb + Wayland adapter. Managed launch.
+ *
+ * **Launch must stay foreground** (no daemonization via `detached:true`, `&`, `nohup`).
+ * The adapter spawns the command and latches its exit code to detect launch failures.
+ * Daemonized apps orphan the process group → `close()` can't kill them and the
+ * profile lock persists.
+ */
 export const DesktopTargetSchema = z.strictObject({
   adapter: z.literal('desktop'),
-  launch: z.string(), // command that starts the app (managed)
-  window: WindowMatchSchema.optional(), // which window to drive; omit → the launched window
+  launch: z.string(), // command that starts the app (managed, must stay foreground)
+  window: WindowMatchSchema.optional(), // which window to drive; omit → `open` must supply a title
   display: z.string().nullish(), // X11 DISPLAY, e.g. ":99" for Xvfb; null = inherit env
 });
 

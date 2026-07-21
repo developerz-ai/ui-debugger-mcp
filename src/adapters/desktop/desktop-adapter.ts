@@ -30,9 +30,16 @@ import type {
   ScrollOptions,
   WaitOptions,
 } from '../contract.js';
-import { type AtspiSource, BusctlAtspi, shapeNodes } from './atspi.js';
+import { type AtspiSource, BusctlAtspi, parseRoleNameQuery, shapeNodes } from './atspi.js';
 import { type ScreenCapture, Screenshot } from './capture.js';
-import { centerOf, type PointerInput, type WindowMatch, Xdotool } from './input.js';
+import {
+  centerOf,
+  clickPointOf,
+  expectOnScreen,
+  type PointerInput,
+  type WindowMatch,
+  Xdotool,
+} from './input.js';
 import { desktopEnv } from './proc.js';
 
 /** Default cap on `readState` so the tree stays small (overridable via `limit`). */
@@ -40,7 +47,7 @@ const DEFAULT_LIMIT = 200;
 
 /** `waitFor` defaults — poll the a11y tree for a query until it appears or times out. */
 const DEFAULT_WAIT_MS = 5000;
-const POLL_MS = 200;
+const POLL_MS = 500;
 
 /** How long `open` waits for the launched window to appear before failing loud. */
 const WINDOW_WAIT_MS = 10_000;
@@ -64,6 +71,13 @@ interface DesktopAdapterHandles {
   capture: ScreenCapture;
 }
 
+/** The managed child, paired with the death latch `open` races the window wait against. */
+interface Launched {
+  proc: ChildProcess;
+  /** Rejects (loud, naming the exit code/signal) the moment the child dies. Never resolves. */
+  died: Promise<never>;
+}
+
 export interface DesktopAdapterInit {
   /** Resolved desktop-target config (launch command, window match, display). */
   config: DesktopTarget;
@@ -85,7 +99,7 @@ export class DesktopAdapter implements Adapter {
   readonly #atspi: AtspiSource;
   readonly #input: PointerInput;
   readonly #capture: ScreenCapture;
-  #process: ChildProcess | null = null;
+  #child: Launched | null = null;
 
   private constructor(handles: DesktopAdapterHandles) {
     this.#config = handles.config;
@@ -107,27 +121,71 @@ export class DesktopAdapter implements Adapter {
     });
   }
 
-  /** Launch the managed app (once) and activate the target window. `target` is a title fallback. */
+  /**
+   * Launch the managed app (once) and activate the target window. `target` is a title
+   * fallback for the configured `window` match.
+   *
+   * Never resolves having verified nothing: with no window to match it fails before
+   * spawning, and a `launch` command that dies (bad binary → 127, crash → signal)
+   * rejects with that exit code as soon as it happens — not after the window timeout.
+   */
   async open(target: string): Promise<void> {
     await this.#run('open', async () => {
-      if (!this.#process) {
-        const child = spawn('/bin/sh', ['-c', this.#config.launch], {
-          env: this.#env,
-          detached: true,
-          stdio: 'ignore',
-        });
-        this.#process = child;
-        // A dead app must not pin `#process`: clear it on exit/error so a later
-        // `open` relaunches and `close` never kills a recycled process group.
-        const clear = (): void => {
-          if (this.#process === child) this.#process = null;
-        };
-        child.once('exit', clear);
-        child.once('error', clear);
-      }
       const match = this.#windowMatch(target);
-      if (match) await this.#input.activateWindow(match, WINDOW_WAIT_MS);
+      if (!match) {
+        throw new AdapterError(
+          'desktop: no window to drive — set `window.title` or `window.class` on the desktop ' +
+            'target, or pass a window title as the open target',
+        );
+      }
+      const { died } = this.#launch();
+      const activated = this.#input.activateWindow(match, WINDOW_WAIT_MS);
+      // Pre-handle the loser: when the child dies first, the window wait keeps polling
+      // (bounded by WINDOW_WAIT_MS) and its later rejection must not go unhandled.
+      activated.catch(() => {});
+      await Promise.race([activated, died]);
     });
+  }
+
+  /**
+   * Spawn the managed app (a live child is reused) and latch its death.
+   *
+   * `stdio: 'ignore'` keeps the app detached from our stdio MCP channel, so the exit
+   * code is the only signal we get — hence the latch: {@link Launched.died} carries it
+   * to whoever is waiting in `open`.
+   */
+  #launch(): Launched {
+    const running = this.#child;
+    if (running) return running;
+    const command = this.#config.launch;
+    const proc = spawn('/bin/sh', ['-c', command], {
+      env: this.#env,
+      detached: true,
+      stdio: 'ignore',
+    });
+    const died = new Promise<never>((_resolve, reject) => {
+      const down = (reason: string): void => {
+        // A dead app must not pin `#child`: clear it so a later `open` relaunches
+        // and `close` never kills a recycled process group.
+        if (this.#child?.proc === proc) this.#child = null;
+        reject(
+          new AdapterError(
+            `desktop: launch command exited (${reason}) before the window appeared: ${command}`,
+          ),
+        );
+      };
+      proc.once('exit', (code, signal) =>
+        down(signal ? `killed by ${signal}` : `exit code ${code ?? 'unknown'}`),
+      );
+      // 'error' fires async: unlistened, a missing `/bin/sh` would crash the server.
+      proc.once('error', (error) => down(`spawn failed: ${error.message}`));
+    });
+    // The app normally outlives `open`, so its eventual exit rejects with nobody racing
+    // it — pre-handle so a clean quit is never an unhandled rejection.
+    died.catch(() => {});
+    const launched: Launched = { proc, died };
+    this.#child = launched;
+    return launched;
   }
 
   async find(opts: Query): Promise<Node | null> {
@@ -140,14 +198,24 @@ export class DesktopAdapter implements Adapter {
   async readState(opts: Query = {}): Promise<Node[]> {
     return this.#run('readState', async () => {
       const region = opts.within !== undefined ? await this.#regionBounds(opts.within) : undefined;
-      const nodes = await this.#atspi.readTree();
+      // A bounded query (role/name) + maxNodes let the AT-SPI walk skip describing
+      // (and stop once it has found) more than the caller could ever use — `find`
+      // (and thus `waitFor`'s poll loop) asks for `limit: 1`, so a match on the first
+      // matching node ends the walk instead of describing the whole tree. Region
+      // scoping (`within`) is applied downstream in `shapeNodes`, not visible to the
+      // walk itself, so an early match-count stop could wrongly skip a same-query
+      // match that would have landed inside the region — only tighten `maxNodes`
+      // when there's no region to reconcile against.
+      const query = opts.query ? parseRoleNameQuery(opts.query) : undefined;
+      const maxNodes = region === undefined ? (opts.limit ?? DEFAULT_LIMIT) : DEFAULT_LIMIT;
+      const nodes = await this.#atspi.readTree({ query, maxNodes });
       return shapeNodes(nodes, opts, DEFAULT_LIMIT, region);
     });
   }
 
   async click(target: NodeRef): Promise<void> {
     await this.#run('click', async () => {
-      const { x, y } = centerOf((await this.#resolve(target)).bounds);
+      const { x, y } = clickPointOf(await this.#resolve(target));
       await this.#input.clickPoint(x, y);
     });
   }
@@ -155,7 +223,7 @@ export class DesktopAdapter implements Adapter {
   async type(target: NodeRef, text: string): Promise<void> {
     // Contract: focus the target first, then type. Click its center to focus.
     await this.#run('type', async () => {
-      const { x, y } = centerOf((await this.#resolve(target)).bounds);
+      const { x, y } = clickPointOf(await this.#resolve(target));
       await this.#input.clickPoint(x, y);
       await this.#input.typeText(text);
     });
@@ -216,8 +284,8 @@ export class DesktopAdapter implements Adapter {
 
   /** Managed teardown: SIGTERM the launched process group; an already-dead process is a no-op. */
   async close(): Promise<void> {
-    const pid = this.#process?.pid;
-    this.#process = null;
+    const pid = this.#child?.proc.pid;
+    this.#child = null;
     if (pid === undefined) return;
     await this.#run('close', async () => {
       try {
@@ -239,12 +307,17 @@ export class DesktopAdapter implements Adapter {
     return node;
   }
 
-  /** Resolve a scope `within` (a {@link Node} or a selector) to an on-screen rectangle. */
+  /**
+   * Resolve a scope `within` (a {@link Node} or a selector) to an on-screen rectangle.
+   *
+   * A zero-size region is rejected, not scoped to: it would park the scroll cursor at
+   * the screen origin and (via `centerWithin`) read as a region nothing sits in.
+   */
   async #regionBounds(within: NodeRef): Promise<Bounds> {
-    if (typeof within !== 'string') return within.bounds;
+    if (typeof within !== 'string') return expectOnScreen(within);
     const node = await this.find({ query: within });
     if (!node) throw new AdapterError(`desktop: \`within\` target not found: ${within}`);
-    return node.bounds;
+    return expectOnScreen(node);
   }
 
   /** Pick the window to drive: configured match wins, else a non-empty `open` title fallback. */

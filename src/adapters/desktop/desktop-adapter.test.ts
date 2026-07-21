@@ -18,8 +18,13 @@ const atspiNode = (over: Partial<AtspiNode>): AtspiNode => ({
   bounds: { x: 10, y: 20, width: 100, height: 40 }, // center (60, 40)
   enabled: true,
   visible: true,
+  measured: true,
   ...over,
 });
+
+/** A node AT-SPI could not measure (no `Component`) — zeros are a placeholder. */
+const unmeasured = (name: string): AtspiNode =>
+  atspiNode({ name, measured: false, bounds: { x: 0, y: 0, width: 0, height: 0 } });
 
 class FakeAtspi implements AtspiSource {
   constructor(readonly nodes: AtspiNode[]) {}
@@ -47,6 +52,14 @@ class FakePointer implements PointerInput {
   }
   async activateWindow(match: WindowMatch): Promise<void> {
     this.calls.push(`activate:${JSON.stringify(match)}`);
+  }
+}
+
+/** A window that never comes up — stands in for the real 10s xdotool poll. */
+class StuckPointer extends FakePointer {
+  override activateWindow(match: WindowMatch): Promise<void> {
+    this.calls.push(`activate:${JSON.stringify(match)}`);
+    return new Promise<void>(() => {});
   }
 }
 
@@ -116,6 +129,42 @@ test('type focuses (click) then types', async () => {
   const { adapter, input } = build([atspiNode({ name: 'OK' })]);
   await adapter.type('OK', 'hello');
   expect(input.calls).toEqual(['click:60,40', 'type:hello']);
+});
+
+// --- zero-size targets ------------------------------------------------------
+
+test('click on a zero-size node throws instead of clicking the screen corner', async () => {
+  // AT-SPI reported no Component (or the widget is not laid out yet): its "center" is
+  // (0,0). The old code clicked the desktop's top-left and reported success.
+  const { adapter, input } = build([unmeasured('App root')]);
+  await expect(adapter.click('App root')).rejects.toThrow(/has zero size \(0x0\)/);
+  await expect(adapter.click('App root')).rejects.toThrow(AdapterError);
+  expect(input.calls).toEqual([]);
+});
+
+test('type into a zero-size node throws before any keystroke', async () => {
+  const { adapter, input } = build([unmeasured('Ghost field')]);
+  await expect(adapter.type('Ghost field', 'secret')).rejects.toThrow(AdapterError);
+  expect(input.calls).toEqual([]); // no click, and the text never reaches the screen
+});
+
+test('a zero-size Node ref is rejected too (not just resolved selectors)', async () => {
+  const { adapter } = build([]);
+  const node: Node = {
+    role: 'button',
+    name: '',
+    bounds: { x: 40, y: 40, width: 0, height: 10 },
+    enabled: true,
+  };
+  await expect(adapter.click(node)).rejects.toThrow(/button has zero size \(0x10\)/);
+});
+
+test('scroll within a zero-size region throws instead of parking at the origin', async () => {
+  const { adapter, input } = build([unmeasured('Panel')]);
+  await expect(adapter.scroll({ direction: 'down', within: 'Panel' })).rejects.toThrow(
+    AdapterError,
+  );
+  expect(input.calls).toEqual([]);
 });
 
 // --- pressKey ---------------------------------------------------------------
@@ -192,6 +241,107 @@ test('close is a no-op when nothing was launched', async () => {
 });
 
 // --- open (managed process lifecycle) -----------------------------------------
+
+/** Build an adapter whose window never appears, so only the launch outcome decides `open`. */
+function stuck(launch: string): DesktopAdapter {
+  return DesktopAdapter.create({
+    config: { adapter: 'desktop', launch, window: { title: 'Ghost' } },
+    atspi: new FakeAtspi([]),
+    input: new StuckPointer(),
+    capture: new FakeCapture(),
+  });
+}
+
+test('open fails loud with the launch command exit code, not a window timeout', async () => {
+  // Without the death latch this waits out WINDOW_WAIT_MS (10s) and blames the window.
+  await expect(stuck('exit 3').open('Ghost')).rejects.toThrow(/exit code 3/);
+  await expect(stuck('exit 3').open('Ghost')).rejects.toThrow(AdapterError);
+});
+
+test('open names the real reason when the launch binary is missing', async () => {
+  // /bin/sh reports "command not found" as 127 — the actionable signal, in seconds.
+  await expect(stuck('__uidbg_no_such_binary__ --go').open('Ghost')).rejects.toThrow(
+    /exit code 127/,
+  );
+});
+
+test('open reports a launch killed by a signal', async () => {
+  await expect(stuck('kill -TERM $$').open('Ghost')).rejects.toThrow(/killed by SIGTERM/);
+});
+
+test('open resolves once the window activates while the app stays up', async () => {
+  const input = new FakePointer();
+  const adapter = DesktopAdapter.create({
+    config: { adapter: 'desktop', launch: 'sleep 5', window: { title: 'App' } },
+    atspi: new FakeAtspi([]),
+    input,
+    capture: new FakeCapture(),
+  });
+  await expect(adapter.open('App')).resolves.toBeUndefined();
+  expect(input.calls).toEqual(['activate:{"title":"App"}']);
+  await expect(adapter.close()).resolves.toBeUndefined(); // kills the group
+});
+
+test('open refuses to launch when there is no window to drive', async () => {
+  // No `window` config and a blank open target (what session-builder passes): the old
+  // code spawned the app and resolved having verified nothing.
+  const { adapter, input } = build();
+  await expect(adapter.open('  ')).rejects.toThrow(/no window to drive/);
+  expect(input.calls).toEqual([]);
+  await expect(adapter.close()).resolves.toBeUndefined(); // nothing was spawned
+});
+
+/** True while `pid` is alive (`kill -0`); false once it's gone (ESRCH). */
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test('close SIGTERMs the whole process group, not just the shell', async () => {
+  // The launched shell backgrounds a real child (`sleep`) and waits on it — a group
+  // kill (`process.kill(-pid, ...)`) must reach that grandchild too, not just the
+  // `/bin/sh` leader. Without `-pid` the child would be orphaned and outlive close().
+  const dir = await mkdtemp(join(tmpdir(), 'uidbg-adapter-'));
+  const pidFile = join(dir, 'child.pid');
+  const adapter = DesktopAdapter.create({
+    config: {
+      adapter: 'desktop',
+      launch: `sleep 30 & echo $! > ${JSON.stringify(pidFile)}; wait`,
+      window: { title: 'App' },
+    },
+    atspi: new FakeAtspi([]),
+    input: new FakePointer(),
+    capture: new FakeCapture(),
+  });
+  try {
+    await adapter.open('App');
+    const start = Date.now();
+    let childPid = 0;
+    while (!childPid) {
+      const text = (await readFile(pidFile, 'utf8').catch(() => '')).trim();
+      childPid = Number(text) || 0;
+      if (!childPid) {
+        expect(Date.now() - start).toBeLessThan(5000); // the child never wrote its pid
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    expect(isAlive(childPid)).toBe(true);
+
+    await adapter.close();
+
+    const closeStart = Date.now();
+    while (isAlive(childPid)) {
+      expect(Date.now() - closeStart).toBeLessThan(3000); // the grandchild survived close()
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test('open respawns the managed app after it exits', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'uidbg-adapter-'));

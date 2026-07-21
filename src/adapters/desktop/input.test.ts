@@ -1,9 +1,10 @@
 import { expect, test } from 'bun:test';
-import { AdapterError } from '../../errors.js';
-import type { ScrollDirection } from '../contract.js';
+import { AdapterError, ExecTimeoutError } from '../../errors.js';
+import type { Node, ScrollDirection } from '../contract.js';
 import {
   centerOf,
   clickArgs,
+  clickPointOf,
   keyArgs,
   mapKeyChord,
   moveArgs,
@@ -61,7 +62,25 @@ test('centerOf returns the rounded integer center of a rectangle', () => {
   expect(centerOf({ x: 0, y: 0, width: 3, height: 3 })).toEqual({ x: 2, y: 2 });
 });
 
-// --- arg builders -----------------------------------------------------------
+// --- clickPointOf -----------------------------------------------------------
+
+const sized = (width: number, height: number, name = 'OK'): Node => ({
+  role: 'button',
+  name,
+  bounds: { x: 10, y: 20, width, height },
+  enabled: true,
+});
+
+test('clickPointOf returns the center of a node with real bounds', () => {
+  expect(clickPointOf(sized(100, 40))).toEqual({ x: 60, y: 40 });
+});
+
+test('clickPointOf refuses a zero-size node (its center is the screen origin)', () => {
+  expect(() => clickPointOf(sized(0, 0))).toThrow(AdapterError);
+  expect(() => clickPointOf(sized(0, 0))).toThrow(/button "OK" has zero size \(0x0\)/);
+  expect(() => clickPointOf(sized(50, 0))).toThrow(/zero size \(50x0\)/); // one axis is enough
+  expect(() => clickPointOf(sized(0, 0, ''))).toThrow(/^desktop: button has zero size/); // unnamed
+});
 
 test('clickArgs moves then clicks the given button', () => {
   expect(clickArgs(60, 40)).toEqual(['mousemove', '--sync', '60', '40', 'click', '1']);
@@ -119,6 +138,27 @@ test('activateWindow keeps polling on a no-match (empty stderr) and times out lo
     /window not found within 200ms/,
   );
   expect(fake.calls()).toBeGreaterThan(1); // it polled, not failed on the first miss
+});
+
+test('activateWindow surfaces an expired per-call cap instead of polling on', async () => {
+  // A timeout rejects with no stderr — the shape the no-match branch keeps polling on.
+  let calls = 0;
+  const exec = async (): Promise<string> => {
+    calls += 1;
+    throw new ExecTimeoutError('desktop: `xdotool` timed out after 10000ms (SIGKILLed)');
+  };
+  const input = new Xdotool({ exec });
+  await expect(input.activateWindow({ title: 'App' }, 10_000)).rejects.toThrow(ExecTimeoutError);
+  expect(calls).toBe(1); // a wedged xdotool is not "no window yet"
+});
+
+test('a wedged xdotool action surfaces verbatim, not re-prefixed', async () => {
+  const exec = async (): Promise<string> => {
+    throw new ExecTimeoutError('desktop: `xdotool` timed out after 10000ms (SIGKILLed)');
+  };
+  await expect(new Xdotool({ exec }).clickPoint(10, 20)).rejects.toThrow(
+    /^desktop: `xdotool` timed out after 10000ms/,
+  );
 });
 
 test('activateWindow throws immediately when xdotool reports a real error on stderr', async () => {

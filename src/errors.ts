@@ -60,6 +60,19 @@ export class AdapterError extends UiDebuggerError {
   }
 }
 
+/**
+ * A CLI tool blew its per-invocation wall-clock cap and was killed (desktop transport).
+ * Its own subtype so callers that tolerate an ordinary non-zero exit — "this node has no
+ * Component", "no window matched yet" — can still refuse to swallow a wedged process.
+ */
+export class ExecTimeoutError extends AdapterError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'ExecTimeoutError';
+    Object.setPrototypeOf(this, ExecTimeoutError.prototype);
+  }
+}
+
 /** A failed ADB invocation (android transport). Extends {@link AdapterError} so the agent loop catches it. */
 export class AdbError extends AdapterError {
   constructor(message: string) {

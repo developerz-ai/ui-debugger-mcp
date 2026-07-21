@@ -16,6 +16,14 @@ import { join } from 'node:path';
 import { AdapterError } from '../../errors.js';
 import { desktopEnv, type Exec, errMessage, makeExec } from './proc.js';
 
+/**
+ * Capture cap — deliberately longer than `proc.ts`'s input/a11y default: a cold
+ * grim/scrot encoding a hi-dpi PNG (plus a compositor round-trip on Wayland) is
+ * legitimately slow, and one frame is worth waiting for. Still bounded: a wedged
+ * capture must not park the run until the outer session timeout.
+ */
+const CAPTURE_TIMEOUT_MS = 30_000;
+
 /** Capture backends we dispatch to, chosen by the live session type. */
 export type CaptureTool = 'grim' | 'scrot';
 
@@ -55,7 +63,7 @@ export class Screenshot implements ScreenCapture {
 
   constructor(init: { display?: string; exec?: Exec } = {}) {
     this.#env = desktopEnv(init.display);
-    this.#exec = init.exec ?? makeExec(this.#env);
+    this.#exec = init.exec ?? makeExec(this.#env, CAPTURE_TIMEOUT_MS);
   }
 
   /** Capture the current frame as PNG bytes via a temp file (read then deleted). */

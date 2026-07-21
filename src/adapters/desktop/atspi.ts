@@ -18,7 +18,7 @@
  * are pure and unit-tested; {@link BusctlAtspi} is the integration-validated runner.
  */
 
-import { AdapterError } from '../../errors.js';
+import { AdapterError, ExecTimeoutError } from '../../errors.js';
 import type { Bounds, Filters, FilterValue, Node, Query } from '../contract.js';
 import { capToLimit } from '../limit.js';
 import { desktopEnv, type Exec, makeExec } from './proc.js';
@@ -30,6 +30,9 @@ const ROOT_PATH = '/org/a11y/atspi/accessible/root';
 
 /** `ATSPI_COORD_TYPE_SCREEN` — extents relative to the screen, for clicks + vision. */
 const COORD_SCREEN = 0;
+
+/** Placeholder bounds for a node with no `Component` — paired with `measured: false`. */
+const UNMEASURED_BOUNDS: Bounds = { x: 0, y: 0, width: 0, height: 0 };
 
 /** Walk caps — keep the (spawn-heavy) tree read bounded. */
 const DEFAULT_MAX_NODES = 200;
@@ -44,6 +47,12 @@ const STATE_VISIBLE = 30;
 /** A node plus the computed `visible` flag backing the `visible_eq` filter. */
 export interface AtspiNode extends Node {
   visible: boolean;
+  /**
+   * False when the node exposes no `Component` (app roots, toolkit fillers): its
+   * `bounds` are **unknown**, not a rect at the screen origin. Clicks on such a node
+   * fail loud (`input.ts#expectOnScreen`) and region scoping skips it.
+   */
+  measured: boolean;
 }
 
 /** A D-Bus object reference on the a11y bus — `(unique-name, object-path)`. */
@@ -56,6 +65,15 @@ export interface AtspiRef {
 export interface AtspiReadOptions {
   maxNodes?: number;
   maxDepth?: number;
+  /**
+   * Prune the walk to nodes matching this role/name up front: a non-matching node
+   * skips its `GetState`/`GetExtents` calls (2 of the ~4 busctl spawns per node) since
+   * its full description would just be filtered out downstream anyway. The tree is
+   * still walked in full (children are always fetched) — only the expensive per-node
+   * describe calls are skipped. Combined with `maxNodes`, the walk also stops as soon
+   * as enough *matches* are found, not merely enough nodes visited.
+   */
+  query?: ParsedQuery;
 }
 
 /** The read seam the adapter depends on — implemented by {@link BusctlAtspi}, faked in tests. */
@@ -308,7 +326,9 @@ export function shapeNodes(
   region?: Bounds,
 ): Node[] {
   let out = nodes;
-  if (region) out = out.filter((n) => centerWithin(n, region));
+  // Unmeasured nodes have no position: their placeholder center (0,0) would falsely
+  // land inside any region touching the screen origin.
+  if (region) out = out.filter((n) => n.measured && centerWithin(n, region));
   if (opts.query) {
     const parsed = parseRoleNameQuery(opts.query);
     out = out.filter((n) => matchesQuery(n, parsed));
@@ -339,6 +359,7 @@ export class BusctlAtspi implements AtspiSource {
   async readTree(opts: AtspiReadOptions = {}): Promise<AtspiNode[]> {
     const maxNodes = opts.maxNodes ?? DEFAULT_MAX_NODES;
     const maxDepth = opts.maxDepth ?? DEFAULT_MAX_DEPTH;
+    const query = opts.query;
     const out: AtspiNode[] = [];
     const seen = new Set<string>();
     // Start at the registry root's children (apps); the desktop root itself is not UI.
@@ -346,11 +367,21 @@ export class BusctlAtspi implements AtspiSource {
     for (let depth = 0; frontier.length > 0 && depth < maxDepth; depth += 1) {
       const next: AtspiRef[] = [];
       for (const ref of frontier) {
+        // With a query, `out` holds only matches — so this also stops the walk as
+        // soon as enough matches are found, not merely enough nodes visited.
         if (out.length >= maxNodes) return out;
         const key = `${ref.dest}${ref.path}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        out.push(await this.#describe(ref));
+        const { role, name } = await this.#roleAndName(ref);
+        // A query-pruned non-match: skip the State/Extents calls (they'd just be
+        // filtered out downstream) but keep walking its children for deeper matches.
+        if (
+          !query ||
+          matchesQuery({ role, name, bounds: UNMEASURED_BOUNDS, enabled: false }, query)
+        ) {
+          out.push(await this.#describeRest(ref, role, name));
+        }
         next.push(...(await this.#children(ref)));
       }
       frontier = next;
@@ -423,28 +454,35 @@ export class BusctlAtspi implements AtspiSource {
     return asString(data, 'Name');
   }
 
-  /** Read a single node's role/name/state/extents into a normalized {@link AtspiNode}. */
-  async #describe(ref: AtspiRef): Promise<AtspiNode> {
+  /** Read just role + name — cheap enough to spend on every node for query pruning. */
+  async #roleAndName(ref: AtspiRef): Promise<{ role: string; name: string }> {
     const roleName = asString(
       firstReturn(await this.#call(ref, A11Y_IFACE, 'GetRoleName'), 'GetRoleName'),
       'GetRoleName',
     );
-    const role = mapRole(roleName);
-    const name = await this.#name(ref);
+    return { role: mapRole(roleName), name: await this.#name(ref) };
+  }
+
+  /** Finish describing a node (state + extents) once its role/name are known to matter. */
+  async #describeRest(ref: AtspiRef, role: string, name: string): Promise<AtspiNode> {
     const { enabled, visible } = stateFlags(
       parseStateWords(firstReturn(await this.#call(ref, A11Y_IFACE, 'GetState'), 'GetState')),
     );
-    // Application roots + some toolkit filler nodes don't implement Component,
-    // so busctl exits non-zero on GetExtents. Fall back to zero bounds instead
-    // of killing the whole walk; role/name/state failures above stay loud.
+    // Application roots + some toolkit filler nodes don't implement Component, so
+    // busctl exits non-zero on GetExtents. Keep the node (killing the whole walk over
+    // an unmeasurable filler helps nobody) but mark it `measured: false` — the zeros
+    // below are a placeholder, never geometry. Role/name/state failures stay loud.
+    // An expired per-call cap (`proc.ts`) is not "no Component":
+    // swallowing it would spend the cap again on every remaining node of the walk.
     const extents = await this.#call(ref, COMPONENT_IFACE, 'GetExtents', [
       'u',
       String(COORD_SCREEN),
-    ]).catch(() => null);
+    ]).catch((error: unknown) => {
+      if (error instanceof ExecTimeoutError) throw error;
+      return null;
+    });
     const bounds =
-      extents === null
-        ? { x: 0, y: 0, width: 0, height: 0 }
-        : parseExtents(firstReturn(extents, 'GetExtents'));
-    return { role, name, bounds, enabled, visible };
+      extents === null ? UNMEASURED_BOUNDS : parseExtents(firstReturn(extents, 'GetExtents'));
+    return { role, name, bounds, enabled, visible, measured: extents !== null };
   }
 }
