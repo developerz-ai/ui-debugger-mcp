@@ -25,6 +25,9 @@ export function sendMessageTool(service: DebugApi): McpTool {
             'Talk to the small driver agent mid-run: add work, redirect it, or answer a question. ' +
             'The message is folded into the conversation before the next step — the run keeps going, ' +
             'no restart. Use get_findings to see the effect.',
+          annotations: {
+            destructiveHint: false,
+          },
           inputSchema: {
             session_id: z.string().min(1).describe('The id returned by start_debug.'),
             message: z

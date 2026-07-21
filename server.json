@@ -1,20 +1,35 @@
 {
-  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/servers/main/server-schema.json",
-  "name": "@developerz.ai/ui-debugger-mcp",
-  "description": "Autonomous UI debugging MCP server. Give a goal; a fast agent drives the browser/desktop, finds bugs + visual issues, and reports back.",
-  "registryType": "npm",
-  "transport": "stdio",
-  "command": "ui-debugger-mcp",
-  "env": {
-    "OPENAI_API_KEY": {
-      "required": true,
-      "description": "API key for the LLM provider (OpenRouter default)",
-      "isSecret": true
-    },
-    "OPENAI_BASE_URL": {
-      "required": false,
-      "description": "Base URL for the LLM provider (defaults to OpenRouter)",
-      "isSecret": false
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.developerz-ai/ui-debugger-mcp",
+  "description": "Autonomous UI debugging MCP server: an agent drives the browser/desktop, reports bugs + UX issues.",
+  "version": "1.1.0",
+  "repository": {
+    "url": "https://github.com/developerz-ai/ui-debugger-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/developerz-ai/ui-debugger-mcp#readme",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@developerz.ai/ui-debugger-mcp",
+      "version": "1.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "OPENAI_API_KEY",
+          "description": "API key for the LLM provider (OpenRouter default)",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "OPENAI_BASE_URL",
+          "description": "Base URL for the LLM provider (defaults to OpenRouter)",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
     }
-  }
+  ]
 }

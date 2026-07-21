@@ -155,6 +155,35 @@ describe('integration: real MCP server + outer tools + fake DebugService', () =>
     ]);
   });
 
+  test('every tool carries its declared annotations in tools/list', async () => {
+    const { tools } = await client.listTools();
+    const annotations = new Map(tools.map((t) => [t.name, t.annotations]));
+
+    expect(annotations.get('start_debug')).toMatchObject({
+      destructiveHint: false,
+      openWorldHint: true,
+    });
+    expect(annotations.get('send_message')).toMatchObject({ destructiveHint: false });
+    expect(annotations.get('get_findings')).toMatchObject({ readOnlyHint: true });
+    expect(annotations.get('describe')).toMatchObject({ readOnlyHint: true });
+    expect(annotations.get('end_session')).toMatchObject({ idempotentHint: true });
+  });
+
+  test('a thrown service error surfaces as isError:true, not a protocol-level failure', async () => {
+    // get_findings for an id nobody started throws SessionNotFoundError inside the
+    // handler. The SDK must turn that into a normal (non-throwing) tool result with
+    // isError:true — a caller polling findings shouldn't need a try/catch around
+    // every call just to notice a stale id.
+    const res = callResult(
+      await client.callTool({
+        name: 'get_findings',
+        arguments: { session_id: 'no-such-session' },
+      }),
+    );
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toMatch(/no active debug session/i);
+  });
+
   test('every tool declares an object outputSchema in tools/list', async () => {
     const { tools } = await client.listTools();
     const schemas = new Map(tools.map((t) => [t.name, t.outputSchema]));
