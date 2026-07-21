@@ -291,6 +291,58 @@ test('open refuses to launch when there is no window to drive', async () => {
   await expect(adapter.close()).resolves.toBeUndefined(); // nothing was spawned
 });
 
+/** True while `pid` is alive (`kill -0`); false once it's gone (ESRCH). */
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test('close SIGTERMs the whole process group, not just the shell', async () => {
+  // The launched shell backgrounds a real child (`sleep`) and waits on it — a group
+  // kill (`process.kill(-pid, ...)`) must reach that grandchild too, not just the
+  // `/bin/sh` leader. Without `-pid` the child would be orphaned and outlive close().
+  const dir = await mkdtemp(join(tmpdir(), 'uidbg-adapter-'));
+  const pidFile = join(dir, 'child.pid');
+  const adapter = DesktopAdapter.create({
+    config: {
+      adapter: 'desktop',
+      launch: `sleep 30 & echo $! > ${JSON.stringify(pidFile)}; wait`,
+      window: { title: 'App' },
+    },
+    atspi: new FakeAtspi([]),
+    input: new FakePointer(),
+    capture: new FakeCapture(),
+  });
+  try {
+    await adapter.open('App');
+    const start = Date.now();
+    let childPid = 0;
+    while (!childPid) {
+      const text = (await readFile(pidFile, 'utf8').catch(() => '')).trim();
+      childPid = Number(text) || 0;
+      if (!childPid) {
+        expect(Date.now() - start).toBeLessThan(5000); // the child never wrote its pid
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    expect(isAlive(childPid)).toBe(true);
+
+    await adapter.close();
+
+    const closeStart = Date.now();
+    while (isAlive(childPid)) {
+      expect(Date.now() - closeStart).toBeLessThan(3000); // the grandchild survived close()
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('open respawns the managed app after it exits', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'uidbg-adapter-'));
   const file = join(dir, 'runs');
