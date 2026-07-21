@@ -37,7 +37,6 @@ import type {
 } from '../contract.js';
 import { type Adb, AdbCli, pendingStateOrThrow } from './adb.js';
 import {
-  centerOf,
   keyArgs,
   parseScreenSize,
   scrollSwipe,
@@ -46,6 +45,7 @@ import {
   startArgs,
   swipeArgs,
   tapArgs,
+  tapPointOf,
   textArgs,
 } from './commands.js';
 import { emulatorSerial, pickEmulatorPort } from './ports.js';
@@ -282,7 +282,7 @@ export class AndroidAdapter implements Adapter {
 
   async click(target: NodeRef): Promise<void> {
     await this.#run('click', async () => {
-      const { x, y } = centerOf((await this.#resolve(target)).bounds);
+      const { x, y } = tapPointOf(await this.#resolve(target));
       await this.#adb.shell(tapArgs(x, y));
     });
   }
@@ -292,7 +292,7 @@ export class AndroidAdapter implements Adapter {
     // Line breaks become ENTER presses (a raw \n would reach the device shell);
     // each line goes out in %s-safe chunks — one `input text` per chunk (they append).
     await this.#run('type', async () => {
-      const { x, y } = centerOf((await this.#resolve(target)).bounds);
+      const { x, y } = tapPointOf(await this.#resolve(target));
       await this.#adb.shell(tapArgs(x, y));
       for (const [index, line] of splitTextLines(text).entries()) {
         if (index > 0) await this.#adb.shell(keyArgs('enter'));

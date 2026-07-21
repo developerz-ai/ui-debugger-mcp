@@ -13,7 +13,7 @@
  */
 
 import { AdapterError } from '../../errors.js';
-import type { Bounds, ScrollDirection } from '../contract.js';
+import type { Bounds, Node, ScrollDirection } from '../contract.js';
 
 /** Default swipe distance (px) for one `scroll` step when no `amount` is given. */
 const DEFAULT_SCROLL_AMOUNT = 600;
@@ -27,6 +27,26 @@ export function centerOf(bounds: Bounds): { x: number; y: number } {
     x: Math.round(bounds.x + bounds.width / 2),
     y: Math.round(bounds.y + bounds.height / 2),
   };
+}
+
+/**
+ * Where a `click`/`type` tap lands on a {@link Node} — its center, zero-size guarded.
+ *
+ * uiautomator reports detached, collapsed or not-yet-laid-out views as `[0,0][0,0]`,
+ * whose "center" is the screen origin: the tap would land on the status bar / back
+ * gesture and the run would read as a successful click on the wrong thing. Fail loud
+ * instead (the desktop adapter applies the same rule to bounds-less AT-SPI nodes).
+ */
+export function tapPointOf(node: Node): { x: number; y: number } {
+  const { width, height } = node.bounds;
+  if (width <= 0 || height <= 0) {
+    const label = node.name === '' ? node.role : `${node.role} "${node.name}"`;
+    throw new AdapterError(
+      `android: ${label} has zero size (${width}x${height}) — it is not visible on screen; ` +
+        'wait for it to render or scroll it into view, then re-read its bounds',
+    );
+  }
+  return centerOf(node.bounds);
 }
 
 // --- launch -----------------------------------------------------------------

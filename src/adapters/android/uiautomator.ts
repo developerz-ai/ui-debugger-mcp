@@ -9,7 +9,9 @@
  * then apply the shared SQL-like shaping (`query`/`filters`/`within`/`limit`).
  *
  * The dump is read robustly as **dump-to-file then `cat`** — uiautomator interleaves a
- * status line on `/dev/tty`, so a file round-trip keeps the XML clean. Canvas/Compose
+ * status line on `/dev/tty`, so a file round-trip keeps the XML clean. The stale file is
+ * removed first and the dump's success line asserted (it exits 0 even when it fails), so
+ * a read is always the live screen or a loud error — never last screen's hierarchy. Canvas/Compose
  * surfaces that expose no hierarchy fall back to vision (future). Fails loud — a missing
  * `<hierarchy>` or a malformed `bounds` throws {@link AdapterError}, never a silent guess.
  *
@@ -23,6 +25,15 @@ import type { Adb } from './adb.js';
 
 /** Where `uiautomator dump` writes its XML; we `cat` it back to avoid `/dev/tty` interleaving. */
 const DUMP_PATH = '/sdcard/window_dump.xml';
+
+/**
+ * The success line `uiautomator dump` prints once it has written the file:
+ * `UI hierchary dumped to: /sdcard/window_dump.xml` — the AOSP typo is real, and some
+ * builds spell it correctly, so match the stable half. This line, **not** the exit
+ * code, is the success signal: a dump that gives up ("ERROR: could not get idle
+ * state") still exits 0.
+ */
+const DUMP_MARKER = /dumped to:\s*\S+/i;
 
 /** Default cap on a dump read so the tree stays small (overridable via `limit`). */
 const DEFAULT_LIMIT = 200;
@@ -336,8 +347,22 @@ export class AdbUiAutomator implements UiAutomatorSource {
     this.#adb = adb;
   }
 
+  /**
+   * Dump the live hierarchy — **never** a stale one. The old file is removed first and
+   * the dump's own success line ({@link DUMP_MARKER}) is asserted, because a failed
+   * `uiautomator dump` exits 0: without both, `cat` would hand back the previous
+   * screen's XML and the agent would reason about a UI that is no longer there.
+   */
   async dump(): Promise<AndroidNode[]> {
-    await this.#adb.shell(['uiautomator', 'dump', DUMP_PATH]);
+    await this.#adb.shell(['rm', '-f', DUMP_PATH]);
+    const out = await this.#adb.shell(['uiautomator', 'dump', DUMP_PATH]);
+    if (!DUMP_MARKER.test(out)) {
+      const said = out.trim() === '' ? 'no output' : JSON.stringify(out.trim());
+      throw new AdapterError(
+        `uiautomator: dump did not write ${DUMP_PATH} (${said}) — the window may be ` +
+          'mid-animation or busy; wait for it to settle and read again',
+      );
+    }
     const xml = await this.#adb.shell(['cat', DUMP_PATH]);
     return parseHierarchy(xml);
   }

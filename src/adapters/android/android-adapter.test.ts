@@ -7,7 +7,7 @@
  *     unescapeXml, mapAndroidRole, toAndroidNode, parseAndroidQuery,
  *     matchesAndroidNode, applyAndroidFilters, shapeNodes, centerWithin, toNode
  *   - Pure parsers (android-adapter.ts): parseLogcat, applyLogFilters
- *   - Command builders (commands.ts): centerOf, startArgs, tapArgs, textArgs,
+ *   - Command builders (commands.ts): centerOf, tapPointOf, startArgs, tapArgs, textArgs,
  *     swipeArgs, escapeInputText, scrollSwipe, keycodeFor, keyArgs, parseScreenSize
  *   - AndroidAdapter (android-adapter.ts): create (attach / managed),
  *     find/readState/click/type/pressKey/scroll/screenshot/waitFor/console/network/close
@@ -37,6 +37,7 @@ import {
   startArgs,
   swipeArgs,
   tapArgs,
+  tapPointOf,
   textArgs,
 } from './commands.js';
 import type { UiAutomatorSource } from './uiautomator.js';
@@ -114,7 +115,8 @@ class FakeAdb implements Adb {
     // Default sensible responses so basic flows succeed without explicit setup.
     if (command[0] === 'getprop') return '1';
     if (command[0] === 'wm') return 'Physical size: 1080x2400';
-    if (command[0] === 'uiautomator') return '';
+    // The real success line (AOSP typo included) — dumps assert it, so the default must carry it.
+    if (command[0] === 'uiautomator') return 'UI hierchary dumped to: /sdcard/window_dump.xml';
     if (command[0] === 'cat') return MINIMAL_XML;
     if (command[0] === 'logcat') return '';
     return '';
@@ -623,6 +625,40 @@ describe('centerOf', () => {
   });
   test('rounds to integer', () => {
     expect(centerOf({ x: 0, y: 0, width: 101, height: 51 })).toEqual({ x: 51, y: 26 });
+  });
+});
+
+describe('tapPointOf', () => {
+  test('returns the node center when it has size', () => {
+    expect(tapPointOf(makeNode({ bounds: { x: 100, y: 200, width: 200, height: 100 } }))).toEqual({
+      x: 200,
+      y: 250,
+    });
+  });
+
+  test('zero-size node throws instead of tapping the screen origin', () => {
+    const err = (() => {
+      try {
+        tapPointOf(makeNode({ name: 'Save', bounds: { x: 0, y: 0, width: 0, height: 0 } }));
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as AdapterError).message).toContain('zero size');
+    expect((err as AdapterError).message).toContain('button "Save"');
+  });
+
+  test('zero width alone (collapsed view) throws', () => {
+    expect(() => tapPointOf(makeNode({ bounds: { x: 10, y: 20, width: 0, height: 40 } }))).toThrow(
+      AdapterError,
+    );
+  });
+
+  test('zero height alone throws', () => {
+    expect(() => tapPointOf(makeNode({ bounds: { x: 10, y: 20, width: 40, height: 0 } }))).toThrow(
+      AdapterError,
+    );
   });
 });
 
@@ -1180,6 +1216,13 @@ describe('AndroidAdapter.click', () => {
     const { adapter } = makeAdapter({ nodes: [] });
     await expect(adapter.click('NotHere')).rejects.toThrow(AdapterError);
   });
+
+  test('zero-bounds node → throws, never taps (0,0)', async () => {
+    const node = makeNode({ bounds: { x: 0, y: 0, width: 0, height: 0 } });
+    const { adapter, adb } = makeAdapter({ nodes: [node] });
+    await expect(adapter.click('Save')).rejects.toThrow(AdapterError);
+    expect(adb.calls.filter((c) => c.args[1] === 'tap')).toHaveLength(0);
+  });
 });
 
 describe('AndroidAdapter.type', () => {
@@ -1229,6 +1272,13 @@ describe('AndroidAdapter.type', () => {
     const { adapter, adb } = makeAdapter({ nodes: [node] });
     await expect(adapter.type('Save', 'hi\tthere')).rejects.toThrow(AdapterError);
     expect(adb.calls.filter((c) => c.args[1] === 'text')).toHaveLength(0);
+  });
+
+  test('zero-bounds node → throws before focusing or typing', async () => {
+    const node = makeNode({ bounds: { x: 0, y: 0, width: 0, height: 0 } });
+    const { adapter, adb } = makeAdapter({ nodes: [node] });
+    await expect(adapter.type('Save', 'hello')).rejects.toThrow(AdapterError);
+    expect(adb.calls.filter((c) => c.args[0] === 'input')).toHaveLength(0);
   });
 });
 
@@ -1405,5 +1455,44 @@ describe('AdbUiAutomator', () => {
     expect(nodes).toHaveLength(3);
     expect(adb.calls.some((c) => c.args[0] === 'uiautomator')).toBe(true);
     expect(adb.calls.some((c) => c.args[0] === 'cat')).toBe(true);
+  });
+
+  test('removes the previous dump before dumping (rm → dump → cat)', async () => {
+    const { AdbUiAutomator } = await import('./uiautomator.js');
+    const adb = new FakeAdb();
+    await new AdbUiAutomator(adb).dump();
+    expect(adb.calls.map((c) => c.args)).toEqual([
+      ['rm', '-f', '/sdcard/window_dump.xml'],
+      ['uiautomator', 'dump', '/sdcard/window_dump.xml'],
+      ['cat', '/sdcard/window_dump.xml'],
+    ]);
+  });
+
+  test('accepts the corrected "hierarchy" spelling too', async () => {
+    const { AdbUiAutomator } = await import('./uiautomator.js');
+    const adb = new FakeAdb();
+    adb.setResponse(
+      'uiautomator dump /sdcard/window_dump.xml',
+      'UI hierarchy dumped to: /sdcard/window_dump.xml',
+    );
+    expect(await new AdbUiAutomator(adb).dump()).toHaveLength(3);
+  });
+
+  test('dump without the success line throws — never parses a stale file', async () => {
+    const { AdbUiAutomator } = await import('./uiautomator.js');
+    const adb = new FakeAdb();
+    // The real exit-0 failure mode; the previous dump is still readable on device.
+    adb.setResponse('uiautomator dump /sdcard/window_dump.xml', 'ERROR: could not get idle state.');
+    const err = await new AdbUiAutomator(adb).dump().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as AdapterError).message).toContain('could not get idle state');
+    expect(adb.calls.some((c) => c.args[0] === 'cat')).toBe(false);
+  });
+
+  test('silent dump failure (no output) throws', async () => {
+    const { AdbUiAutomator } = await import('./uiautomator.js');
+    const adb = new FakeAdb();
+    adb.setResponse('uiautomator dump /sdcard/window_dump.xml', '');
+    await expect(new AdbUiAutomator(adb).dump()).rejects.toThrow(AdapterError);
   });
 });
