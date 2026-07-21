@@ -318,6 +318,8 @@ export class AndroidAdapter implements Adapter {
           : await this.#screenSize();
       const { x1, y1, x2, y2 } = scrollSwipe(opts.direction, area, opts.amount);
       await this.#adb.shell(swipeArgs(x1, y1, x2, y2));
+      // Screen size may have changed (orientation, split-screen, etc.) — invalidate cache.
+      this.#screen = null;
     });
   }
 
@@ -382,6 +384,7 @@ export class AndroidAdapter implements Adapter {
       this.#emulator = null;
       this.#booted = false;
       this.#serial = null;
+      this.#screen = null;
       // Drop the binding so a re-`open` binds to the next emulator, not the dead one.
       if (this.#bind) this.#transport = null;
       if (pid === undefined) return;
@@ -414,9 +417,11 @@ export class AndroidAdapter implements Adapter {
       // and let the boot poll below surface it as a loud AdapterError.
       child.on('error', (err) => {
         this.#emulatorDown = `emulator ('${bin}') failed to launch: ${err.message}`;
+        this.#emulator = null;
       });
       child.on('exit', (code, signal) => {
         this.#emulatorDown ??= `emulator ('${bin}') exited before boot (${signal ?? code ?? 'unknown'})`;
+        this.#emulator = null;
       });
       this.#emulator = child;
     }

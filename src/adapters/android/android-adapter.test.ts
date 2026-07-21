@@ -859,8 +859,12 @@ describe('keycodeFor', () => {
   test('raw KEYCODE_ passthrough (normalized)', () => {
     expect(keycodeFor('KEYCODE_ENTER')).toBe('KEYCODE_ENTER');
   });
+  test('f1-f12 keys map to KEYCODE_F*', () => {
+    expect(keycodeFor('f1')).toBe('KEYCODE_F1');
+    expect(keycodeFor('f12')).toBe('KEYCODE_F12');
+  });
   test('unknown token → throws AdapterError', () => {
-    expect(() => keycodeFor('f12')).toThrow(AdapterError);
+    expect(() => keycodeFor('f13')).toThrow(AdapterError);
   });
 });
 

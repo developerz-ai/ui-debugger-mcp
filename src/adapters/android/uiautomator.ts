@@ -128,9 +128,11 @@ export function mapAndroidRole(className: string): string {
 
 // --- XML parsing (pure, no DOM dep) -----------------------------------------
 
-/** Decode the five XML entities (`&amp;` last so already-decoded `&` is not re-decoded). */
+/** Decode the five XML entities and numeric character references (`&amp;` last so already-decoded `&` is not re-decoded). */
 export function unescapeXml(value: string): string {
   return value
+    .replace(/&#x([0-9a-fA-F]+);/g, (_match, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_match, dec) => String.fromCodePoint(Number.parseInt(dec, 10)))
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
@@ -298,7 +300,14 @@ export function applyAndroidFilters(nodes: AndroidNode[], filters?: Filters): An
 
 /** Drop the internal flags — the public contract returns plain {@link Node}s. */
 export function toNode(node: AndroidNode): Node {
-  return { role: node.role, name: node.name, bounds: node.bounds, enabled: node.enabled };
+  const result: Node = {
+    role: node.role,
+    name: node.name,
+    bounds: node.bounds,
+    enabled: node.enabled,
+  };
+  if (node.resourceId !== '') result.testid = node.resourceId;
+  return result;
 }
 
 /** True when a node's center sits inside `region` — used to scope a read by `within`. */

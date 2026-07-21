@@ -230,6 +230,18 @@ const KEYCODE_ALIASES: Record<string, string> = {
   command: 'KEYCODE_META_LEFT',
   super: 'KEYCODE_META_LEFT',
   win: 'KEYCODE_META_LEFT',
+  f1: 'KEYCODE_F1',
+  f2: 'KEYCODE_F2',
+  f3: 'KEYCODE_F3',
+  f4: 'KEYCODE_F4',
+  f5: 'KEYCODE_F5',
+  f6: 'KEYCODE_F6',
+  f7: 'KEYCODE_F7',
+  f8: 'KEYCODE_F8',
+  f9: 'KEYCODE_F9',
+  f10: 'KEYCODE_F10',
+  f11: 'KEYCODE_F11',
+  f12: 'KEYCODE_F12',
 };
 
 /** Map one key token onto a `KEYCODE_*` name (alias · single letter/digit · verbatim KEYCODE_). */
