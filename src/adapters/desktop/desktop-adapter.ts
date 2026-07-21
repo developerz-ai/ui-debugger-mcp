@@ -32,7 +32,14 @@ import type {
 } from '../contract.js';
 import { type AtspiSource, BusctlAtspi, shapeNodes } from './atspi.js';
 import { type ScreenCapture, Screenshot } from './capture.js';
-import { centerOf, type PointerInput, type WindowMatch, Xdotool } from './input.js';
+import {
+  centerOf,
+  clickPointOf,
+  expectOnScreen,
+  type PointerInput,
+  type WindowMatch,
+  Xdotool,
+} from './input.js';
 import { desktopEnv } from './proc.js';
 
 /** Default cap on `readState` so the tree stays small (overridable via `limit`). */
@@ -198,7 +205,7 @@ export class DesktopAdapter implements Adapter {
 
   async click(target: NodeRef): Promise<void> {
     await this.#run('click', async () => {
-      const { x, y } = centerOf((await this.#resolve(target)).bounds);
+      const { x, y } = clickPointOf(await this.#resolve(target));
       await this.#input.clickPoint(x, y);
     });
   }
@@ -206,7 +213,7 @@ export class DesktopAdapter implements Adapter {
   async type(target: NodeRef, text: string): Promise<void> {
     // Contract: focus the target first, then type. Click its center to focus.
     await this.#run('type', async () => {
-      const { x, y } = centerOf((await this.#resolve(target)).bounds);
+      const { x, y } = clickPointOf(await this.#resolve(target));
       await this.#input.clickPoint(x, y);
       await this.#input.typeText(text);
     });
@@ -290,12 +297,17 @@ export class DesktopAdapter implements Adapter {
     return node;
   }
 
-  /** Resolve a scope `within` (a {@link Node} or a selector) to an on-screen rectangle. */
+  /**
+   * Resolve a scope `within` (a {@link Node} or a selector) to an on-screen rectangle.
+   *
+   * A zero-size region is rejected, not scoped to: it would park the scroll cursor at
+   * the screen origin and (via `centerWithin`) read as a region nothing sits in.
+   */
   async #regionBounds(within: NodeRef): Promise<Bounds> {
-    if (typeof within !== 'string') return within.bounds;
+    if (typeof within !== 'string') return expectOnScreen(within);
     const node = await this.find({ query: within });
     if (!node) throw new AdapterError(`desktop: \`within\` target not found: ${within}`);
-    return node.bounds;
+    return expectOnScreen(node);
   }
 
   /** Pick the window to drive: configured match wins, else a non-empty `open` title fallback. */

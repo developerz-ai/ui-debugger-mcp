@@ -18,8 +18,13 @@ const atspiNode = (over: Partial<AtspiNode>): AtspiNode => ({
   bounds: { x: 10, y: 20, width: 100, height: 40 }, // center (60, 40)
   enabled: true,
   visible: true,
+  measured: true,
   ...over,
 });
+
+/** A node AT-SPI could not measure (no `Component`) — zeros are a placeholder. */
+const unmeasured = (name: string): AtspiNode =>
+  atspiNode({ name, measured: false, bounds: { x: 0, y: 0, width: 0, height: 0 } });
 
 class FakeAtspi implements AtspiSource {
   constructor(readonly nodes: AtspiNode[]) {}
@@ -124,6 +129,42 @@ test('type focuses (click) then types', async () => {
   const { adapter, input } = build([atspiNode({ name: 'OK' })]);
   await adapter.type('OK', 'hello');
   expect(input.calls).toEqual(['click:60,40', 'type:hello']);
+});
+
+// --- zero-size targets ------------------------------------------------------
+
+test('click on a zero-size node throws instead of clicking the screen corner', async () => {
+  // AT-SPI reported no Component (or the widget is not laid out yet): its "center" is
+  // (0,0). The old code clicked the desktop's top-left and reported success.
+  const { adapter, input } = build([unmeasured('App root')]);
+  await expect(adapter.click('App root')).rejects.toThrow(/has zero size \(0x0\)/);
+  await expect(adapter.click('App root')).rejects.toThrow(AdapterError);
+  expect(input.calls).toEqual([]);
+});
+
+test('type into a zero-size node throws before any keystroke', async () => {
+  const { adapter, input } = build([unmeasured('Ghost field')]);
+  await expect(adapter.type('Ghost field', 'secret')).rejects.toThrow(AdapterError);
+  expect(input.calls).toEqual([]); // no click, and the text never reaches the screen
+});
+
+test('a zero-size Node ref is rejected too (not just resolved selectors)', async () => {
+  const { adapter } = build([]);
+  const node: Node = {
+    role: 'button',
+    name: '',
+    bounds: { x: 40, y: 40, width: 0, height: 10 },
+    enabled: true,
+  };
+  await expect(adapter.click(node)).rejects.toThrow(/button has zero size \(0x10\)/);
+});
+
+test('scroll within a zero-size region throws instead of parking at the origin', async () => {
+  const { adapter, input } = build([unmeasured('Panel')]);
+  await expect(adapter.scroll({ direction: 'down', within: 'Panel' })).rejects.toThrow(
+    AdapterError,
+  );
+  expect(input.calls).toEqual([]);
 });
 
 // --- pressKey ---------------------------------------------------------------

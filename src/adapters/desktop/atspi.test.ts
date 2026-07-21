@@ -124,6 +124,7 @@ const node = (over: Partial<AtspiNode>): AtspiNode => ({
   bounds: { x: 0, y: 0, width: 10, height: 10 },
   enabled: true,
   visible: true,
+  measured: true,
   ...over,
 });
 
@@ -165,6 +166,17 @@ test('shapeNodes applies query, filters, region, limit and returns plain Nodes',
   const out = shapeNodes(nodes, { query: 'Save' }, 200, { x: 0, y: 0, width: 100, height: 100 });
   expect(out.map((n) => n.name)).toEqual(['Save']); // 'Save copy' excluded by region
   expect(out[0]).not.toHaveProperty('visible');
+});
+
+test('shapeNodes excludes unmeasured nodes from a region scope', () => {
+  // A Component-less node's bounds are a placeholder, not a rect at (0,0) — scoping
+  // by `within` must not report it as sitting in a region that covers the origin.
+  const nodes = [
+    node({ name: 'App root', measured: false, bounds: { x: 0, y: 0, width: 0, height: 0 } }),
+    node({ name: 'Save', bounds: { x: 10, y: 10, width: 10, height: 10 } }),
+  ];
+  const out = shapeNodes(nodes, {}, 200, { x: 0, y: 0, width: 100, height: 100 });
+  expect(out.map((n) => n.name)).toEqual(['Save']);
 });
 
 test('shapeNodes caps by limit', () => {
@@ -231,9 +243,11 @@ test('BusctlAtspi.readTree fails loud on a malformed reply', async () => {
   await expect(new BusctlAtspi({ exec }).readTree()).rejects.toThrow(AdapterError);
 });
 
-test('BusctlAtspi.readTree survives a node without Component (GetExtents rejects)', async () => {
+test('BusctlAtspi.readTree marks a node without Component unmeasured', async () => {
   // Application roots / toolkit fillers don't implement Component — busctl exits
-  // non-zero on GetExtents. The walk must keep every node, with zero bounds there.
+  // non-zero on GetExtents. The walk keeps every node, but a bounds-less one is
+  // flagged `measured: false`: its zeros are a placeholder, not a rect at the origin
+  // (clicking it must fail loud, not land on the top-left of the desktop).
   const bus = fakeBus();
   const exec = async (args: string[]): Promise<string> => {
     if (args.includes('GetExtents') && args[4] === '/app') {
@@ -245,6 +259,7 @@ test('BusctlAtspi.readTree survives a node without Component (GetExtents rejects
   };
   const nodes = await new BusctlAtspi({ exec }).readTree();
   expect(nodes.map((n) => n.name)).toEqual(['My App', 'OK']);
-  expect(nodes[0]?.bounds).toEqual({ x: 0, y: 0, width: 0, height: 0 });
+  expect(nodes[0]?.measured).toBe(false);
+  expect(nodes[1]?.measured).toBe(true);
   expect(nodes[1]?.bounds).toEqual({ x: 10, y: 20, width: 100, height: 40 });
 });

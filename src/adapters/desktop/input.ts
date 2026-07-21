@@ -12,7 +12,7 @@
  */
 
 import { AdapterError } from '../../errors.js';
-import type { Bounds, ScrollDirection } from '../contract.js';
+import type { Bounds, Node, ScrollDirection } from '../contract.js';
 import { desktopEnv, type Exec, errMessage, isEnoent, makeExec } from './proc.js';
 
 const XDOTOOL = 'xdotool';
@@ -104,6 +104,33 @@ export function centerOf(bounds: Bounds): { x: number; y: number } {
     x: Math.round(bounds.x + bounds.width / 2),
     y: Math.round(bounds.y + bounds.height / 2),
   };
+}
+
+/**
+ * The on-screen rectangle of a {@link Node}, or a loud failure when it has none.
+ *
+ * AT-SPI nodes that expose no `Component` (app roots, toolkit fillers) carry
+ * placeholder zero bounds (`atspi.ts` marks them `measured: false`), and a real
+ * widget reports `0x0` until it is laid out. Either way the "center" is the screen
+ * origin — clicking it would hit the top-left of the desktop and read as success.
+ * (The android adapter applies the same rule in `tapPointOf`.)
+ */
+export function expectOnScreen(node: Node): Bounds {
+  const { width, height } = node.bounds;
+  if (width <= 0 || height <= 0) {
+    const label = node.name === '' ? node.role : `${node.role} "${node.name}"`;
+    throw new AdapterError(
+      `desktop: ${label} has zero size (${width}x${height}) — it is not on screen ` +
+        '(no AT-SPI Component, or not laid out yet); wait for it to render or scroll it ' +
+        'into view, then re-read its bounds',
+    );
+  }
+  return node.bounds;
+}
+
+/** Where a `click`/`type` lands on a {@link Node} — its center, zero-size guarded. */
+export function clickPointOf(node: Node): { x: number; y: number } {
+  return centerOf(expectOnScreen(node));
 }
 
 /** `mousemove --sync x y click <button>` — move then click in one synced invocation. */

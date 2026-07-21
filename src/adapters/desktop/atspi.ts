@@ -31,6 +31,9 @@ const ROOT_PATH = '/org/a11y/atspi/accessible/root';
 /** `ATSPI_COORD_TYPE_SCREEN` — extents relative to the screen, for clicks + vision. */
 const COORD_SCREEN = 0;
 
+/** Placeholder bounds for a node with no `Component` — paired with `measured: false`. */
+const UNMEASURED_BOUNDS: Bounds = { x: 0, y: 0, width: 0, height: 0 };
+
 /** Walk caps — keep the (spawn-heavy) tree read bounded. */
 const DEFAULT_MAX_NODES = 200;
 const DEFAULT_MAX_DEPTH = 25;
@@ -44,6 +47,12 @@ const STATE_VISIBLE = 30;
 /** A node plus the computed `visible` flag backing the `visible_eq` filter. */
 export interface AtspiNode extends Node {
   visible: boolean;
+  /**
+   * False when the node exposes no `Component` (app roots, toolkit fillers): its
+   * `bounds` are **unknown**, not a rect at the screen origin. Clicks on such a node
+   * fail loud (`input.ts#expectOnScreen`) and region scoping skips it.
+   */
+  measured: boolean;
 }
 
 /** A D-Bus object reference on the a11y bus — `(unique-name, object-path)`. */
@@ -308,7 +317,9 @@ export function shapeNodes(
   region?: Bounds,
 ): Node[] {
   let out = nodes;
-  if (region) out = out.filter((n) => centerWithin(n, region));
+  // Unmeasured nodes have no position: their placeholder center (0,0) would falsely
+  // land inside any region touching the screen origin.
+  if (region) out = out.filter((n) => n.measured && centerWithin(n, region));
   if (opts.query) {
     const parsed = parseRoleNameQuery(opts.query);
     out = out.filter((n) => matchesQuery(n, parsed));
@@ -434,17 +445,16 @@ export class BusctlAtspi implements AtspiSource {
     const { enabled, visible } = stateFlags(
       parseStateWords(firstReturn(await this.#call(ref, A11Y_IFACE, 'GetState'), 'GetState')),
     );
-    // Application roots + some toolkit filler nodes don't implement Component,
-    // so busctl exits non-zero on GetExtents. Fall back to zero bounds instead
-    // of killing the whole walk; role/name/state failures above stay loud.
+    // Application roots + some toolkit filler nodes don't implement Component, so
+    // busctl exits non-zero on GetExtents. Keep the node (killing the whole walk over
+    // an unmeasurable filler helps nobody) but mark it `measured: false` — the zeros
+    // below are a placeholder, never geometry. Role/name/state failures stay loud.
     const extents = await this.#call(ref, COMPONENT_IFACE, 'GetExtents', [
       'u',
       String(COORD_SCREEN),
     ]).catch(() => null);
     const bounds =
-      extents === null
-        ? { x: 0, y: 0, width: 0, height: 0 }
-        : parseExtents(firstReturn(extents, 'GetExtents'));
-    return { role, name, bounds, enabled, visible };
+      extents === null ? UNMEASURED_BOUNDS : parseExtents(firstReturn(extents, 'GetExtents'));
+    return { role, name, bounds, enabled, visible, measured: extents !== null };
   }
 }
