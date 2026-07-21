@@ -16,6 +16,15 @@ import { toToolResult } from './result.js';
 /** Selectable top-level findings keys, derived from the findings schema. */
 const FindingsField = FindingsSchema.keyof();
 
+/**
+ * Declared output: the findings object with every key optional.
+ *
+ * A `fields` projection returns only the requested keys, so no key can be
+ * promised — an all-required schema would make every sparse read fail output
+ * validation. Types stay exact per key; only presence is loose.
+ */
+const FindingsOutputSchema = FindingsSchema.partial();
+
 /** Build the `get_findings` outer tool bound to the debug service. */
 export function getFindingsTool(service: DebugApi): McpTool {
   return {
@@ -31,6 +40,9 @@ export function getFindingsTool(service: DebugApi): McpTool {
             'Pass wait (ms) to long-poll until the run settles; pass fields to return only some keys. ' +
             'A run that auto-ended (wall-clock timeout or client disconnect) stays readable under its ' +
             'id until end_session or the next start_debug.',
+          annotations: {
+            readOnlyHint: true,
+          },
           inputSchema: {
             session_id: z.string().min(1).describe('The id returned by start_debug.'),
             wait: z
@@ -47,11 +59,17 @@ export function getFindingsTool(service: DebugApi): McpTool {
               .min(1)
               .optional()
               .describe(
-                'Project a subset of findings keys (e.g. ["status","bugs"]). Omit for the whole object.',
+                'Project a subset of findings keys (e.g. ["status","bugs"]). Omit for the whole ' +
+                  'object, whose lists are capped at 20 items; a projected read returns them in full.',
               ),
           },
+          outputSchema: FindingsOutputSchema,
         },
-        async (args) => toToolResult(await service.getFindings(args)),
+        // Cap the lists only on a whole-object read: the steering note points back
+        // at `fields=[...]`, so a projected read must come back complete or the
+        // recovery path it names would be a lie.
+        async (args) =>
+          toToolResult(await service.getFindings(args), { capLists: args.fields === undefined }),
       );
     },
   };

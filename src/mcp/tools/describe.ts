@@ -10,6 +10,7 @@
 import { z } from 'zod';
 import type { DebugApi } from '../../services/debug-service.js';
 import type { McpTool } from '../server.js';
+import { DescribeResultSchema } from './output.js';
 import { toToolResult } from './result.js';
 
 /** Build the `describe` outer tool bound to the debug service. */
@@ -25,6 +26,9 @@ export function describeTool(service: DebugApi): McpTool {
             'List the configured targets for this project (name, adapter, managed|attach, whether wired, ' +
             'and web url/headless) plus the resolved per-role models and workspace. Call this first to pick ' +
             'a valid target for start_debug. Pass target to narrow to one.',
+          annotations: {
+            readOnlyHint: true,
+          },
           inputSchema: {
             target: z
               .string()
@@ -32,6 +36,7 @@ export function describeTool(service: DebugApi): McpTool {
               .optional()
               .describe('Optional target name to narrow the catalog to a single entry.'),
           },
+          outputSchema: DescribeResultSchema,
         },
         (args) => toToolResult(service.describe(args)),
       );

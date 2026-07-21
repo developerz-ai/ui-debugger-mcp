@@ -155,6 +155,106 @@ describe('integration: real MCP server + outer tools + fake DebugService', () =>
     ]);
   });
 
+  test('every tool carries its declared annotations in tools/list', async () => {
+    const { tools } = await client.listTools();
+    const annotations = new Map(tools.map((t) => [t.name, t.annotations]));
+
+    expect(annotations.get('start_debug')).toMatchObject({
+      destructiveHint: false,
+      openWorldHint: true,
+    });
+    expect(annotations.get('send_message')).toMatchObject({ destructiveHint: false });
+    expect(annotations.get('get_findings')).toMatchObject({ readOnlyHint: true });
+    expect(annotations.get('describe')).toMatchObject({ readOnlyHint: true });
+    expect(annotations.get('end_session')).toMatchObject({ idempotentHint: true });
+  });
+
+  test('a thrown service error surfaces as isError:true, not a protocol-level failure', async () => {
+    // get_findings for an id nobody started throws SessionNotFoundError inside the
+    // handler. The SDK must turn that into a normal (non-throwing) tool result with
+    // isError:true — a caller polling findings shouldn't need a try/catch around
+    // every call just to notice a stale id.
+    const res = callResult(
+      await client.callTool({
+        name: 'get_findings',
+        arguments: { session_id: 'no-such-session' },
+      }),
+    );
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toMatch(/no active debug session/i);
+  });
+
+  test('every tool declares an object outputSchema in tools/list', async () => {
+    const { tools } = await client.listTools();
+    const schemas = new Map(tools.map((t) => [t.name, t.outputSchema]));
+
+    for (const [name, schema] of schemas) {
+      expect(schema, `${name} declares no outputSchema`).toBeDefined();
+      expect(schema?.type).toBe('object');
+    }
+    expect(schemas.get('start_debug')?.required).toEqual(['session_id']);
+    expect(schemas.get('send_message')?.required).toEqual(['ok', 'session_id']);
+    expect(schemas.get('end_session')?.required).toEqual(['ok', 'session_id']);
+    expect(schemas.get('describe')?.required).toEqual(['targets', 'models', 'workspace']);
+    // get_findings can project a subset (`fields`), so no key is promised.
+    expect(schemas.get('get_findings')?.required).toBeUndefined();
+    expect(Object.keys(schemas.get('get_findings')?.properties ?? {})).toEqual([
+      'status',
+      'steps',
+      'bugs',
+      'visual',
+      'summary',
+      'evidence',
+    ]);
+  });
+
+  test('every tool result carries structuredContent the client validates', async () => {
+    // listTools compiles + caches the client-side output validators; a payload
+    // that misses its declared schema makes the following callTool throw.
+    await client.listTools();
+
+    const start = callResult(
+      await client.callTool({ name: 'start_debug', arguments: { target: 'web', goal: 'typed' } }),
+    );
+    const { session_id } = start.structuredContent as { session_id: string };
+    expect(start.structuredContent).toEqual(JSON.parse(resultText(start)));
+
+    const send = callResult(
+      await client.callTool({ name: 'send_message', arguments: { session_id, message: 'hi' } }),
+    );
+    expect(send.structuredContent).toEqual({ ok: true, session_id });
+
+    const described = callResult(await client.callTool({ name: 'describe', arguments: {} }));
+    expect(described.structuredContent).toEqual(JSON.parse(resultText(described)));
+
+    const findings = callResult(
+      await client.callTool({ name: 'get_findings', arguments: { session_id } }),
+    );
+    expect(findings.structuredContent).toEqual(JSON.parse(resultText(findings)));
+
+    const ended = callResult(
+      await client.callTool({ name: 'end_session', arguments: { session_id } }),
+    );
+    expect(ended.structuredContent).toEqual({ ok: true, session_id });
+  });
+
+  test('a projected get_findings read still satisfies the declared outputSchema', async () => {
+    await client.listTools();
+    const startRes = callResult(
+      await client.callTool({ name: 'start_debug', arguments: { target: 'web', goal: 'sparse' } }),
+    );
+    const { session_id } = JSON.parse(resultText(startRes)) as { session_id: string };
+
+    const findRes = callResult(
+      await client.callTool({
+        name: 'get_findings',
+        arguments: { session_id, fields: ['status', 'bugs'] },
+      }),
+    );
+    expect(findRes.isError).toBeFalsy();
+    expect(findRes.structuredContent).toEqual({ status: 'running', bugs: [] });
+  });
+
   test('describe returns Zod-valid output', async () => {
     const DescribeResultSchema = z.object({
       targets: z.array(

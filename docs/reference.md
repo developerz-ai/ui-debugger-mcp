@@ -4,6 +4,35 @@
 
 Five conversational tools exposed to the smart agent (caller). All params validated via Zod.
 
+Every tool declares an `outputSchema` (in `src/mcp/tools/output.ts`, pinned to the
+service return type via `satisfies` so drift fails typecheck) — the SDK validates
+`structuredContent` against it, and clients that compile `tools/list` get a typed
+result instead of having to scrape the pretty-printed `text` block (which still
+rides alongside it, unchanged, for logs/back-compat).
+
+Each tool also carries MCP **annotations** (hints for how a client should
+treat/gate the call):
+
+| Tool | Annotations |
+|------|-------------|
+| `describe` | `readOnlyHint: true` |
+| `start_debug` | `destructiveHint: false`, `openWorldHint: true` |
+| `send_message` | `destructiveHint: false` |
+| `get_findings` | `readOnlyHint: true` |
+| `end_session` | `idempotentHint: true` |
+
+Evidence paths (screenshots, `replay.mp4`, logs) in a result are additionally
+returned as `resource_link` content items (`file://` URIs), not just inline path
+strings — a client can act on them without parsing text. A run failure surfaces
+as `isError: true` on the result, never a protocol-level error.
+
+Truncation applies to `get_findings` only, and only to a whole-object read: a
+`steps`/`bugs`/`visual` array over 20 items is capped, with a trailing text note
+steering the caller to `get_findings` with a `fields` projection — a projected
+read returns those arrays in full. No other tool caps anything; `describe`
+always returns the complete target catalog, since there is no second call that
+could reach an omitted target.
+
 ---
 
 ### `describe`
@@ -54,7 +83,7 @@ Poll the run: status plus the full structured findings snapshot. Supports long-p
 |-------|------|----------|-------------|
 | `session_id` | `string` | yes | From `start_debug`. |
 | `wait` | `number` (int, ms, 0–120 000) | no | Long-poll up to this many ms for a terminal verdict before reading. Omit or `0` to read immediately. |
-| `fields` | `FindingsField[]` | no | Project a subset of findings keys (e.g. `["status","bugs"]`). Omit for the whole object. Valid values: `status`, `steps`, `bugs`, `visual`, `summary`, `evidence`. |
+| `fields` | `FindingsField[]` | no | Project a subset of findings keys (e.g. `["status","bugs"]`). Omit for the whole object, whose lists are capped at 20 items; a projected read returns them in full. Valid values: `status`, `steps`, `bugs`, `visual`, `summary`, `evidence`. |
 
 **Returns** — `Findings` object (see schema below), possibly projected.
 
@@ -147,3 +176,13 @@ get_findings wait=30000           # long-poll for verdict
   └─ repeat if status="running"
 end_session                       # release lock when done
 ```
+
+## MCP Registry
+
+Published in the official [MCP Registry](https://modelcontextprotocol.io/registry)
+under `io.github.developerz-ai/ui-debugger-mcp` (`package.json`'s `mcpName` field;
+metadata lives in `server.json` at the repo root, validated against the
+registry's `server.schema.json`). Any client that discovers servers via the
+registry — rather than a hand-written `.mcp.json` entry — can find and install it
+by that name; see [`PUBLISHING.md`](../PUBLISHING.md) for the `mcp-publisher`
+release step.

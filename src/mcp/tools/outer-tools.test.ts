@@ -122,3 +122,112 @@ test('toToolResult omits structuredContent for a non-record value', () => {
   expect(result.structuredContent).toBeUndefined();
   expect(text(result)).toBe('"hi"');
 });
+
+test('toToolResult links absolute screenshot/evidence paths as resource_link content', () => {
+  const result = toToolResult({
+    status: 'passed',
+    steps: [{ step: 'click #save', ok: true, screenshot: '/ws/screenshots/001-click.png' }],
+    bugs: [{ kind: 'console', detail: 'TypeError', evidence: 'line 42' }],
+    visual: [
+      { issue: 'blurry', where: 'header', severity: 'low', screenshot: '/ws/screenshots/002.png' },
+    ],
+    evidence: '/ws/replay.mp4',
+  });
+
+  const links = result.content.filter((c) => c.type === 'resource_link');
+  expect(links).toHaveLength(3);
+  expect(links.map((l) => (l as { uri: string }).uri)).toEqual(
+    expect.arrayContaining([
+      'file:///ws/screenshots/001-click.png',
+      'file:///ws/screenshots/002.png',
+      'file:///ws/replay.mp4',
+    ]),
+  );
+  // Non-path evidence ("line 42") never becomes a resource_link.
+  expect(links.some((l) => (l as { uri: string }).uri.includes('line'))).toBe(false);
+});
+
+test('toToolResult dedupes resource_link paths seen more than once', () => {
+  const result = toToolResult({
+    steps: [{ step: 'replay', ok: true, screenshot: '/ws/replay.mp4' }],
+    evidence: '/ws/replay.mp4',
+  });
+  const links = result.content.filter((c) => c.type === 'resource_link');
+  expect(links).toHaveLength(1);
+});
+
+test('toToolResult caps an over-long array only when the caller opts in', () => {
+  const steps = Array.from({ length: 25 }, (_, i) => ({ step: `s${i}`, ok: true }));
+  const result = toToolResult({ status: 'passed', steps }, { capLists: true });
+
+  const parsed = JSON.parse(text(result)) as { steps: unknown[] };
+  expect(parsed.steps).toHaveLength(20);
+  expect((result.structuredContent as { steps: unknown[] }).steps).toHaveLength(20);
+
+  // The note names the retrieval that really returns the dropped items:
+  // a projected `get_findings fields=["steps"]` read, which is never capped.
+  const notes = result.content
+    .filter((c) => c.type === 'text')
+    .map((c) => (c as { text: string }).text);
+  expect(notes.some((t) => t.includes('get_findings with fields=["steps"]'))).toBe(true);
+});
+
+test('toToolResult leaves arrays whole by default — no cap without a recovery path', () => {
+  const targets = Array.from({ length: 25 }, (_, i) => ({ name: `t${i}` }));
+  const result = toToolResult({ targets, workspace: 'w' });
+
+  expect((result.structuredContent as { targets: unknown[] }).targets).toHaveLength(25);
+  expect((JSON.parse(text(result)) as { targets: unknown[] }).targets).toHaveLength(25);
+  expect(result.content).toHaveLength(1);
+});
+
+test('toToolResult leaves short arrays untouched and adds no steering note', () => {
+  const result = toToolResult(
+    { status: 'passed', steps: [{ step: 's0', ok: true }] },
+    { capLists: true },
+  );
+  expect(result.content).toHaveLength(1);
+});
+
+test('describe returns every configured target, past the cap', async () => {
+  const targets = Array.from({ length: 25 }, (_, i) => ({
+    name: `t${i}`,
+    adapter: 'browser' as const,
+    mode: 'managed' as const,
+    operational: true,
+  }));
+  const { api } = fakeApi();
+  const describe = outerTools({
+    ...api,
+    describe: () => ({
+      targets,
+      models: { driver: 'd', vision: 'v', summary: 's' },
+      workspace: 'w',
+    }),
+  }).find((t) => t.name === 'describe');
+  if (!describe) throw new Error('missing tool');
+
+  const res = await capture(describe).handler({});
+  expect((res.structuredContent as { targets: unknown[] }).targets).toHaveLength(25);
+  expect(res.content).toHaveLength(1);
+});
+
+test('get_findings caps a whole-object read but returns a projected read in full', async () => {
+  const steps = Array.from({ length: 25 }, (_, i) => ({ step: `s${i}`, ok: true }));
+  const { api } = fakeApi();
+  const getFindings = outerTools({
+    ...api,
+    getFindings: async ({ fields }: GetFindingsInput) =>
+      fields ? { steps } : { status: 'running' as const, steps, bugs: [], visual: [] },
+  }).find((t) => t.name === 'get_findings');
+  if (!getFindings) throw new Error('missing tool');
+  const { handler } = capture(getFindings);
+
+  const whole = await handler({ session_id: 's1' });
+  expect((whole.structuredContent as { steps: unknown[] }).steps).toHaveLength(20);
+
+  // The steering note's own advice, followed: the projected read comes back complete.
+  const projected = await handler({ session_id: 's1', fields: ['steps'] });
+  expect((projected.structuredContent as { steps: unknown[] }).steps).toHaveLength(25);
+  expect(projected.content).toHaveLength(1);
+});

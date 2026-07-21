@@ -10,6 +10,7 @@
 import { z } from 'zod';
 import type { DebugApi } from '../../services/debug-service.js';
 import type { McpTool } from '../server.js';
+import { StartResultSchema } from './output.js';
 import { toToolResult } from './result.js';
 
 /** Build the `start_debug` outer tool bound to the debug service. */
@@ -26,6 +27,10 @@ export function startDebugTool(service: DebugApi): McpTool {
             '(e.g. "web"). It drives the UI autonomously and gathers findings (functional bugs + ' +
             'visual feedback). One run per project at a time. Returns { session_id }; then poll ' +
             'get_findings, steer with send_message, and close with end_session.',
+          annotations: {
+            destructiveHint: false,
+            openWorldHint: true,
+          },
           inputSchema: {
             target: z
               .string()
@@ -61,6 +66,7 @@ export function startDebugTool(service: DebugApi): McpTool {
                 'Wall-clock cap in SECONDS before the run auto-ends (frees the browser/profile), counted from this call — launching the browser and the first navigation spend it too. Omit for the default (300s). Max 2_147_483 (Node timer ceiling once × 1000).',
               ),
           },
+          outputSchema: StartResultSchema,
         },
         async ({ timeout, ...rest }) =>
           toToolResult(
