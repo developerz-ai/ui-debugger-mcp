@@ -157,3 +157,7 @@ Web → DOM. Desktop/mobile → a11y tree, fall back to vision/screenshots.
 - `docs/idea/models.md` — the three actors (smart agent / fast guy / vision guy), `look`, why CDP.
 - `docs/idea/config.md` — `.mcp.json` + `.ui-debugger-mcp.json`.
 - `docs/idea/workspace.md` — per-project space + logs.
+
+## Note
+
+Do not use git worktrees — work directly in this checkout. If a task is big enough to need subagents, run them as a team in this same checkout: split the work into disjoint pieces so no two agents touch the same files.
