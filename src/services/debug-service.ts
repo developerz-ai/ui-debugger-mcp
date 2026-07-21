@@ -320,9 +320,7 @@ export class DebugService implements DebugApi {
     fields,
   }: GetFindingsInput): Promise<Findings | Partial<Findings>> {
     const session = this.#requireReadable(session_id);
-    return fields && fields.length > 0
-      ? session.snapshot(fields, wait)
-      : session.snapshot(undefined, wait);
+    return fields ? session.snapshot(fields, wait) : session.snapshot(undefined, wait);
   }
 
   /** List configured targets (the whole catalog, or one when named) plus resolved models/workspace. */

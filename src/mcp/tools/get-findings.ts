@@ -44,6 +44,7 @@ export function getFindingsTool(service: DebugApi): McpTool {
               ),
             fields: z
               .array(FindingsField)
+              .min(1)
               .optional()
               .describe(
                 'Project a subset of findings keys (e.g. ["status","bugs"]). Omit for the whole object.',
