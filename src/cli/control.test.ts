@@ -13,16 +13,23 @@ import { runStatus, runStop } from './control.js';
 let cwd: string;
 const logs: string[] = [];
 const origLog = console.log;
+let priorExitCode: number | undefined;
 
 beforeEach(async () => {
   cwd = await mkdtemp(join(tmpdir(), 'cli-'));
   logs.length = 0;
+  priorExitCode = process.exitCode as number | undefined;
   console.log = (...args: unknown[]) => {
     logs.push(args.join(' '));
   };
 });
 afterEach(async () => {
   console.log = origLog;
+  // `runStop` reports failure by setting `process.exitCode` — a process-global the
+  // test runner reads at the end, so a leak here fails the whole suite with 0 fails.
+  // `?? 0` matters: Bun ignores an `undefined` assignment, so restoring the (usually
+  // undefined) prior value directly would leave the 1 in place.
+  process.exitCode = priorExitCode ?? 0;
   await rm(cwd, { recursive: true, force: true });
 });
 
@@ -156,16 +163,15 @@ test('a failed signal rolls the mark back — a live run is never reported stopp
   console.error = (...args: unknown[]) => {
     errors.push(args.join(' '));
   };
-  const priorExitCode = process.exitCode;
 
   try {
     await runStop(cwd, kill);
   } finally {
     console.error = origError;
-    process.exitCode = priorExitCode;
   }
 
   expect(errors.join('\n')).toContain('failed to signal server');
+  expect(process.exitCode).toBe(1); // the CLI must exit non-zero on a failed stop
   expect((await readState(stateJson))?.status).toBe('running'); // teardown never started
 });
 
