@@ -143,6 +143,15 @@ test('start assembles, locks the cwd, opens, and runs in the background', async 
   expect(manager.get(CWD).status).toBe('running');
 });
 
+test('start passes the per-run url through to the builder', async () => {
+  const { build, log } = fakeBuilder();
+  const svc = makeService(build);
+
+  await svc.start({ target: 'web', goal: 'log in', url: 'https://staging.example.com' });
+
+  expect(log.params[0]?.url).toBe('https://staging.example.com');
+});
+
 test('start refuses a second run for the same cwd (busy), without rebuilding', async () => {
   const { build, log } = fakeBuilder();
   const svc = makeService(build);
@@ -242,6 +251,18 @@ test('getFindings rejects a stale/unknown session id', async () => {
   await expect(svc.getFindings({ session_id: 'ghost' })).rejects.toThrow(SessionNotFoundError);
 });
 
+test('getFindings passes `wait` through to the session, long-polling for the settled verdict', async () => {
+  // A run that settles a beat later: without `wait` reaching `session.snapshot`,
+  // this read would return the live `running` snapshot instead of waiting for it.
+  const delayedRun: LoopRunner = () => tick(30);
+  const svc = makeService(fakeBuilder({ run: delayedRun }).build);
+  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
+
+  const findings = await svc.getFindings({ session_id, wait: 1_000 });
+
+  expect(findings.status).toBe('failed'); // settled by the time the long-poll returns
+});
+
 // --- describe ---------------------------------------------------------------
 
 test('describe lists every configured target with mode + operational flags', () => {
@@ -269,6 +290,32 @@ test('describe lists every configured target with mode + operational flags', () 
     adapter: 'android',
     mode: 'attach',
     operational: true, // android adapter is shipped — never advertised as inoperative
+  });
+});
+
+test('describe reports a browser attach target (cdpUrl set) as mode "attach"', () => {
+  const attachConfig: ResolvedConfig = {
+    ...CONFIG,
+    targets: {
+      ...CONFIG.targets,
+      web: { adapter: 'browser', cdpUrl: 'http://127.0.0.1:9222', headless: true },
+    },
+  };
+  const svc = new DebugService({
+    manager,
+    config: attachConfig,
+    cwd: CWD,
+    build: fakeBuilder().build,
+    now: () => NOW,
+  });
+
+  expect(svc.describe({ target: 'web' }).targets[0]).toEqual({
+    name: 'web',
+    adapter: 'browser',
+    mode: 'attach',
+    operational: true,
+    url: undefined,
+    headless: true,
   });
 });
 
