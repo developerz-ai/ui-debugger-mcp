@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { AdapterError } from '../../errors.js';
+import { AdapterError, ExecTimeoutError } from '../../errors.js';
 import type { Node, ScrollDirection } from '../contract.js';
 import {
   centerOf,
@@ -138,6 +138,27 @@ test('activateWindow keeps polling on a no-match (empty stderr) and times out lo
     /window not found within 200ms/,
   );
   expect(fake.calls()).toBeGreaterThan(1); // it polled, not failed on the first miss
+});
+
+test('activateWindow surfaces an expired per-call cap instead of polling on', async () => {
+  // A timeout rejects with no stderr — the shape the no-match branch keeps polling on.
+  let calls = 0;
+  const exec = async (): Promise<string> => {
+    calls += 1;
+    throw new ExecTimeoutError('desktop: `xdotool` timed out after 10000ms (SIGKILLed)');
+  };
+  const input = new Xdotool({ exec });
+  await expect(input.activateWindow({ title: 'App' }, 10_000)).rejects.toThrow(ExecTimeoutError);
+  expect(calls).toBe(1); // a wedged xdotool is not "no window yet"
+});
+
+test('a wedged xdotool action surfaces verbatim, not re-prefixed', async () => {
+  const exec = async (): Promise<string> => {
+    throw new ExecTimeoutError('desktop: `xdotool` timed out after 10000ms (SIGKILLed)');
+  };
+  await expect(new Xdotool({ exec }).clickPoint(10, 20)).rejects.toThrow(
+    /^desktop: `xdotool` timed out after 10000ms/,
+  );
 });
 
 test('activateWindow throws immediately when xdotool reports a real error on stderr', async () => {

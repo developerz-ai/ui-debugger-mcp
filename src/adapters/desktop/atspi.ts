@@ -18,7 +18,7 @@
  * are pure and unit-tested; {@link BusctlAtspi} is the integration-validated runner.
  */
 
-import { AdapterError } from '../../errors.js';
+import { AdapterError, ExecTimeoutError } from '../../errors.js';
 import type { Bounds, Filters, FilterValue, Node, Query } from '../contract.js';
 import { capToLimit } from '../limit.js';
 import { desktopEnv, type Exec, makeExec } from './proc.js';
@@ -449,10 +449,15 @@ export class BusctlAtspi implements AtspiSource {
     // busctl exits non-zero on GetExtents. Keep the node (killing the whole walk over
     // an unmeasurable filler helps nobody) but mark it `measured: false` — the zeros
     // below are a placeholder, never geometry. Role/name/state failures stay loud.
+    // An expired per-call cap (`proc.ts`) is not "no Component":
+    // swallowing it would spend the cap again on every remaining node of the walk.
     const extents = await this.#call(ref, COMPONENT_IFACE, 'GetExtents', [
       'u',
       String(COORD_SCREEN),
-    ]).catch(() => null);
+    ]).catch((error: unknown) => {
+      if (error instanceof ExecTimeoutError) throw error;
+      return null;
+    });
     const bounds =
       extents === null ? UNMEASURED_BOUNDS : parseExtents(firstReturn(extents, 'GetExtents'));
     return { role, name, bounds, enabled, visible, measured: extents !== null };

@@ -223,6 +223,9 @@ export class Xdotool implements PointerInput {
       // that means "not up yet", so keep polling. Anything on stderr is a real
       // failure (e.g. `Can't open display`) — fatal, loud. Missing xdotool too.
       const out = await this.#exec(XDOTOOL, args).catch((error: unknown) => {
+        // An expired per-call cap (`proc.ts`) arrives already loud, with no stderr —
+        // never mistake a wedged xdotool for "no window yet" and keep polling.
+        if (error instanceof AdapterError) throw error;
         if (isEnoent(error)) {
           throw new AdapterError('desktop: `xdotool` not found on PATH (install xdotool)');
         }
@@ -255,6 +258,8 @@ export class Xdotool implements PointerInput {
     try {
       await this.#exec(XDOTOOL, args);
     } catch (error) {
+      // Already-loud failures (a per-call timeout) surface verbatim, not re-prefixed.
+      if (error instanceof AdapterError) throw error;
       if (isEnoent(error)) {
         throw new AdapterError('desktop: `xdotool` not found on PATH (install xdotool)');
       }

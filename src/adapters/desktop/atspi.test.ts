@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { AdapterError } from '../../errors.js';
+import { AdapterError, ExecTimeoutError } from '../../errors.js';
 import type { Node } from '../contract.js';
 import {
   type AtspiNode,
@@ -262,4 +262,17 @@ test('BusctlAtspi.readTree marks a node without Component unmeasured', async () 
   expect(nodes[0]?.measured).toBe(false);
   expect(nodes[1]?.measured).toBe(true);
   expect(nodes[1]?.bounds).toEqual({ x: 10, y: 20, width: 100, height: 40 });
+});
+
+test('BusctlAtspi.readTree fails loud when GetExtents blows its per-call cap', async () => {
+  // A wedged bus is NOT "this node has no Component": swallowing the timeout would
+  // spend the whole cap again on every remaining node of the walk.
+  const bus = fakeBus();
+  const exec = async (args: string[]): Promise<string> => {
+    if (args.includes('GetExtents')) {
+      throw new ExecTimeoutError('desktop: `busctl` timed out after 10000ms (SIGKILLed)');
+    }
+    return bus.exec(args);
+  };
+  await expect(new BusctlAtspi({ exec }).readTree()).rejects.toThrow(ExecTimeoutError);
 });
