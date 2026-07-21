@@ -344,8 +344,8 @@ test('the loop streams progress that snapshot reads while the run is in flight',
     await ctx.progress.writeFindings({
       status: 'running',
       steps: [{ step: 'typed email', ok: true }],
-      bugs: [],
-      visual: [],
+      bugs: [{ kind: 'console', detail: 'TypeError: cart is undefined' }],
+      visual: [{ issue: 'total is cut off', where: 'cart footer', severity: 'high' }],
     });
     markWritten();
     await gate;
@@ -355,6 +355,12 @@ test('the loop streams progress that snapshot reads while the run is in flight',
   const midRun = await session.snapshot();
   expect(midRun.status).toBe('running'); // still in flight
   expect(midRun.steps).toEqual([{ step: 'typed email', ok: true }]);
+  // The streamed findings surface too — not just the step trail: a run that never
+  // reaches `report` still hands the smart agent everything found so far.
+  expect(midRun.bugs).toEqual([{ kind: 'console', detail: 'TypeError: cart is undefined' }]);
+  expect(midRun.visual).toEqual([
+    { issue: 'total is cut off', where: 'cart footer', severity: 'high' },
+  ]);
 
   release();
   await run;

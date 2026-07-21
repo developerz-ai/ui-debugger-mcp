@@ -10,8 +10,10 @@
  *     instruction block re-appended to EVERY turn (the SDK rebuilds each step's
  *     prompt from scratch), so the driver adapts without restarting or forgetting.
  *   - **incremental findings** — `onStepFinish` lifts each step's `act` results
- *     into a running step trail and flushes it as `status: 'running'` findings,
- *     so `get_findings` shows live progress before the verdict lands.
+ *     into a running step trail — plus `look`'s visual issues and error-level
+ *     console rows — and flushes them as `status: 'running'` findings, so
+ *     `get_findings` streams findings before the verdict lands, and a run that
+ *     crashes, aborts or hits the step cap keeps everything surfaced so far.
  *
  * Adapter-blind and model-blind like the belt: the loop never touches a protocol
  * or a provider. It is pure over two seams — {@link LoopInbox} (drain) and
@@ -30,7 +32,7 @@ import {
   ToolLoopAgent,
 } from 'ai';
 import { z } from 'zod';
-import type { Findings, Step } from '../findings/schema.js';
+import type { Bug, Findings, Step, VisualIssue } from '../findings/schema.js';
 
 /** Safety cap on driver steps before the loop force-stops (paired with `hasToolCall('report')`). */
 export const DEFAULT_MAX_STEPS = 30;
@@ -69,6 +71,33 @@ export interface FinishedStep {
 
 /** The `act` result fields lifted into the step trail: label, outcome, post-action frame. */
 const ActStepSchema = z.object({ label: z.string(), ok: z.boolean(), screenshot: z.string() });
+
+/**
+ * The `look` result fields lifted into streamed visual findings: the vision guy's
+ * `issues[]` and the frame it judged (see `belt/look.ts`). A SELF-look result (a
+ * multimodal driver judging the frame with its own eyes) carries no `issues`, so
+ * it contributes nothing here — those issues reach findings via `report`.
+ */
+const LookVisualSchema = z.object({
+  screenshot: z.string().optional(),
+  issues: z
+    .array(
+      z.object({
+        what: z.string(),
+        where: z.string(),
+        severity: z.enum(['low', 'medium', 'high']),
+      }),
+    )
+    .default([]),
+});
+
+/** The `observe` console rows lifted into streamed bugs (see `belt/observe.ts`). */
+const ConsoleObserveSchema = z.object({
+  kind: z.literal('console'),
+  entries: z
+    .array(z.object({ level: z.string(), text: z.string(), location: z.string().optional() }))
+    .default([]),
+});
 
 /**
  * `prepareStep`: fold mid-run messages into the next model turn. Drains the inbox
@@ -203,17 +232,111 @@ export function stepTrailFrom(
 }
 
 /**
- * Decide the running-findings write for a finished step. Steps aside for the
- * terminal `report` step (it owns the verdict) and for steps that produced no
- * `act` results; otherwise appends the fresh trail to `trail` (mutated in place)
- * and returns the `running` findings to persist.
+ * Lift a finished step's `look` results into visual findings — each issue the
+ * vision guy flagged, carrying the frame it was judged on as evidence.
  */
-export function progressForStep(step: FinishedStep, trail: Step[]): Findings | null {
+export function visualFrom(toolResults: FinishedStep['toolResults']): VisualIssue[] {
+  const issues: VisualIssue[] = [];
+  for (const result of toolResults) {
+    if (result.toolName !== 'look') continue;
+    const parsed = LookVisualSchema.safeParse(result.output);
+    if (!parsed.success) continue;
+    const { screenshot } = parsed.data;
+    for (const issue of parsed.data.issues) {
+      issues.push({
+        issue: issue.what,
+        where: issue.where,
+        severity: issue.severity,
+        ...(screenshot !== undefined && { screenshot }),
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * Lift a finished step's `observe` console reads into bugs — ERROR rows only
+ * (warn/log/info are working noise, not findings). The console channel is a ring
+ * buffer read non-destructively, so a re-read returns rows already lifted;
+ * {@link progressForStep} dedupes by message before they land.
+ */
+export function consoleBugsFrom(toolResults: FinishedStep['toolResults']): Bug[] {
+  const bugs: Bug[] = [];
+  for (const result of toolResults) {
+    if (result.toolName !== 'observe') continue;
+    const parsed = ConsoleObserveSchema.safeParse(result.output);
+    if (!parsed.success) continue;
+    for (const entry of parsed.data.entries) {
+      if (entry.level !== 'error') continue;
+      bugs.push({
+        kind: 'console',
+        detail: entry.text,
+        ...(entry.location !== undefined && { evidence: entry.location }),
+      });
+    }
+  }
+  return bugs;
+}
+
+/** Dedupe key for a streamed finding — its message, case- and whitespace-insensitive. */
+function messageKey(...parts: string[]): string {
+  return parts.join(' @ ').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/** Append the `fresh` entries whose key is not already present; returns how many landed. */
+function appendNew<T>(into: T[], fresh: readonly T[], key: (item: T) => string): number {
+  const seen = new Set(into.map(key));
+  let added = 0;
+  for (const item of fresh) {
+    const k = key(item);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    into.push(item);
+    added += 1;
+  }
+  return added;
+}
+
+/**
+ * The run-long accumulators the running flush appends to: the shared act-`steps`
+ * trail (the SAME array the `act` and `report` tools hold) plus the findings
+ * streamed off the belt — `look`'s visual issues and error-level console rows.
+ * Streaming those is what keeps a crashed, aborted or step-capped run's findings
+ * file complete; before, they lived only in model context until `report`.
+ */
+export interface RunTrail {
+  /** Ordered act trail, appended per step (shared with `act` + `report`). */
+  steps: Step[];
+  /** Console bugs seen so far, deduped by message. */
+  bugs: Bug[];
+  /** Visual issues seen so far, deduped by issue + location. */
+  visual: VisualIssue[];
+}
+
+/**
+ * Decide the running-findings write for a finished step. Steps aside for the
+ * terminal `report` step (it owns the verdict); otherwise appends this step's act
+ * trail plus its NEW `look` issues and console errors to `running` (mutated in
+ * place) and returns the `running` findings to persist. `null` when the step
+ * surfaced nothing new — no act, and every issue/error already streamed.
+ */
+export function progressForStep(step: FinishedStep, running: RunTrail): Findings | null {
   if (step.toolCalls.some((call) => call.toolName === 'report')) return null;
-  const fresh = stepTrailFrom(step.toolResults);
-  if (fresh.length === 0) return null;
-  trail.push(...fresh);
-  return { status: 'running', steps: [...trail], bugs: [], visual: [] };
+  const steps = stepTrailFrom(step.toolResults);
+  const bugs = appendNew(running.bugs, consoleBugsFrom(step.toolResults), (bug) =>
+    messageKey(bug.detail),
+  );
+  const visual = appendNew(running.visual, visualFrom(step.toolResults), (issue) =>
+    messageKey(issue.issue, issue.where),
+  );
+  if (steps.length === 0 && bugs === 0 && visual === 0) return null;
+  running.steps.push(...steps);
+  return {
+    status: 'running',
+    steps: [...running.steps],
+    bugs: [...running.bugs],
+    visual: [...running.visual],
+  };
 }
 
 /** Everything the loop needs to run one debug session. */
@@ -304,6 +427,10 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
   // Run-long list of mid-run caller instructions: drained from the inbox once,
   // re-folded into EVERY step's prompt (the SDK never persists a prepareStep override).
   const standing: string[] = [];
+  // The running flush's accumulators. `steps` IS the shared act trail (same array
+  // the `act` and `report` tools hold); bugs/visual accumulate here only — they are
+  // streamed evidence, and the driver owns the terminal verdict's own arrays.
+  const running: RunTrail = { steps: trail, bugs: [], visual: [] };
   return new ToolLoopAgent<never, BeltTools>({
     model,
     tools,
@@ -322,12 +449,13 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
     onStepFinish: async (step) => {
       stepIndex += 1;
       log?.(describeStep(step, stepIndex));
-      // Append this step's `act` results to the shared trail and flush a running
-      // snapshot. The terminal `report` step writes its own verdict — with this
-      // same trail overlaid as `steps` (see `createReportTool`) — so the running
-      // flush steps aside for it (`progressForStep` returns null on the report step).
-      const running = progressForStep(step, trail);
-      if (running) await progress.writeFindings(running);
+      // Append this step's `act` results to the shared trail, stream its new `look`
+      // issues + console errors, and flush a running snapshot. The terminal `report`
+      // step writes its own verdict — with this same trail merged into `steps` (see
+      // `createReportTool`) — so the running flush steps aside for it
+      // (`progressForStep` returns null on the report step).
+      const snapshot = progressForStep(step, running);
+      if (snapshot) await progress.writeFindings(snapshot);
     },
   });
 }
