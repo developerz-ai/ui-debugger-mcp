@@ -21,7 +21,7 @@ import { URL } from 'node:url';
 import type { Browser, BrowserContext, Page } from 'playwright-core';
 import { chromium } from 'playwright-core';
 import type { WebTarget } from '../../config/schema.js';
-import { AdapterError } from '../../errors.js';
+import { AdapterError, UiDebuggerError } from '../../errors.js';
 import type {
   Adapter,
   Bounds,
@@ -458,8 +458,10 @@ export class BrowserAdapter implements Adapter {
     try {
       return await fn();
     } catch (error) {
+      if (error instanceof UiDebuggerError) throw error;
       throw new AdapterError(
         `browser.${op} failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
       );
     }
   }

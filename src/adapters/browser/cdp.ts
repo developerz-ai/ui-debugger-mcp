@@ -342,13 +342,27 @@ export class CdpCapture {
   #pushConsole(entry: ConsoleEntry): void {
     this.#console.push(entry);
     if (this.#console.length > this.#cap) this.#console.shift();
-    this.#sink?.('console', formatConsoleLine(entry));
+    try {
+      this.#sink?.('console', formatConsoleLine(entry));
+    } catch (error) {
+      // Sink failure must not crash the handler — log but continue.
+      console.error(
+        `CDP capture sink failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /** Ring-buffer a network entry and stream its formatted line to the sink. */
   #pushNetwork(entry: NetworkEntry): void {
     this.#network.push(entry);
     if (this.#network.length > this.#cap) this.#network.shift();
-    this.#sink?.('network', formatNetworkLine(entry));
+    try {
+      this.#sink?.('network', formatNetworkLine(entry));
+    } catch (error) {
+      // Sink failure must not crash the handler — log but continue.
+      console.error(
+        `CDP capture sink failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 }
