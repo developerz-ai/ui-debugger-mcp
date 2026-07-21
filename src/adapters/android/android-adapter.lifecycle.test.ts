@@ -263,7 +263,7 @@ describe('AndroidAdapter device binding', () => {
         spawns++;
         return makeFakeEmulator(undefined);
       },
-      pickPort: () => Promise.reject(new Error('attach mode must never pick a port')),
+      pickPort: () => Promise.reject(new AdapterError('attach mode must never pick a port')),
     });
     await adapter.open('com.example');
     await adapter.close();
