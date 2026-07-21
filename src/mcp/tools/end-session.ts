@@ -25,6 +25,9 @@ export function endSessionTool(service: DebugApi): McpTool {
             'Close the active run: abort the loop, release the target (managed Chrome is stopped; an ' +
             'attached browser is only disconnected), and free the project lock so a new start_debug can ' +
             'run. The last get_findings snapshot remains on disk.',
+          annotations: {
+            idempotentHint: true,
+          },
           inputSchema: {
             session_id: z.string().min(1).describe('The id returned by start_debug.'),
           },

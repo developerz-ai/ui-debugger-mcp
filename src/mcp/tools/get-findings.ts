@@ -40,6 +40,9 @@ export function getFindingsTool(service: DebugApi): McpTool {
             'Pass wait (ms) to long-poll until the run settles; pass fields to return only some keys. ' +
             'A run that auto-ended (wall-clock timeout or client disconnect) stays readable under its ' +
             'id until end_session or the next start_debug.',
+          annotations: {
+            readOnlyHint: true,
+          },
           inputSchema: {
             session_id: z.string().min(1).describe('The id returned by start_debug.'),
             wait: z

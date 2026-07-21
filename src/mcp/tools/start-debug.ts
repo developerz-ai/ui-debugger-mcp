@@ -27,6 +27,10 @@ export function startDebugTool(service: DebugApi): McpTool {
             '(e.g. "web"). It drives the UI autonomously and gathers findings (functional bugs + ' +
             'visual feedback). One run per project at a time. Returns { session_id }; then poll ' +
             'get_findings, steer with send_message, and close with end_session.',
+          annotations: {
+            destructiveHint: false,
+            openWorldHint: true,
+          },
           inputSchema: {
             target: z
               .string()
