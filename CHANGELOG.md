@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-21
+
+### Fixed
+
+- **Android injection hardening** — `escapeInputText` now rejects control characters (< 0x20) with `AdapterError` instead of silently stripping them; mapped `\r`/`\r\n` to `KEYCODE_ENTER` between `type()` segments to handle line terminators as intentional input separators; added allowlist validation for agent-controlled `startArgs` via regex `^[\w.]+(/[\w.$]+)?$` before shelling to `am start`/`monkey` to prevent command injection.
+- **Managed-serial binding** — Android adapter now spawns `emulator @avd -port <p>` on a free even port and binds every ADB call to `-s emulator-<p>` (instead of unbound `-e`), isolating per-instance and preventing collision with co-running emulators. `close` only targets its own instance via `emu kill -port`.
+- **Findings discard on `report`** — merged driver-reported `bugs`/`visual` findings with accumulated `RunTrail` streamed findings instead of overwriting them. Added `mergeFindings` pattern (parallel to existing `mergeSteps`) to fuse vision-guy mid-run issues with driver-reported verdict.
+- **Mid-run flush gate race** — fixed failed-step findings loss when `report` raced same-step `act` by gating on `toolCalls` instead of stale AI SDK 6 `toolResults` path; added `FailedStepSink` to record throws before rethrowing so findings survive a crash/abort right after.
+- **Browser adapter hardening** — `closeOnFailure` closes just-opened context/browser if post-connect wiring throws, preventing zombie Chrome from squatting the profile lock; `createFailure` maps every `create()` failure to `AdapterError` with actionable profile-lock fix hints.
+- **Desktop adapter hardening** — managed child exit code/signal (`Launched.died`) now races against window wait so bad `launch` rejects fast with real cause instead of generic 10s timeout; null `#windowMatch` throws before spawning. Subprocess calls capped at 30s timeouts (10s for busctl/xdotool, 30s for capture) with `SIGKILL` on expiry, surfaced as `ExecTimeoutError`.
+- **MCP lifecycle corrections** — `startStdioServer` watches stdin for EOF since SDK transport doesn't, routing to `service.endActive()` for immediate browser/profile cleanup on client death. `DebugService` retains settled runs in memory so `get_findings` serves terminal snapshots post-timeout/SIGTERM. `start_debug` now gates via `StatePort.foreignRun()` to reject concurrent runs on the same cwd with clear "already running" errors.
+- **CLI correctness** — unknown subcommands now exit(1) instead of hanging; workspace path anchored to absolute paths; dead-server state shows "unknown (server died)" when recorded pid is dead.
+- **Config/init accuracy** — `buildSession` writes `story.md` on session creation; `profile`/`headless` config keys now honored (profile dir resolved to workspace-root-relative `chrome-user-data/` if unset, custom paths passed through, directories created as needed); `InitError` relocated to shared `errors.ts`.
+- **Atomic state writes** — new `writeFileAtomic` pattern (temp file + rename keyed by pid+counter) backs both `writeState` and `writeFindings`, preventing partial writes on crash. CLI `stop` marks `stopped` before sending SIGTERM to prevent race where server's `markStatus('ended')` clobbers the status.
+
+### Changed
+
+- Split oversized test files to maintain 500-LOC cap: `android-adapter.test.ts` (→ parsers/lifecycle/behavior + test-helpers), `server.test.ts` (→ server + stdio), `session.test.ts` (→ lifecycle/findings/replay). Source adapters split: `browser-adapter.ts` (→ extractor/filters).
+- MCP structured output: all five outer tools now declare `outputSchema` pinned to service interfaces via Zod `satisfies`, catching schema drift at compile time. Sparse `get_findings` projections use `.partial()` schema since field filters are intentionally selective.
+- MCP annotations: added `destructiveHint`/`openWorldHint` to `start_debug`, `readOnlyHint` to `get_findings`/`describe`, `idempotentHint` to `end_session`, `send_message` wired for annotations completeness.
+- Resource links in findings: `result.ts` now emits `resource_link` content (file:// URIs) for absolute evidence paths (screenshots, replay.mp4), capped at 20 items with steering to `get_findings fields=[...]` for overflow.
+- Prompt alignment: self-look variant for multimodal drivers (drops "blind/vision-is-expensive" framing, tells driver to judge frames itself); desktop addendum neutralized vision-guy phrasing; contract clarity on `enabled` field = "disabled OR readonly" (must check `:disabled` incl. `fieldset[disabled]` inheritance, `readonly`, AND `aria-readonly`).
+
+### Added
+
+- Durable-write helper: `src/adapters/atomic-write.ts#writeFileAtomic` reusable pattern for crash-safe file writes.
+- Timeout conversion tests: real-transport Zod-boundary validation (bad `url`, `timeout`>max, missing `goal`, `wait`>max) verifies schema enforcement at MCP tool layer.
+- MCP Registry support: `server.json` + `mcp-publisher` docs for npm package registry publishing.
+- Doc-example validation guard: `src/mcp/tools/doc-examples.test.ts` extracts fenced `tool_name { ... }` examples from README/reference, validates against live Zod schemas to catch doc drift.
+
 ## [1.1.0] - 2026-07-02
 
 ### Added
