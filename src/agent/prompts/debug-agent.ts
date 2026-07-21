@@ -72,7 +72,8 @@ ${mode.belt}
 
 Always prefer structured reads over vision:
 1. Use \`observe({kind:"tree"})\` to read DOM / accessibility tree.
-2. Use \`observe({kind:"console"})\` and \`observe({kind:"network"})\` to watch errors.
+2. Where the target supports them, use \`observe({kind:"console"})\` and
+   \`observe({kind:"network"})\` to watch errors.
 3. Call \`look\` ONLY when visual judgment is needed — layout, colour, alignment,
    "does this look right?", "is this element centred?".
    ${mode.cost}
