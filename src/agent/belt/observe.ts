@@ -37,11 +37,18 @@ import type {
 import { AgentError } from '../../errors.js';
 import type { EvidenceRecorder } from './look.js';
 
-/** The four observable channels `kind` selects (each routes to one contract method). */
-const OBSERVE_KINDS = ['tree', 'screenshot', 'console', 'network'] as const;
+/**
+ * The four observable channels `kind` selects (each routes to one contract method).
+ * Exported so the prompt-vs-schema drift guard (`prompts/schema-drift.test.ts`) can
+ * assert every `kind:"…"` example the prompts teach is one the belt actually accepts.
+ */
+export const OBSERVE_KINDS = ['tree', 'screenshot', 'console', 'network'] as const;
 
-/** Selectable {@link Node} columns — the `fields` projection whitelist (contract-level). */
-const NODE_FIELDS = [
+/**
+ * Selectable {@link Node} columns — the `fields` projection whitelist (contract-level).
+ * Exported for the same drift guard as {@link OBSERVE_KINDS}.
+ */
+export const NODE_FIELDS = [
   'role',
   'name',
   'bounds',
