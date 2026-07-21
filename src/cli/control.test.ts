@@ -56,7 +56,7 @@ test('status prints the run identity + a dead-server line', async () => {
   const out = logs.join('\n');
   expect(out).toContain('1700000000000-0001');
   expect(out).toContain('target:   web');
-  expect(out).toContain('not running'); // bogus pid is not alive
+  expect(out).toContain('unknown (server died)'); // state says running but pid is not alive
 });
 
 test('stop reports nothing to do when there is no state', async () => {

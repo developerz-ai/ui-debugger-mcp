@@ -59,8 +59,15 @@ export async function runStatus(cwd = process.cwd()): Promise<void> {
     ? `${findings.bugs.length} bugs, ${findings.visual.length} visual, ${findings.steps.length} steps`
     : 'no findings yet';
   // A recycled PID owns a different process now — say so rather than imply our server lives.
+  // If state says running but the server is dead (check not stale), report the mismatch.
   const serverState =
-    check === 'stale' ? 'not running (PID reused)' : alive ? 'running' : 'not running';
+    check === 'stale'
+      ? 'not running (PID reused)'
+      : alive
+        ? 'running'
+        : state.status === 'running'
+          ? 'unknown (server died)'
+          : 'not running';
 
   console.log(`ui-debugger-mcp — ${project}`);
   console.log(`  run:      ${state.sessionId}`);
