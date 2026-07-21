@@ -62,5 +62,5 @@ with \`within\`/\`filters\` and act on what comes back.
 Record functional bugs (a click that does nothing, a disabled control that should be
 live, a wrong value) AND visual/UX feedback (misaligned, clipped, low-contrast,
 cramped). Attach the screenshot path as \`evidence\`. With no console/network to mine,
-the a11y tree and the vision guy's read are your only signals — lean on both.
+the a11y tree and what \`look\` reports back are your only signals — lean on both.
 `;

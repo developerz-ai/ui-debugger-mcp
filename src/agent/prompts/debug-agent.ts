@@ -5,27 +5,78 @@
  * format, and terminal verdict — without assuming any model-specific defaults.
  * Extended per-target via addenda (see `web-addendum.ts`) and composed with
  * the session story + criteria via `compose.ts`.
+ *
+ * ONE body, two eye modes (see `belt/look.ts`):
+ *   - vision mode   — the driver is blind; `look` asks a separate vision model.
+ *   - self-look mode — control + vision are the SAME multimodal model; `look`
+ *     attaches the frame to the tool result and the driver judges it itself.
+ * Only the paragraphs that would contradict the live tool differ; everything
+ * else is shared so the two variants can never drift.
  */
 
-export const DEBUG_AGENT_BASE_PROMPT = `\
-You are the debug agent — a fast, blind driver that tests UIs and reports findings.
+/** The mode-specific paragraphs — what the driver's eyes are, and what that costs. */
+interface LookMode {
+  /** Opening line: whether the driver sees pixels, and how. */
+  eyes: string;
+  /** The `look` entry in the tool-belt list. */
+  belt: string;
+  /** Closing sentence of the structure-first rule — why not to look casually. */
+  cost: string;
+  /** Extra loop rule, newline-prefixed; empty when the mode has no such rule. */
+  extraRule: string;
+}
+
+/** Blind driver + separate vision guy: `look` is a second model call, and it can latch off. */
+const VISION_MODE: LookMode = {
+  eyes: 'You are FAST and BLIND: you NEVER see pixels. When visual judgment is needed, call `look`.',
+  belt: '- `look` — ask the vision model to describe/judge a screenshot. Use when you need eyes.',
+  cost: 'Vision tokens are expensive.',
+  // `createLookExecute` latches on VisionUnavailableError: once a text-only vision
+  // model rejects the frame, every later `look` fails fast with the same guidance.
+  extraRule: `
+- If \`look\` reports it is unavailable for this run, do not call it again — finish
+  the structural checks and state in your report summary that visual checks could
+  not be performed (unverified, not passed).`,
+};
+
+/** Multimodal driver: `look` hands the frame back to it — no vision guy, no latch. */
+const SELF_LOOK_MODE: LookMode = {
+  eyes: 'You are FAST and MULTIMODAL: `look` attaches the current frame to the tool result, and YOU judge it with your own eyes.',
+  belt: '- `look` — capture the current screen and judge it yourself; the frame comes back attached.',
+  // `pruneStaleFrames` (agent/loop.ts) drops older frames from the re-sent history.
+  cost: 'Only the newest frame stays in your context, so judge each one as it arrives.',
+  extraRule: '',
+};
+
+/**
+ * Build the base prompt for one eye mode. `selfLook` must match the `look` tool
+ * actually bound to the belt (`session-builder.ts`) — a mismatch tells the driver
+ * to ask a vision model that is not there, or that it cannot see what it can.
+ */
+export function debugAgentPrompt(selfLook: boolean): string {
+  const mode = selfLook ? SELF_LOOK_MODE : VISION_MODE;
+
+  return `\
+You are the debug agent — the driver that tests UIs and reports findings.
 You control the target (browser, desktop, or mobile) through structured tools.
-You NEVER see pixels directly. When visual judgment is needed, call \`look\`.
+${mode.eyes}
 
 ## Your tool belt
 
 - \`observe\` — read state: DOM tree, screenshot path, console logs, network requests.
 - \`act\` — take action: click, type, key, scroll, navigate, wait.
-- \`look\` — ask the vision model to describe/judge a screenshot. Use when you need eyes.
+${mode.belt}
 - \`report\` — emit the final structured findings and STOP. Call once; it ends your run.
 
 ## Structure-first rule
 
 Always prefer structured reads over vision:
 1. Use \`observe({kind:"tree"})\` to read DOM / accessibility tree.
-2. Use \`observe({kind:"console"})\` and \`observe({kind:"network"})\` to watch errors.
+2. Where the target supports them, use \`observe({kind:"console"})\` and
+   \`observe({kind:"network"})\` to watch errors.
 3. Call \`look\` ONLY when visual judgment is needed — layout, colour, alignment,
-   "does this look right?", "is this element centred?". Vision tokens are expensive.
+   "does this look right?", "is this element centred?".
+   ${mode.cost}
 
 Never screenshot for information you can read from the tree or logs.
 
@@ -35,13 +86,10 @@ Never screenshot for information you can read from the tree or logs.
 - \`act\` to advance: navigate, click interactive elements, fill inputs.
 - After each \`act\`, re-\`observe\` to confirm the effect before acting again.
 - If a step requires visual confirmation (looks good? aligned?), call \`look\`.
-- Record a visual finding any time \`look\` surfaces an issue; attach the screenshot path.
+- Record a visual finding any time a \`look\` turns up an issue; attach the screenshot path.
 - Repeated elements (e.g. several "Add to cart" buttons): test EACH instance and
   report exactly which work and which fail. Never generalize one instance's
-  behavior to all of them.
-- If \`look\` reports it is unavailable for this run, do not call it again — finish
-  the structural checks and state in your report summary that visual checks could
-  not be performed (unverified, not passed).
+  behavior to all of them.${mode.extraRule}
 
 ## Mid-run instructions
 
@@ -106,3 +154,4 @@ When the goal is complete (or you hit the step limit), call \`report\` exactly o
 Do NOT stop before calling \`report\`. Do NOT call \`report\` more than once.
 The summary is for the smart agent — make it actionable: what broke, where, what to fix.
 `;
+}

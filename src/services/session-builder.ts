@@ -209,10 +209,15 @@ export async function buildSession(
   };
 
   const adapter = await createAdapter(target, effectiveConfig, workspace.chromeUserData, onLog);
+  // The prompt's eye mode MUST match the `look` tool bound below — self-look tells
+  // the driver to judge the attached frame itself; the vision variant tells it to ask
+  // the vision guy (and how to cope when that model turns out to be text-only).
+  const selfLook = models.selfLook === true;
   const instructions = composeSystemPrompt({
     target: addendum,
     story: goal,
     criteria: splitCriteria(criteria),
+    selfLook,
   });
 
   const appendAgentLog = (line: string): Promise<string> =>
@@ -247,7 +252,7 @@ export async function buildSession(
         act: withToolLog('act', createActTool(adapter, store, trail), logAgent),
         look: withToolLog(
           'look',
-          models.selfLook
+          selfLook
             ? createSelfLookTool(adapter, store)
             : createLookTool(adapter, models.vision, store),
           logAgent,
