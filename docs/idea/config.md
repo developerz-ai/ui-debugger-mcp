@@ -64,7 +64,7 @@ Per-project. Lives in the repo, travels with it. Describes the app + targets.
     "web": {
       "adapter": "browser",
       "url": "http://localhost:3000",
-      "headless": true,
+      "headless": true,                            // optional — defaults to true
       "debugLogin": { "param": "debug-ai" },      // skip captcha, not auth
       // --- managed mode (default): server launches + owns Chrome ---
       "executablePath": null,                      // null = auto-detect Chrome/Chromium
@@ -109,6 +109,10 @@ Rules:
   (channel, flatpak, custom build). Null → auto-detect. Managed mode only.
 - Persistent profile (login, cookies) is a **managed-mode** feature — see
   [`workspace.md`](workspace.md). In attach mode the browser keeps its own state.
+- `profile` resolves against the workspace root (`chrome-user-data` →
+  `<workspace>/<project>/chrome-user-data`); an absolute path is used as-is. Unset
+  → the default `chrome-user-data/`. The dir is created if missing.
+- `headless` is optional and defaults to `true`.
 
 ## Resolution order
 

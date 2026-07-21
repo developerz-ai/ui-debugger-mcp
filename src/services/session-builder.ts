@@ -14,6 +14,7 @@
  * seam; swapping the driver model or the target never touches the service.
  */
 
+import { mkdir } from 'node:fs/promises';
 import type { LanguageModel, Tool } from 'ai';
 import type { CaptureSink } from '../adapters/browser/cdp.js';
 import { createAdapter } from '../adapters/factory.js';
@@ -29,7 +30,12 @@ import type { Target } from '../config/schema.js';
 import { ConfigError, TargetNotFoundError } from '../errors.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
-import { ensureSession, sessionPaths, type WorkspacePaths } from '../session/workspace.js';
+import {
+  ensureSession,
+  resolveProfileDir,
+  sessionPaths,
+  type WorkspacePaths,
+} from '../session/workspace.js';
 import { createReplayStep } from './replay.js';
 import { createSummarize } from './summarize.js';
 
@@ -217,13 +223,14 @@ export async function buildSession(
     void store.appendLog(channel, line).catch(() => undefined);
   };
 
-  const adapter = await createAdapter(
-    target,
-    effectiveConfig,
-    workspace.chromeUserData,
-    onLog,
-    params.timeoutMs,
-  );
+  // `profile` is a browser-target key — no other adapter has a profile dir. A managed
+  // launch lives in it; attach ignores it (that browser keeps its own state).
+  // `ensureWorkspace` pre-creates only the default dir, so a custom one is made here.
+  const profile = targetConfig.adapter === 'browser' ? targetConfig.profile : undefined;
+  const profileDir = resolveProfileDir(workspace, profile);
+  if (profile) await mkdir(profileDir, { recursive: true });
+
+  const adapter = await createAdapter(target, effectiveConfig, profileDir, onLog, params.timeoutMs);
   // The prompt's eye mode MUST match the `look` tool bound below — self-look tells
   // the driver to judge the attached frame itself; the vision variant tells it to ask
   // the vision guy (and how to cope when that model turns out to be text-only).
