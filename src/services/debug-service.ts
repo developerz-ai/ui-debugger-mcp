@@ -12,6 +12,13 @@
  * call resolves the active session for the cwd and fails loud
  * ({@link SessionNotFoundError}) when the id does not match, so a stale id never
  * silently drives the wrong run.
+ *
+ * A run that ends *without* the caller asking (wall-clock timeout, SIGTERM, the
+ * MCP client dying) leaves the manager, but its findings must not vanish with it:
+ * the settled session is retained so `get_findings` keeps serving its terminal
+ * snapshot. `end_session` is the explicit forget; the next `start_debug`
+ * supersedes it. The retained snapshot holds no target resources (the adapter is
+ * already closed) and never participates in the one-run gate.
  */
 
 import type { ResolvedConfig } from '../config/load.js';
@@ -136,6 +143,13 @@ export class DebugService implements DebugApi {
   /** Live wall-clock timer for the active run; cleared when the run ends. */
   #timer: ReturnType<typeof setTimeout> | undefined;
   /**
+   * The last run that auto-ended (timeout / SIGTERM / client death), kept settled
+   * and closed so `get_findings` can still read its partial findings + evidence.
+   * Dropped by `end_session` (the explicit forget) and superseded by the next run.
+   * Never consulted by the one-run gate — a retained snapshot cannot block a start.
+   */
+  #retained: Session | undefined;
+  /**
    * A `start()` is in flight (building/launching, slot not yet in the manager).
    * Set synchronously before the first await so a concurrent `start_debug` fails
    * loud with {@link SessionBusyError} instead of racing a second browser onto
@@ -187,6 +201,9 @@ export class DebugService implements DebugApi {
         await built.session.close().catch(() => undefined);
         throw err;
       }
+      // This run owns the slot now — the previous run's retained snapshot is
+      // superseded (its findings.json stays on disk for the CLI / a human).
+      this.#retained = undefined;
 
       try {
         await built.open();
@@ -238,13 +255,18 @@ export class DebugService implements DebugApi {
     return { ok: true, session_id };
   }
 
-  /** Snapshot the run's findings — optionally long-poll (`wait`) and/or project a subset (`fields`). */
+  /**
+   * Snapshot the run's findings — optionally long-poll (`wait`) and/or project a
+   * subset (`fields`). Serves the retained terminal snapshot once the run has
+   * auto-ended, so a timed-out run's partial findings stay reachable (the
+   * long-poll returns at once: a settled run has nothing left to wait for).
+   */
   async getFindings({
     session_id,
     wait,
     fields,
   }: GetFindingsInput): Promise<Findings | Partial<Findings>> {
-    const session = this.#require(session_id);
+    const session = this.#requireReadable(session_id);
     return fields && fields.length > 0
       ? session.snapshot(fields, wait)
       : session.snapshot(undefined, wait);
@@ -264,8 +286,14 @@ export class DebugService implements DebugApi {
     };
   }
 
-  /** End the active run: abort the loop, close the adapter, free the profile lock. */
+  /**
+   * End the active run: abort the loop, close the adapter, free the profile lock.
+   * Ending a run that already auto-ended (timeout / client death) is not an error
+   * — it just forgets the retained snapshot, so `end_session` reads the same
+   * either way and stays the one explicit forget.
+   */
   async end({ session_id }: EndInput): Promise<Ack> {
+    if (this.#forgetRetained(session_id)) return { ok: true, session_id };
     this.#require(session_id);
     this.#clearTimeout();
     // Clear the breadcrumb even when the close throws: the manager frees the slot
@@ -287,12 +315,48 @@ export class DebugService implements DebugApi {
   async endActive(): Promise<void> {
     this.#clearTimeout();
     if (!this.#manager.has(this.#cwd)) return;
+    // Nobody asked for this end, so nobody has read the results yet: retain the
+    // session (settled + closed) so `get_findings` still serves them. Captured
+    // before the close, so even a failing teardown leaves the findings reachable.
+    this.#retained = this.#manager.get(this.#cwd);
     // Same contract as `end()`: the breadcrumb clears even when the close throws.
     try {
       await this.#manager.end(this.#cwd);
     } finally {
       await this.#state.clear();
     }
+  }
+
+  /**
+   * Resolve the session a read names: the active run, or — once the manager is
+   * empty — the retained snapshot of the last auto-ended run, so a timed-out run's
+   * partial findings stay readable by their id until `end_session` or the next
+   * `start_debug`. A different id still fails loud.
+   */
+  #requireReadable(session_id: string): Session {
+    const retained = this.#retained;
+    if (retained === undefined || this.#manager.has(this.#cwd)) {
+      return this.#require(session_id);
+    }
+    if (retained.id !== session_id) {
+      throw new SessionNotFoundError(
+        `No active debug session '${session_id}' for '${this.#cwd}' (the last run '${retained.id}' ` +
+          'has ended; its findings are still readable under that id).',
+      );
+    }
+    return retained;
+  }
+
+  /**
+   * Forget the retained snapshot when the caller's `end_session` names it — the
+   * run is already torn down, so there is nothing left to close. Returns whether
+   * the id was the retained one (and it is now forgotten).
+   */
+  #forgetRetained(session_id: string): boolean {
+    if (this.#manager.has(this.#cwd)) return false;
+    if (this.#retained?.id !== session_id) return false;
+    this.#retained = undefined;
+    return true;
   }
 
   /** Resolve the active session for this cwd, asserting its id matches the caller's. */

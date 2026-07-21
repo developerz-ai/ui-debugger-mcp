@@ -205,6 +205,94 @@ test('a per-run timeout overrides the default', async () => {
   expect(manager.has(CWD)).toBe(false);
 });
 
+/**
+ * A run that flushes partial findings, then idles until aborted — what a run
+ * that gets cut off by the wall-clock cap looks like on disk.
+ */
+const partialRun: LoopRunner = async (context) => {
+  await context.progress.writeFindings({
+    status: 'running',
+    steps: [{ step: 'open /login', ok: true }],
+    bugs: [{ kind: 'console', detail: 'TypeError: undefined is not a function' }],
+    visual: [],
+  });
+  return idleRun(context);
+};
+
+test('a timed-out run stays readable: get_findings serves its terminal snapshot', async () => {
+  const { build } = fakeBuilder({ run: partialRun });
+  const svc = new DebugService({
+    manager,
+    config: CONFIG,
+    cwd: CWD,
+    build,
+    now: () => NOW,
+    defaultTimeoutMs: 20,
+  });
+  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
+
+  await tick(60);
+  expect(manager.has(CWD)).toBe(false); // the run is torn down, the lock freed
+
+  const findings = await svc.getFindings({ session_id });
+  expect(findings.status).toBe('failed'); // cut off before a verdict
+  expect(findings.steps).toEqual([{ step: 'open /login', ok: true }]);
+  expect(findings.bugs).toHaveLength(1);
+  expect(await svc.getFindings({ session_id, fields: ['status'] })).toEqual({ status: 'failed' });
+  // Read-only: the retained snapshot never takes new work into a dead run.
+  expect(() => svc.send({ session_id, message: 'keep going' })).toThrow(SessionNotFoundError);
+});
+
+test('a retained snapshot never blocks the next run, and the new run supersedes it', async () => {
+  const { build } = fakeBuilder();
+  const svc = new DebugService({
+    manager,
+    config: CONFIG,
+    cwd: CWD,
+    build,
+    now: () => NOW,
+    defaultTimeoutMs: 20,
+  });
+  const first = await svc.start({ target: 'web', goal: 'x' });
+  await tick(60);
+
+  const second = await svc.start({ target: 'web', goal: 'y' }); // gate is free
+  expect(second.session_id).not.toBe(first.session_id);
+  expect(manager.has(CWD)).toBe(true);
+  // The live run owns the id space now — the superseded snapshot is gone.
+  await expect(svc.getFindings({ session_id: first.session_id })).rejects.toThrow(
+    SessionNotFoundError,
+  );
+  expect((await svc.getFindings({ session_id: second.session_id })).status).toBe('running');
+});
+
+test('end_session forgets a timed-out run (acks once, then the id is unknown)', async () => {
+  const { build, log } = fakeBuilder({ run: partialRun });
+  const svc = new DebugService({
+    manager,
+    config: CONFIG,
+    cwd: CWD,
+    build,
+    now: () => NOW,
+    defaultTimeoutMs: 20,
+  });
+  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
+  await tick(60);
+
+  expect(await svc.end({ session_id })).toEqual({ ok: true, session_id });
+  expect(log.adapters[0]?.closeCalls).toBe(1); // already closed by the auto-end; not re-closed
+  await expect(svc.getFindings({ session_id })).rejects.toThrow(SessionNotFoundError);
+  await expect(svc.end({ session_id })).rejects.toThrow(SessionNotFoundError);
+});
+
+test('an explicitly ended run is forgotten immediately (end_session is the forget)', async () => {
+  const svc = makeService(fakeBuilder({ run: partialRun }).build);
+  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
+
+  await svc.end({ session_id });
+  await expect(svc.getFindings({ session_id })).rejects.toThrow(SessionNotFoundError);
+});
+
 test('ending a run cancels its timeout (no auto-end fires afterward)', async () => {
   const { build, log } = fakeBuilder();
   const svc = new DebugService({
