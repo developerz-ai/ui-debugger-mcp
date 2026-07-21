@@ -171,10 +171,10 @@ and prints the `.mcp.json` snippet to paste.
 
 ```text
 // 4. In Claude Code (or any MCP client):
-start_debug { target: "web", goal: "log in and add item 3 to the cart" }
+start_debug { target: "web", goal: "log in and add item 3 to the cart", url: "http://localhost:3000" }
 
 // 5. Poll until done:
-get_findings { session_id: "...", wait: true }
+get_findings { session_id: "...", wait: 30000 }
 
 // 6. Read bugs[] + visual[] + summary. Fix code, repeat.
 ```
@@ -185,7 +185,7 @@ It's a **conversation**, not a remote control — five fat tools, not one-per-cl
 
 | Tool | What it does |
 |------|--------------|
-| `start_debug` | Open a run: `{ target, goal, criteria?, timeout? }`. The small agent drives autonomously. Returns `{ session_id }`. |
+| `start_debug` | Open a run: `{ target, goal, url?, criteria?, timeout? }`. `url` is required when the target has no configured url. The small agent drives autonomously. Returns `{ session_id }`. |
 | `get_findings` | Poll status + structured findings (functional bugs + visual issues) + evidence. Long-poll with `wait`. |
 | `send_message` | Talk to the running agent mid-flight — add work, redirect, or answer a question. |
 | `describe` | List the configured targets + models for this project. |
@@ -239,7 +239,7 @@ One Chrome profile = one run. If a previous run crashed without cleaning up:
 ```bash
 npx @developerz.ai/ui-debugger-mcp stop   # graceful teardown
 ```
-Or delete `./tmp/ui-debugger-mcp/state.json` and restart the MCP server.
+Or delete `./tmp/ui-debugger-mcp/<project>/state.json` and restart the MCP server.
 
 **Run times out with no findings**
 Default cap is 300 s. Raise it per-call:
@@ -251,11 +251,11 @@ If the agent is stuck at login, add `?debug-ai=true` to your app's login route
 pattern.
 
 **`get_findings` returns empty `bugs[]` / `visual[]`**
-The run may still be in progress — use `wait: true`:
+The run may still be in progress — use `wait` (ms) to long-poll:
 ```text
-get_findings { session_id: "...", wait: true }
+get_findings { session_id: "...", wait: 30000 }
 ```
-Check `./tmp/ui-debugger-mcp/<project>/logs/agent.log` for the agent's trace.
+Check `./tmp/ui-debugger-mcp/<project>/sessions/<id>/logs/agent.log` for the agent's trace.
 
 **`replay.mp4` not generated**
 ffmpeg is optional. Install it and retry, or ignore — findings and screenshots
@@ -301,7 +301,7 @@ See [`docs/idea/`](docs/idea/) for design notes.
 
 ## Credits / influences
 
-- [`ai-task-master`](../ai-task-master) — build template (orchestrator + subagents)
-- [`gold-standards-in-ai`](../gold-standards-in-ai) — MCP & code conventions
-- [`claude-code-bible`](../../sebyx07/claude-code-bible) — agent-first patterns
+- `ai-task-master` — build template (orchestrator + subagents), reference repo, not published
+- `gold-standards-in-ai` — MCP & code conventions, reference repo, not published
+- `claude-code-bible` — agent-first patterns ([sebyx07/claude-code-bible](https://github.com/sebyx07/claude-code-bible))
 - [Model Context Protocol](https://modelcontextprotocol.io/docs/develop/connect-local-servers)
