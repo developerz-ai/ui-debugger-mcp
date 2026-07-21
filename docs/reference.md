@@ -24,9 +24,14 @@ treat/gate the call):
 Evidence paths (screenshots, `replay.mp4`, logs) in a result are additionally
 returned as `resource_link` content items (`file://` URIs), not just inline path
 strings — a client can act on them without parsing text. A run failure surfaces
-as `isError: true` on the result, never a protocol-level error. Any top-level
-findings array over 20 items is capped in the response, with a trailing text
-note steering the caller to `get_findings` with a narrower `fields` projection.
+as `isError: true` on the result, never a protocol-level error.
+
+Truncation applies to `get_findings` only, and only to a whole-object read: a
+`steps`/`bugs`/`visual` array over 20 items is capped, with a trailing text note
+steering the caller to `get_findings` with a `fields` projection — a projected
+read returns those arrays in full. No other tool caps anything; `describe`
+always returns the complete target catalog, since there is no second call that
+could reach an omitted target.
 
 ---
 
@@ -78,7 +83,7 @@ Poll the run: status plus the full structured findings snapshot. Supports long-p
 |-------|------|----------|-------------|
 | `session_id` | `string` | yes | From `start_debug`. |
 | `wait` | `number` (int, ms, 0–120 000) | no | Long-poll up to this many ms for a terminal verdict before reading. Omit or `0` to read immediately. |
-| `fields` | `FindingsField[]` | no | Project a subset of findings keys (e.g. `["status","bugs"]`). Omit for the whole object. Valid values: `status`, `steps`, `bugs`, `visual`, `summary`, `evidence`. |
+| `fields` | `FindingsField[]` | no | Project a subset of findings keys (e.g. `["status","bugs"]`). Omit for the whole object, whose lists are capped at 20 items; a projected read returns them in full. Valid values: `status`, `steps`, `bugs`, `visual`, `summary`, `evidence`. |
 
 **Returns** — `Findings` object (see schema below), possibly projected.
 

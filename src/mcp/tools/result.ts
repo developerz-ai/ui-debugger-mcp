@@ -7,9 +7,10 @@
  *
  * Two spec-alignment behaviors live here too, so no tool handler has to think
  * about them:
- *  - **Truncation steering**: a findings-shaped list (`steps`/`bugs`/`visual`)
- *    over {@link MAX_LIST_ITEMS} gets capped; a trailing text block tells the
- *    caller what to do next instead of silently dropping data.
+ *  - **Truncation steering** (opt-in, see {@link ToolResultOptions.capLists}):
+ *    a list over {@link MAX_LIST_ITEMS} gets capped and a trailing text block
+ *    names the retrieval that returns it whole. Never capped without one — a
+ *    dropped entry the caller cannot ask for again is silent data loss.
  *  - **`resource_link`s**: evidence paths (screenshots, `replay.mp4`, logs) ride
  *    as `resource_link` content items (file:// URIs) alongside the text block —
  *    the spec-blessed form, not inline path strings the caller has to notice.
@@ -104,18 +105,35 @@ function steeringNote(truncated: string[]): string {
   const fields = truncated.map((f) => `"${f}"`).join(', ');
   return (
     `Truncated ${truncated.join(', ')} to the first ${MAX_LIST_ITEMS} items. ` +
-    `Call get_findings with fields=[${fields}] and inspect the full arrays there, ` +
-    'or check replay.mp4 / the workspace logs for the complete run.'
+    `Call get_findings with fields=[${fields}] to read those arrays in full — ` +
+    'a projected read is never truncated. The complete run also sits on disk: ' +
+    'findings.json / replay.mp4 / the logs under the session workspace.'
   );
 }
 
+/** Per-call switches for {@link toToolResult}. */
+export interface ToolResultOptions {
+  /**
+   * Cap over-long top-level arrays and append {@link steeringNote}.
+   *
+   * Opt-in, because the note has to name a retrieval that really returns the
+   * dropped items. Only `get_findings` has one — and only for an unprojected
+   * read, since `fields=[...]` comes back uncapped. Everything else stays whole:
+   * `describe.targets` is the configured catalog, there is no page 2, so a
+   * capped entry would be undiscoverable.
+   */
+  capLists?: boolean;
+}
+
 /** Wrap a service result as a tool response: pretty `text` plus `structuredContent` for records. */
-export function toToolResult(data: unknown): CallToolResult {
+export function toToolResult(data: unknown, options: ToolResultOptions = {}): CallToolResult {
   if (!isRecord(data)) {
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
   }
 
-  const { capped, truncated } = capLists(data);
+  const { capped, truncated } = options.capLists
+    ? capLists(data)
+    : { capped: data, truncated: [] as string[] };
   const content: CallToolResult['content'] = [
     { type: 'text', text: JSON.stringify(capped, null, 2) },
   ];

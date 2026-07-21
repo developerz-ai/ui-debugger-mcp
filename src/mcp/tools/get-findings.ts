@@ -59,12 +59,17 @@ export function getFindingsTool(service: DebugApi): McpTool {
               .min(1)
               .optional()
               .describe(
-                'Project a subset of findings keys (e.g. ["status","bugs"]). Omit for the whole object.',
+                'Project a subset of findings keys (e.g. ["status","bugs"]). Omit for the whole ' +
+                  'object, whose lists are capped at 20 items; a projected read returns them in full.',
               ),
           },
           outputSchema: FindingsOutputSchema,
         },
-        async (args) => toToolResult(await service.getFindings(args)),
+        // Cap the lists only on a whole-object read: the steering note points back
+        // at `fields=[...]`, so a projected read must come back complete or the
+        // recovery path it names would be a lie.
+        async (args) =>
+          toToolResult(await service.getFindings(args), { capLists: args.fields === undefined }),
       );
     },
   };
