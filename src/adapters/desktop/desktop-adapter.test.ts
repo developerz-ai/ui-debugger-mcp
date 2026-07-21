@@ -50,6 +50,14 @@ class FakePointer implements PointerInput {
   }
 }
 
+/** A window that never comes up — stands in for the real 10s xdotool poll. */
+class StuckPointer extends FakePointer {
+  override activateWindow(match: WindowMatch): Promise<void> {
+    this.calls.push(`activate:${JSON.stringify(match)}`);
+    return new Promise<void>(() => {});
+  }
+}
+
 class FakeCapture implements ScreenCapture {
   async capture(): Promise<Uint8Array> {
     return new Uint8Array([1, 2, 3]);
@@ -192,6 +200,55 @@ test('close is a no-op when nothing was launched', async () => {
 });
 
 // --- open (managed process lifecycle) -----------------------------------------
+
+/** Build an adapter whose window never appears, so only the launch outcome decides `open`. */
+function stuck(launch: string): DesktopAdapter {
+  return DesktopAdapter.create({
+    config: { adapter: 'desktop', launch, window: { title: 'Ghost' } },
+    atspi: new FakeAtspi([]),
+    input: new StuckPointer(),
+    capture: new FakeCapture(),
+  });
+}
+
+test('open fails loud with the launch command exit code, not a window timeout', async () => {
+  // Without the death latch this waits out WINDOW_WAIT_MS (10s) and blames the window.
+  await expect(stuck('exit 3').open('Ghost')).rejects.toThrow(/exit code 3/);
+  await expect(stuck('exit 3').open('Ghost')).rejects.toThrow(AdapterError);
+});
+
+test('open names the real reason when the launch binary is missing', async () => {
+  // /bin/sh reports "command not found" as 127 — the actionable signal, in seconds.
+  await expect(stuck('__uidbg_no_such_binary__ --go').open('Ghost')).rejects.toThrow(
+    /exit code 127/,
+  );
+});
+
+test('open reports a launch killed by a signal', async () => {
+  await expect(stuck('kill -TERM $$').open('Ghost')).rejects.toThrow(/killed by SIGTERM/);
+});
+
+test('open resolves once the window activates while the app stays up', async () => {
+  const input = new FakePointer();
+  const adapter = DesktopAdapter.create({
+    config: { adapter: 'desktop', launch: 'sleep 5', window: { title: 'App' } },
+    atspi: new FakeAtspi([]),
+    input,
+    capture: new FakeCapture(),
+  });
+  await expect(adapter.open('App')).resolves.toBeUndefined();
+  expect(input.calls).toEqual(['activate:{"title":"App"}']);
+  await expect(adapter.close()).resolves.toBeUndefined(); // kills the group
+});
+
+test('open refuses to launch when there is no window to drive', async () => {
+  // No `window` config and a blank open target (what session-builder passes): the old
+  // code spawned the app and resolved having verified nothing.
+  const { adapter, input } = build();
+  await expect(adapter.open('  ')).rejects.toThrow(/no window to drive/);
+  expect(input.calls).toEqual([]);
+  await expect(adapter.close()).resolves.toBeUndefined(); // nothing was spawned
+});
 
 test('open respawns the managed app after it exits', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'uidbg-adapter-'));

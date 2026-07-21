@@ -64,6 +64,13 @@ interface DesktopAdapterHandles {
   capture: ScreenCapture;
 }
 
+/** The managed child, paired with the death latch `open` races the window wait against. */
+interface Launched {
+  proc: ChildProcess;
+  /** Rejects (loud, naming the exit code/signal) the moment the child dies. Never resolves. */
+  died: Promise<never>;
+}
+
 export interface DesktopAdapterInit {
   /** Resolved desktop-target config (launch command, window match, display). */
   config: DesktopTarget;
@@ -85,7 +92,7 @@ export class DesktopAdapter implements Adapter {
   readonly #atspi: AtspiSource;
   readonly #input: PointerInput;
   readonly #capture: ScreenCapture;
-  #process: ChildProcess | null = null;
+  #child: Launched | null = null;
 
   private constructor(handles: DesktopAdapterHandles) {
     this.#config = handles.config;
@@ -107,27 +114,71 @@ export class DesktopAdapter implements Adapter {
     });
   }
 
-  /** Launch the managed app (once) and activate the target window. `target` is a title fallback. */
+  /**
+   * Launch the managed app (once) and activate the target window. `target` is a title
+   * fallback for the configured `window` match.
+   *
+   * Never resolves having verified nothing: with no window to match it fails before
+   * spawning, and a `launch` command that dies (bad binary → 127, crash → signal)
+   * rejects with that exit code as soon as it happens — not after the window timeout.
+   */
   async open(target: string): Promise<void> {
     await this.#run('open', async () => {
-      if (!this.#process) {
-        const child = spawn('/bin/sh', ['-c', this.#config.launch], {
-          env: this.#env,
-          detached: true,
-          stdio: 'ignore',
-        });
-        this.#process = child;
-        // A dead app must not pin `#process`: clear it on exit/error so a later
-        // `open` relaunches and `close` never kills a recycled process group.
-        const clear = (): void => {
-          if (this.#process === child) this.#process = null;
-        };
-        child.once('exit', clear);
-        child.once('error', clear);
-      }
       const match = this.#windowMatch(target);
-      if (match) await this.#input.activateWindow(match, WINDOW_WAIT_MS);
+      if (!match) {
+        throw new AdapterError(
+          'desktop: no window to drive — set `window.title` or `window.class` on the desktop ' +
+            'target, or pass a window title as the open target',
+        );
+      }
+      const { died } = this.#launch();
+      const activated = this.#input.activateWindow(match, WINDOW_WAIT_MS);
+      // Pre-handle the loser: when the child dies first, the window wait keeps polling
+      // (bounded by WINDOW_WAIT_MS) and its later rejection must not go unhandled.
+      activated.catch(() => {});
+      await Promise.race([activated, died]);
     });
+  }
+
+  /**
+   * Spawn the managed app (a live child is reused) and latch its death.
+   *
+   * `stdio: 'ignore'` keeps the app detached from our stdio MCP channel, so the exit
+   * code is the only signal we get — hence the latch: {@link Launched.died} carries it
+   * to whoever is waiting in `open`.
+   */
+  #launch(): Launched {
+    const running = this.#child;
+    if (running) return running;
+    const command = this.#config.launch;
+    const proc = spawn('/bin/sh', ['-c', command], {
+      env: this.#env,
+      detached: true,
+      stdio: 'ignore',
+    });
+    const died = new Promise<never>((_resolve, reject) => {
+      const down = (reason: string): void => {
+        // A dead app must not pin `#child`: clear it so a later `open` relaunches
+        // and `close` never kills a recycled process group.
+        if (this.#child?.proc === proc) this.#child = null;
+        reject(
+          new AdapterError(
+            `desktop: launch command exited (${reason}) before the window appeared: ${command}`,
+          ),
+        );
+      };
+      proc.once('exit', (code, signal) =>
+        down(signal ? `killed by ${signal}` : `exit code ${code ?? 'unknown'}`),
+      );
+      // 'error' fires async: unlistened, a missing `/bin/sh` would crash the server.
+      proc.once('error', (error) => down(`spawn failed: ${error.message}`));
+    });
+    // The app normally outlives `open`, so its eventual exit rejects with nobody racing
+    // it — pre-handle so a clean quit is never an unhandled rejection.
+    died.catch(() => {});
+    const launched: Launched = { proc, died };
+    this.#child = launched;
+    return launched;
   }
 
   async find(opts: Query): Promise<Node | null> {
@@ -216,8 +267,8 @@ export class DesktopAdapter implements Adapter {
 
   /** Managed teardown: SIGTERM the launched process group; an already-dead process is a no-op. */
   async close(): Promise<void> {
-    const pid = this.#process?.pid;
-    this.#process = null;
+    const pid = this.#child?.proc.pid;
+    this.#child = null;
     if (pid === undefined) return;
     await this.#run('close', async () => {
       try {
