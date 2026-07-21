@@ -13,11 +13,12 @@
  * `FindingsError` — never a silent fallback.
  */
 
-import { access, appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { access, appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FindingsError } from '../errors.js';
 import type { Findings } from '../findings/schema.js';
 import { FindingsSchema } from '../findings/schema.js';
+import { writeFileAtomic } from './atomic-write.js';
 import type { SessionPaths } from './workspace.js';
 
 /** Append-only log channels backing `logs/<channel>.log`. */
@@ -76,9 +77,7 @@ export class FindingsStore {
     await this.#ensureDirs();
     // Write-then-rename so a concurrent reader (get_findings, CLI `status`) never
     // sees a torn/empty findings.json — rename is atomic on the same filesystem.
-    const tmp = `${this.#paths.findingsJson}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(result.data, null, 2)}\n`, 'utf8');
-    await rename(tmp, this.#paths.findingsJson);
+    await writeFileAtomic(this.#paths.findingsJson, `${JSON.stringify(result.data, null, 2)}\n`);
     return this.#paths.findingsJson;
   }
 

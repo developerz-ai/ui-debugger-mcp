@@ -13,9 +13,10 @@
  * no-op port by default, the real {@link FileStatePort} wired at boot.
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { z } from 'zod';
+import { writeFileAtomic } from './atomic-write.js';
 import { captureIdentity, ownerAlive, ProcessIdentitySchema } from './process-identity.js';
 import { sessionPaths, type WorkspacePaths } from './workspace.js';
 
@@ -43,10 +44,16 @@ export const StateFileSchema = z.object({
 
 export type StateFile = z.infer<typeof StateFileSchema>;
 
-/** Write `state.json` (creates the parent dir; best-effort overwrite). */
+/**
+ * Write `state.json` (creates the parent dir), replacing it atomically.
+ *
+ * The CLI reads this file from another process while the server writes it, so
+ * the swap goes through {@link writeFileAtomic} — a `status`/`stop` that lands
+ * mid-write must never read a truncated file and report "no debug run".
+ */
 export async function writeState(path: string, state: StateFile): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  await writeFileAtomic(path, `${JSON.stringify(state, null, 2)}\n`);
 }
 
 /** Read + validate `state.json`; `null` when absent or malformed (never throws). */
@@ -151,9 +158,15 @@ export class FileStatePort implements StatePort {
 /**
  * Flip the recorded status (`ended`/`stopped`) in place, if a state file exists.
  *
- * `stopped` is terminal and wins: a CLI `stop` records it first, then the server's
- * SIGTERM path calls `clear()` → `markStatus(..., 'ended')`. Preserve the existing
- * `stopped` here so `status` keeps reporting the true terminal state after a stop.
+ * `stopped` is terminal and wins: a CLI `stop` records it *before* signaling, then
+ * the server's SIGTERM path calls `clear()` → `markStatus(..., 'ended')`. Preserve
+ * the existing `stopped` here so `status` keeps reporting the true terminal state
+ * after a stop.
+ *
+ * This read-modify-write is not a cross-process lock — the ordering is what makes
+ * it deterministic. The server cannot begin its teardown until the signal lands,
+ * and the signal is only sent once `stopped` is durably on disk (see
+ * `runStop`), so the server's read always observes `stopped` and keeps it.
  */
 export async function markStatus(
   path: string,
@@ -164,4 +177,19 @@ export async function markStatus(
   if (!prior) return;
   const nextStatus = prior.status === 'stopped' ? 'stopped' : status;
   await writeState(path, { ...prior, status: nextStatus, updatedAt: now.toISOString() });
+}
+
+/**
+ * Roll a `stopped` mark back to `running` — the CLI's undo when the signal that
+ * was supposed to follow it never landed (e.g. `EPERM`).
+ *
+ * `stop` records `stopped` first so the server's `markStatus('ended')` can't win
+ * the race; when nothing is actually tearing down, that record would be a lie.
+ * Only a `stopped` still on disk is rolled back: any other status was written by
+ * someone else and is left alone.
+ */
+export async function restoreRunning(path: string, now: Date = new Date()): Promise<void> {
+  const prior = await readState(path);
+  if (prior?.status !== 'stopped') return;
+  await writeState(path, { ...prior, status: 'running', updatedAt: now.toISOString() });
 }

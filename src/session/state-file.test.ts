@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureIdentity } from './process-identity.js';
 import type { StateFile } from './state-file.js';
-import { FileStatePort, markStatus, readState, writeState } from './state-file.js';
+import { FileStatePort, markStatus, readState, restoreRunning, writeState } from './state-file.js';
 import { workspacePaths } from './workspace.js';
 
 let dir: string;
@@ -64,6 +64,42 @@ test('markStatus preserves a terminal stopped when a later shutdown marks ended'
   await writeState(path, { ...SAMPLE, status: 'stopped' });
   await markStatus(path, 'ended');
   expect((await readState(path))?.status).toBe('stopped');
+});
+
+test('writeState publishes atomically — the CLI never reads a torn state.json', async () => {
+  const path = join(dir, 'state.json');
+  await writeState(path, SAMPLE);
+  // Repeated + concurrent writes (server records, CLI marks) must leave exactly
+  // one file: a shared temp name would litter the workspace or publish garbage.
+  await Promise.all([
+    writeState(path, { ...SAMPLE, status: 'ended' }),
+    writeState(path, { ...SAMPLE, status: 'stopped' }),
+    writeState(path, { ...SAMPLE, goal: 'other' }),
+  ]);
+
+  expect(await readdir(dir)).toEqual(['state.json']);
+  expect(await readState(path)).not.toBeNull();
+});
+
+test('restoreRunning rolls a premature stopped back to running', async () => {
+  const path = join(dir, 'state.json');
+  await writeState(path, { ...SAMPLE, status: 'stopped' });
+  await restoreRunning(path, new Date('2026-06-29T03:00:00.000Z'));
+  const after = await readState(path);
+  expect(after?.status).toBe('running');
+  expect(after?.updatedAt).toBe('2026-06-29T03:00:00.000Z');
+  expect(after?.sessionId).toBe(SAMPLE.sessionId);
+});
+
+test('restoreRunning leaves a status it did not write (and a missing file) alone', async () => {
+  const path = join(dir, 'state.json');
+  await writeState(path, { ...SAMPLE, status: 'ended' });
+  await restoreRunning(path);
+  expect((await readState(path))?.status).toBe('ended');
+
+  const absent = join(dir, 'nope.json');
+  await restoreRunning(absent);
+  expect(await readState(absent)).toBeNull();
 });
 
 test('markStatus is a no-op when there is no state file', async () => {

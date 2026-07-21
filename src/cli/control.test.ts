@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { captureIdentity } from '../session/process-identity.js';
 import type { StateFile } from '../session/state-file.js';
 import { readState, writeState } from '../session/state-file.js';
 import { workspacePaths } from '../session/workspace.js';
@@ -98,6 +100,64 @@ test('stop with a stale PID marks run stopped without signaling', async () => {
   await runStop(cwd);
   const out = logs.join('\n');
   expect(out).toContain('without signaling');
+  expect((await readState(stateJson))?.status).toBe('stopped');
+});
+
+// --- stop-vs-end ordering ---------------------------------------------------
+
+/** A live, verifiable owner: this very process. */
+function liveOwner(): Partial<StateFile> {
+  return { pid: process.pid, identity: captureIdentity(process.pid) };
+}
+
+test('stop records `stopped` before the signal reaches the server', async () => {
+  const stateJson = await seedState(liveOwner());
+  // The server's SIGTERM handler marks `ended` via a read-modify-write; it can
+  // only preserve `stopped` if the mark is already on disk when the signal lands.
+  let statusAtSignal: string | undefined;
+  const kill = () => {
+    statusAtSignal = JSON.parse(readFileSync(stateJson, 'utf8')).status;
+  };
+
+  await runStop(cwd, kill);
+
+  expect(statusAtSignal).toBe('stopped');
+  expect(logs.join('\n')).toContain('SIGTERM');
+  expect((await readState(stateJson))?.status).toBe('stopped');
+});
+
+test('a failed signal rolls the mark back — a live run is never reported stopped', async () => {
+  const stateJson = await seedState(liveOwner());
+  const kill = () => {
+    throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+  };
+  const errors: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => {
+    errors.push(args.join(' '));
+  };
+  const priorExitCode = process.exitCode;
+
+  try {
+    await runStop(cwd, kill);
+  } finally {
+    console.error = origError;
+    process.exitCode = priorExitCode;
+  }
+
+  expect(errors.join('\n')).toContain('failed to signal server');
+  expect((await readState(stateJson))?.status).toBe('running'); // teardown never started
+});
+
+test('stop still marks stopped when the server exited between check and signal', async () => {
+  const stateJson = await seedState(liveOwner());
+  const kill = () => {
+    throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+  };
+
+  await runStop(cwd, kill);
+
+  expect(logs.join('\n')).toContain('already exited');
   expect((await readState(stateJson))?.status).toBe('stopped');
 });
 
