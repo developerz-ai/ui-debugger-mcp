@@ -83,6 +83,16 @@ const consoleResult = (...entries: Array<{ level: string; text: string; location
 /** Fresh run-long accumulators for the running flush. */
 const runTrail = (): RunTrail => ({ steps: [], bugs: [], visual: [] });
 
+/**
+ * A `tool-error` content part — AI SDK 6's shape for a rejected tool call (never
+ * `toolResults`; see `describeStep` and `progressForStep`'s `acted` check below).
+ */
+const toolErrorPart = (toolName: string, error: unknown) => ({
+  type: 'tool-error',
+  toolName,
+  error,
+});
+
 test('foldInstructionsIntoStep returns no override when nothing was ever injected', () => {
   expect(foldInstructionsIntoStep(fakeInbox(), [], [])).toEqual({});
 });
@@ -345,12 +355,37 @@ test('describeStep surfaces a tool-error content part (AI SDK 6 shape), not tool
       toolResults: [], // AI SDK 6 never puts a failed call's error here
       content: [
         { type: 'tool-call', toolName: 'act' },
-        { type: 'tool-error', toolName: 'act', error: new Error('element not found') },
+        toolErrorPart('act', new Error('element not found')),
       ],
     },
     3,
   );
   expect(line).toBe('step 3: act({"act":"click #save"}) — ERROR act: element not found');
+});
+
+test('progressForStep flushes a FAILED act too — a rejected tool call never reaches toolResults', () => {
+  const running = runTrail();
+  // What `runAct` does on a throw (see `belt/act.ts`): the trail gets the
+  // `ok: false` entry AT ACT TIME, before the step content — carrying only a
+  // `tool-error` part — ever reaches `onStepFinish`.
+  running.steps.push({ step: 'click #save', ok: false, note: 'AgentError: no element matched' });
+  const out = progressForStep(
+    {
+      toolCalls: [{ toolName: 'act', input: { action: 'click', target: '#save' } }],
+      toolResults: [], // the failed call's result is not here — only in `content`
+      content: [toolErrorPart('act', new Error('no element matched'))],
+    },
+    running,
+  );
+  // Gating on toolResults (the pre-fix check) would see no `act` result and no
+  // new bugs/visual, and return null — silently losing the one step a crashed
+  // run most needs: the failure itself. Gating on toolCalls catches it.
+  expect(out).toEqual({
+    status: 'running',
+    steps: [{ step: 'click #save', ok: false, note: 'AgentError: no element matched' }],
+    bugs: [],
+    visual: [],
+  });
 });
 
 test('describeStep stays clean when the step has no content (or no errors in it)', () => {

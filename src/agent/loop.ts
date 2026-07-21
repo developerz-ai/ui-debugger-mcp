@@ -305,7 +305,14 @@ export interface RunTrail {
  */
 export function progressForStep(step: FinishedStep, running: RunTrail): Findings | null {
   if (step.toolCalls.some((call) => call.toolName === 'report')) return null;
-  const acted = step.toolResults.some((result) => result.toolName === 'act');
+  // Checked against `toolCalls`, NOT `toolResults`: a FAILED act still lands on
+  // `running.steps` (`act` records `ok: false` at act time, then rethrows — see
+  // `belt/act.ts`), but AI SDK 6 routes a rejected tool call to a `tool-error`
+  // content part, never `toolResults` (see `describeStep` above). Gating on
+  // `toolResults` would miss every failed act — exactly the step a crashed run
+  // most needs preserved — unless the same step happened to also add a bug or
+  // visual issue.
+  const acted = step.toolCalls.some((call) => call.toolName === 'act');
   const bugs = appendNew(running.bugs, consoleBugsFrom(step.toolResults), (bug) =>
     messageKey(bug.detail),
   );

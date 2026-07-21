@@ -1,12 +1,17 @@
 /**
- * Scripted end-to-end runs of the debug loop against a mock model + a real belt —
- * the pure-helper tests live in `loop.test.ts`.
+ * Scripted end-to-end runs of the debug loop against a mock model + a real belt,
+ * focused on findings persistence — the happy path, the same-step act+report
+ * race, streamed findings, and a crash/abort that never reaches `report`.
+ *
+ * The pure-helper tests live in `loop.test.ts`; the inbox-folding + abort-signal
+ * scripted runs live in `loop.inbox.test.ts`.
  */
 
 import { expect, test } from 'bun:test';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
+import { AgentError } from '../errors.js';
 import type { Findings } from '../findings/schema.js';
 import { createReportTool } from './belt/report.js';
 import { type ActTrail, createActTrail } from './belt/trail.js';
@@ -263,168 +268,103 @@ test('scripted loop streams look issues + console errors before any verdict', as
   ]);
 });
 
-test('mid-run injected message folds into the next model turn', async () => {
-  const { writer } = findingsTracker();
-  const belt = realBelt(writer);
-
-  // Mutable inbox: empty for step 1's prepareStep, then filled from inside
-  // doGenerate call 1 so step 2's prepareStep drains it.
-  const pending: string[] = [];
-  const inbox: LoopInbox = {
-    drain() {
-      const out = [...pending];
-      pending.length = 0;
-      return out;
+/**
+ * A hand-rolled `act` tool that fails the way the real one does (see
+ * `belt/act.ts`'s `runAct`): record `ok: false` on the shared trail at act time,
+ * THEN rethrow — so the driver sees the error while the trail keeps the truth.
+ * The SDK routes the throw to a `tool-error` content part, never `toolResults`.
+ */
+function failingAct(trail: ActTrail) {
+  return tool({
+    description: 'act',
+    inputSchema: z.object({ action: z.string(), target: z.string().optional() }),
+    execute: async (input): Promise<{ action: string; label: string; ok: true }> => {
+      const settle = trail.begin();
+      const label = `${input.action}${input.target ? ` ${input.target}` : ''}`;
+      try {
+        throw new AgentError(`no element matched ${JSON.stringify(input.target)}`);
+      } catch (error) {
+        trail.record({ step: label, ok: false, note: (error as Error).message });
+        throw error;
+      } finally {
+        settle();
+      }
     },
-  };
+  });
+}
 
-  // Capture the raw prompt messages for each doGenerate call so we can
-  // assert the injected message is present in call 2 but not call 1.
-  const seenPrompts: string[][] = [];
+test('crash/abort: findings.json keeps look issues, console bugs and a failed act — nothing found is lost', async () => {
+  const { written, writer } = findingsTracker();
+  const trail = createActTrail();
+  const belt = realBelt(writer, trail);
+  belt.observe = tool({
+    description: 'observe',
+    inputSchema: z.object({ kind: z.string() }),
+    execute: async () => ({
+      kind: 'console',
+      count: 1,
+      entries: [{ level: 'error', text: 'TypeError: cart is undefined', location: 'app.js:12:3' }],
+    }),
+  });
+  belt.look = tool({
+    description: 'look',
+    inputSchema: z.object({ question: z.string().optional() }),
+    execute: async () => ({
+      description: 'the total overlaps the button',
+      issues: [{ what: 'total overlaps the pay button', where: 'cart footer', severity: 'high' }],
+      screenshot: '002-cart.png',
+    }),
+  });
+  belt.act = failingAct(trail);
 
   let callCount = 0;
-  const model = new MockLanguageModelV3({
-    doGenerate: async (opts) => {
-      callCount++;
-
-      // Collect all text across user messages for this call.
-      const texts: string[] = [];
-      for (const msg of opts.prompt) {
-        if (msg.role === 'user') {
-          for (const part of msg.content) {
-            if (part.type === 'text') texts.push(part.text);
-          }
-        }
-      }
-      seenPrompts.push(texts);
-
-      if (callCount === 1) {
-        // Inject mid-run message AFTER step 1 starts — prepareStep for step 2
-        // will drain it before doGenerate call 2.
-        pending.push('check mobile view');
-        return toolCallResponse('c1', 'observe', { kind: 'tree' });
-      }
-      return toolCallResponse('c2', 'report', { status: 'passed' });
-    },
-  });
-
-  const agent = createDebugAgent({
-    model,
-    tools: belt,
-    instructions: 'debug',
-    inbox,
-    progress: writer,
-    maxSteps: 10,
-  });
-
-  await runDebugLoop({ agent });
-
-  expect(callCount).toBe(2);
-
-  // Call 1 must NOT contain the injected message (it was injected after call 1 started)
-  const call1Text = seenPrompts[0]?.join('\n') ?? '';
-  expect(call1Text).not.toContain('check mobile view');
-
-  // Call 2 MUST contain the injected message (prepareStep drained it before call 2)
-  const call2Text = seenPrompts[1]?.join('\n') ?? '';
-  expect(call2Text).toContain('Mid-run instructions');
-  expect(call2Text).toContain('check mobile view');
-});
-
-test('mid-run instructions persist into EVERY later step, without duplicating', async () => {
-  const { writer } = findingsTracker();
-  const belt = realBelt(writer);
-
-  const pending: string[] = [];
-  const inbox: LoopInbox = {
-    drain() {
-      const out = [...pending];
-      pending.length = 0;
-      return out;
-    },
-  };
-
-  const seenPrompts: string[][] = [];
-  let callCount = 0;
-  const model = new MockLanguageModelV3({
-    doGenerate: async (opts) => {
-      callCount++;
-      const texts: string[] = [];
-      for (const msg of opts.prompt) {
-        if (msg.role === 'user') {
-          for (const part of msg.content) {
-            if (part.type === 'text') texts.push(part.text);
-          }
-        }
-      }
-      seenPrompts.push(texts);
-
-      if (callCount === 1) {
-        // Injected after step 1 starts; the inbox drains it once, before call 2.
-        pending.push('also verify the footer links');
-        return toolCallResponse('c1', 'observe', { kind: 'tree' });
-      }
-      if (callCount < 4) return toolCallResponse(`c${callCount}`, 'observe', { kind: 'tree' });
-      return toolCallResponse('c4', 'report', { status: 'passed' });
-    },
-  });
-
-  const agent = createDebugAgent({
-    model,
-    tools: belt,
-    instructions: 'debug',
-    inbox,
-    progress: writer,
-    maxSteps: 10,
-  });
-
-  await runDebugLoop({ agent });
-  expect(callCount).toBe(4);
-
-  // Step 1: injected after the call started — absent.
-  expect(seenPrompts[0]?.join('\n')).not.toContain('verify the footer links');
-
-  // Steps 2, 3 AND 4: the instruction is still in effect — the inbox drained empty
-  // after step 2, but the standing list re-folds it into every subsequent prompt.
-  for (const call of [1, 2, 3]) {
-    const text = seenPrompts[call]?.join('\n') ?? '';
-    expect(text).toContain('Mid-run instructions');
-    expect(text).toContain('also verify the footer links');
-    // Exactly one occurrence: one rebuilt block per step, never accumulation.
-    expect(text.split('also verify the footer links').length - 1).toBe(1);
-  }
-});
-
-test('abort signal propagates: loop rejects when the model throws AbortError', async () => {
-  const { writer } = findingsTracker();
-  const belt = realBelt(writer);
-
-  let callCount = 0;
-  const controller = new AbortController();
-
   const model = new MockLanguageModelV3({
     doGenerate: async () => {
       callCount++;
-      if (callCount === 1) {
-        // First call succeeds; abort fires so next call is never reached cleanly
-        controller.abort();
-        return toolCallResponse('c1', 'observe', { kind: 'tree' });
-      }
-      // Simulate what happens when the signal is aborted: the network call throws
-      const err = new Error('The operation was aborted');
-      err.name = 'AbortError';
-      throw err;
+      if (callCount === 1) return toolCallResponse('c1', 'observe', { kind: 'console' });
+      if (callCount === 2) return toolCallResponse('c2', 'look', { question: 'is it aligned?' });
+      if (callCount === 3)
+        return toolCallResponse('c3', 'act', { action: 'click', target: '#save' });
+      // The driver never reaches `report` — the step cap below stops the loop
+      // right after the failed act, standing in for a genuine crash/abort.
+      throw new Error('unreachable: maxSteps must stop the loop before a 4th call');
     },
   });
 
   const agent = createDebugAgent({
     model,
     tools: belt,
-    instructions: 'debug',
+    instructions: 'debug this app',
     inbox: fakeInbox(),
     progress: writer,
-    maxSteps: 10,
+    trail: trail.steps,
+    maxSteps: 3,
   });
 
-  await expect(runDebugLoop({ agent, abortSignal: controller.signal })).rejects.toThrow();
+  await runDebugLoop({ agent });
+
+  expect(callCount).toBe(3);
+  // No terminal verdict was ever written — `report` was never called.
+  expect(written.every((f) => f.status === 'running')).toBe(true);
+
+  const last = written.at(-1);
+  if (!last) throw new Error('expected at least one running findings write');
+  expect(last.bugs).toEqual([
+    { kind: 'console', detail: 'TypeError: cart is undefined', evidence: 'app.js:12:3' },
+  ]);
+  expect(last.visual).toEqual([
+    {
+      issue: 'total overlaps the pay button',
+      where: 'cart footer',
+      severity: 'high',
+      screenshot: '002-cart.png',
+    },
+  ]);
+  // The failed act's trail entry — truthful `ok: false` + note — survived, not
+  // just the flushes that happened to also carry a bug/visual delta.
+  expect(last.steps).toEqual([
+    { step: 'click #save', ok: false, note: 'no element matched "#save"' },
+  ]);
 });
+
+// Mid-run instruction folding + abort-signal propagation live in `loop.inbox.test.ts`.
