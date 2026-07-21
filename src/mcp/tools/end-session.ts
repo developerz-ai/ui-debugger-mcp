@@ -9,6 +9,7 @@
 import { z } from 'zod';
 import type { DebugApi } from '../../services/debug-service.js';
 import type { McpTool } from '../server.js';
+import { AckSchema } from './output.js';
 import { toToolResult } from './result.js';
 
 /** Build the `end_session` outer tool bound to the debug service. */
@@ -27,6 +28,7 @@ export function endSessionTool(service: DebugApi): McpTool {
           inputSchema: {
             session_id: z.string().min(1).describe('The id returned by start_debug.'),
           },
+          outputSchema: AckSchema,
         },
         async (args) => toToolResult(await service.end(args)),
       );

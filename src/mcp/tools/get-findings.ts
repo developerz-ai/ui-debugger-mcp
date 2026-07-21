@@ -16,6 +16,15 @@ import { toToolResult } from './result.js';
 /** Selectable top-level findings keys, derived from the findings schema. */
 const FindingsField = FindingsSchema.keyof();
 
+/**
+ * Declared output: the findings object with every key optional.
+ *
+ * A `fields` projection returns only the requested keys, so no key can be
+ * promised — an all-required schema would make every sparse read fail output
+ * validation. Types stay exact per key; only presence is loose.
+ */
+const FindingsOutputSchema = FindingsSchema.partial();
+
 /** Build the `get_findings` outer tool bound to the debug service. */
 export function getFindingsTool(service: DebugApi): McpTool {
   return {
@@ -50,6 +59,7 @@ export function getFindingsTool(service: DebugApi): McpTool {
                 'Project a subset of findings keys (e.g. ["status","bugs"]). Omit for the whole object.',
               ),
           },
+          outputSchema: FindingsOutputSchema,
         },
         async (args) => toToolResult(await service.getFindings(args)),
       );

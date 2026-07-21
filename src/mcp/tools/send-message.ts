@@ -9,6 +9,7 @@
 import { z } from 'zod';
 import type { DebugApi } from '../../services/debug-service.js';
 import type { McpTool } from '../server.js';
+import { AckSchema } from './output.js';
 import { toToolResult } from './result.js';
 
 /** Build the `send_message` outer tool bound to the debug service. */
@@ -33,6 +34,7 @@ export function sendMessageTool(service: DebugApi): McpTool {
                 'The instruction for the driver, in plain language (e.g. "skip checkout, the bug is the login form").',
               ),
           },
+          outputSchema: AckSchema,
         },
         (args) => toToolResult(service.send(args)),
       );
