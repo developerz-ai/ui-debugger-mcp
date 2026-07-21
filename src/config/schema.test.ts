@@ -43,6 +43,23 @@ test('WebTargetSchema: executablePath and cdpUrl accept null', () => {
   expect(parsed.cdpUrl).toBeNull();
 });
 
+test('WebTargetSchema: headless is optional and defaults to true', () => {
+  const minimal = WebTargetSchema.safeParse({ adapter: 'browser', url: 'http://x.test' });
+  expect(minimal.success).toBe(true);
+  expect(minimal.data?.headless).toBe(true);
+  // An explicit false still wins — the default only fills an absent key.
+  expect(WebTargetSchema.parse({ adapter: 'browser', headless: false }).headless).toBe(false);
+});
+
+test('WebTargetSchema: profile is optional but never empty', () => {
+  const base = { adapter: 'browser', url: 'http://x.test' };
+  expect(WebTargetSchema.parse(base).profile).toBeUndefined();
+  expect(WebTargetSchema.parse({ ...base, profile: 'other-profile' }).profile).toBe(
+    'other-profile',
+  );
+  expect(WebTargetSchema.safeParse({ ...base, profile: '' }).success).toBe(false);
+});
+
 test('DesktopTargetSchema: launch required; window match and display optional', () => {
   const base = { adapter: 'desktop', launch: 'my-app' };
   expect(DesktopTargetSchema.safeParse(base).success).toBe(true); // minimal still valid

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { ConfigSchema } from '../config/schema.js';
 import { runInit } from './init.js';
 
 const TMP = join(import.meta.dir, '__test_init_tmp__');
@@ -25,6 +26,13 @@ test('writes .ui-debugger-mcp.json when absent', () => {
   expect(parsed).toHaveProperty('models');
   expect(parsed).toHaveProperty('targets.web');
   expect(parsed.targets.web.adapter).toBe('browser');
+});
+
+test('the starter config validates against ConfigSchema', () => {
+  runInit(TMP);
+  const configPath = join(TMP, '.ui-debugger-mcp.json');
+  const parsed = JSON.parse(readFileSync(configPath, 'utf8'));
+  expect(ConfigSchema.safeParse(parsed).success).toBe(true);
 });
 
 test('does not overwrite existing .ui-debugger-mcp.json', () => {
@@ -66,6 +74,22 @@ test('is idempotent (second init is a no-op)', () => {
   runInit(TMP);
   expect(readFileSync(join(TMP, '.ui-debugger-mcp.json'), 'utf8')).toBe(configBefore);
   expect(readFileSync(join(TMP, '.gitignore'), 'utf8')).toBe(gitignoreBefore);
+});
+
+test('respects an existing config workspace for mkdir instead of the tmp/ default', () => {
+  const configPath = join(TMP, '.ui-debugger-mcp.json');
+  writeFileSync(configPath, JSON.stringify({ workspace: './custom-ws', targets: {} }), 'utf8');
+  runInit(TMP);
+  expect(existsSync(join(TMP, 'custom-ws'))).toBe(true);
+  expect(existsSync(join(TMP, 'tmp', 'ui-debugger-mcp'))).toBe(false);
+});
+
+test('respects an existing config workspace for gitignore instead of tmp/', () => {
+  const configPath = join(TMP, '.ui-debugger-mcp.json');
+  writeFileSync(configPath, JSON.stringify({ workspace: './custom-ws', targets: {} }), 'utf8');
+  runInit(TMP);
+  const content = readFileSync(join(TMP, '.gitignore'), 'utf8');
+  expect(content).toContain('custom-ws/');
 });
 
 test('does not write .mcp.json or any API key to disk (snippet is stdout-only)', () => {

@@ -22,10 +22,12 @@ const DebugLoginSchema = z.strictObject({
 export const WebTargetSchema = z.strictObject({
   adapter: z.literal('browser'),
   url: z.url().optional(), // optional: the caller ("boss") can supply it per-run via start_debug
-  headless: z.boolean(),
+  headless: z.boolean().default(true), // docs/idea/config.md promises headless by default
   debugLogin: DebugLoginSchema.optional(),
   executablePath: z.string().nullish(), // null = auto-detect Chrome/Chromium (managed)
-  profile: z.string().optional(), // persistent profile dir under the workspace (managed)
+  // Persistent profile dir, resolved against the workspace root (absolute path used
+  // as-is); unset = `chrome-user-data/`. Managed mode only — attach keeps its own.
+  profile: z.string().min(1).optional(),
   cdpUrl: z.url().nullish(), // set → attach over CDP, server does NOT start/stop it
 });
 

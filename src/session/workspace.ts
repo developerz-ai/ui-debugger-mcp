@@ -4,7 +4,7 @@
  */
 
 import { mkdir } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 // --- ID generator -----------------------------------------------------------
 // Counter+injected-time avoids both Date.now-only collisions and non-determinism in tests.
@@ -74,6 +74,20 @@ export function workspacePaths(cwd: string, base?: string): WorkspacePaths {
     sessions: join(root, 'sessions'),
     stateJson: join(root, 'state.json'),
   };
+}
+
+/**
+ * Resolve the managed browser's persistent-profile dir for a run.
+ *
+ * A web target's `profile` names a dir under the workspace root (an absolute path
+ * is honored as-is); unset falls back to the default `chrome-user-data/`. Attach
+ * mode (`cdpUrl`) never uses this — that browser keeps its own profile.
+ *
+ * @param workspace - result of `workspacePaths()`
+ * @param profile   - the web target's `profile` key, if set
+ */
+export function resolveProfileDir(workspace: WorkspacePaths, profile?: string): string {
+  return profile ? resolve(workspace.root, profile) : workspace.chromeUserData;
 }
 
 /**

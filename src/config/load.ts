@@ -115,7 +115,16 @@ export function loadConfig(opts: LoadOptions = {}): ResolvedConfig {
 export function loadWorkspaceDir(cwd: string = process.cwd()): string {
   const path = join(cwd, CONFIG_FILENAME);
   if (!existsSync(path)) return DEFAULT_WORKSPACE;
-  return parseProject(readFileSync(path, 'utf8')).workspace ?? DEFAULT_WORKSPACE;
+
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (e) {
+    throw new ConfigError(
+      `Failed to read \`${CONFIG_FILENAME}\`: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  return parseProject(raw).workspace ?? DEFAULT_WORKSPACE;
 }
 
 /** Parse JSON + Zod-validate the raw file contents into a typed config. */

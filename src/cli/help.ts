@@ -31,9 +31,14 @@ DOCS:
   https://github.com/developerz-ai/ui-debugger-mcp
 `;
 
-/** Print usage and exit. */
-export function runHelp(): void {
+/** Print usage without exiting — lets a caller pick its own exit code afterward. */
+export function printUsage(): void {
   console.log(USAGE);
+}
+
+/** Print usage and exit 0 (the `--help`/`-h` path). */
+export function runHelp(): void {
+  printUsage();
   process.exit(0);
 }
 

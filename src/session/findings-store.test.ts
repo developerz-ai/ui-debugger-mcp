@@ -118,9 +118,27 @@ test('writeFindings replaces atomically — no .tmp remains, target is always va
   const fs = await import('node:fs/promises');
   const entries = await fs.readdir(sp.root);
   expect(entries).toContain('findings.json');
-  expect(entries).not.toContain('findings.json.tmp'); // rename consumed the temp file
+  expect(entries.filter((e) => e.startsWith('findings.json.tmp'))).toEqual([]); // renames consumed them
   const raw = await fs.readFile(sp.findingsJson, 'utf8');
   expect(JSON.parse(raw).status).toBe('failed');
+});
+
+test('two stores on one session dir never fight over a temp file', async () => {
+  // A run can hold more than one store on the same session paths; a shared `.tmp`
+  // name would let one store's rename publish the other's half-written bytes.
+  const ws = workspacePaths('/project/my-app', tmpDir);
+  const sp = sessionPaths(ws, 'test-session-001');
+  const other = new FindingsStore(sp);
+  await Promise.all([
+    store.writeFindings(VALID_FINDINGS),
+    other.writeFindings({ ...VALID_FINDINGS, status: 'failed', summary: 'from the other store' }),
+  ]);
+
+  const fs = await import('node:fs/promises');
+  const leftovers = (await fs.readdir(sp.root)).filter((e) => e.startsWith('findings.json.'));
+  expect(leftovers).toEqual([]); // both temp files were renamed away, neither clobbered
+  const read = await store.readFindings(); // parses + validates: not a torn mix
+  expect(['passed', 'failed']).toContain(read.status);
 });
 
 test('readFindings throws FindingsError when file is missing', async () => {
@@ -150,6 +168,18 @@ test('tryReadFindings returns findings after write', async () => {
   const result = await store.tryReadFindings();
   expect(result).not.toBeNull();
   expect(result?.status).toBe('passed');
+});
+
+test('tryReadFindings still throws FindingsError when the file exists but is corrupt', async () => {
+  // Presence is normal (null) only when absent — a present-but-corrupt file must
+  // never be swallowed alongside it.
+  await store.writeFindings(VALID_FINDINGS);
+  const ws = workspacePaths('/project/my-app', tmpDir);
+  const sp = sessionPaths(ws, 'test-session-001');
+  await import('node:fs/promises').then((fs) =>
+    fs.writeFile(sp.findingsJson, 'not-json!!', 'utf8'),
+  );
+  await expect(store.tryReadFindings()).rejects.toBeInstanceOf(FindingsError);
 });
 
 // --- failed / running status -------------------------------------------------

@@ -4,24 +4,17 @@
  * Idempotent: never clobbers existing files. Runs in `process.cwd()`.
  *
  * Steps:
- *  1. mkdir ./tmp/ui-debugger-mcp/
+ *  1. mkdir the workspace dir (an existing config's `workspace` wins over the
+ *     `./tmp/ui-debugger-mcp` default — see {@link existingWorkspace})
  *  2. write .ui-debugger-mcp.json (only if absent)
- *  3. add `tmp/` to .gitignore (only if the line is missing)
+ *  3. add the workspace dir to .gitignore (only if the line is missing)
  *  4. print .mcp.json snippet (never writes the API key)
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { DEFAULT_MODELS, DEFAULT_WORKSPACE } from '../config/load.js';
-import { UiDebuggerError } from '../errors.js';
-
-export class InitError extends UiDebuggerError {
-  constructor(message: string) {
-    super(message);
-    this.name = 'InitError';
-    Object.setPrototypeOf(this, InitError.prototype);
-  }
-}
+import { join, relative, resolve, sep } from 'node:path';
+import { CONFIG_FILENAME, DEFAULT_MODELS, DEFAULT_WORKSPACE } from '../config/load.js';
+import { InitError } from '../errors.js';
 
 /** Starter project config written on `init` (only if absent). */
 const STARTER_CONFIG = JSON.stringify(
@@ -58,13 +51,66 @@ const MCP_JSON_SNIPPET = `{
   }
 }`;
 
+/** Default ignore line — matches the `workspace` default (`./tmp/ui-debugger-mcp`). */
+const DEFAULT_IGNORE_LINE = 'tmp/';
+
+/**
+ * Read the `workspace` field of an already-present `.ui-debugger-mcp.json`, if any.
+ * Deliberately lenient — not a full `ConfigSchema` parse — because `init` only needs
+ * to know where to mkdir/gitignore, not validate the whole file; a config with an
+ * unrelated schema error must not block re-running `init`. Falls back to
+ * {@link DEFAULT_WORKSPACE} when the file is absent, unparseable, or has no string
+ * `workspace` field.
+ */
+function existingWorkspace(cwd: string): string {
+  const configPath = join(cwd, CONFIG_FILENAME);
+  if (!existsSync(configPath)) return DEFAULT_WORKSPACE;
+
+  let raw: string;
+  try {
+    raw = readFileSync(configPath, 'utf8');
+  } catch (e) {
+    throw new InitError(
+      `Failed to read ${CONFIG_FILENAME}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
+  try {
+    const data: unknown = JSON.parse(raw);
+    const workspace = (data as { workspace?: unknown } | null)?.workspace;
+    if (typeof workspace === 'string' && workspace.length > 0) return workspace;
+  } catch {
+    // not JSON, or no usable `workspace` field — fall back to the default; full
+    // validation happens at server boot (`loadConfig`), not here.
+  }
+  return DEFAULT_WORKSPACE;
+}
+
+/**
+ * The `.gitignore` line for `workspaceDir`. The default workspace keeps the
+ * historical broad `tmp/` line; a custom workspace gets its own relative,
+ * trailing-slash line so it's actually ignored instead of missed. `null` when the
+ * workspace resolves outside `cwd` — nothing to add, the caller must handle it.
+ */
+function gitignoreLineFor(
+  cwd: string,
+  workspaceDir: string,
+  workspaceValue: string,
+): string | null {
+  if (workspaceValue === DEFAULT_WORKSPACE) return DEFAULT_IGNORE_LINE;
+  const rel = relative(cwd, workspaceDir);
+  if (rel.startsWith('..')) return null;
+  return `${rel.split(sep).join('/')}/`;
+}
+
 /**
  * Run the init scaffold in `cwd`.
  * Throws `InitError` on filesystem failures.
  */
 export function runInit(cwd: string = process.cwd()): void {
-  // 1. mkdir workspace
-  const workspaceDir = join(cwd, 'tmp', 'ui-debugger-mcp');
+  // 1. mkdir workspace — respects an already-present config's `workspace` field.
+  const workspaceValue = existingWorkspace(cwd);
+  const workspaceDir = resolve(cwd, workspaceValue);
   try {
     mkdirSync(workspaceDir, { recursive: true });
   } catch (e) {
@@ -89,9 +135,16 @@ export function runInit(cwd: string = process.cwd()): void {
     console.log(`✓ created    .ui-debugger-mcp.json`);
   }
 
-  // 3. add `tmp/` to .gitignore (only if line absent)
+  // 3. add the workspace dir to .gitignore (only if the line is missing)
   const gitignorePath = join(cwd, '.gitignore');
-  ensureGitignoreLine(gitignorePath, 'tmp/');
+  const ignoreLine = gitignoreLineFor(cwd, workspaceDir, workspaceValue);
+  if (ignoreLine) {
+    ensureGitignoreLine(gitignorePath, ignoreLine);
+  } else {
+    console.log(
+      `  (skip)     workspace is outside the project root — add it to .gitignore manually`,
+    );
+  }
 
   // 4. print .mcp.json snippet
   console.log(`

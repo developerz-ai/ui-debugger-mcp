@@ -1,9 +1,10 @@
 #!/usr/bin/env node
+import { isAbsolute, join } from 'node:path';
 import { supportsImageInput } from './agent/capabilities.js';
 import { resolveModels } from './agent/models.js';
 import { createOpenRouterProvider, resolveProviderConfig } from './agent/provider.js';
 import { runStatus, runStop } from './cli/control.js';
-import { runHelp, runVersion } from './cli/help.js';
+import { printUsage, runHelp, runVersion } from './cli/help.js';
 import { runInit } from './cli/init.js';
 import { loadConfig } from './config/load.js';
 import { NAME, VERSION } from './index.js';
@@ -43,13 +44,24 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Unknown subcommand → print usage and exit 1 (runHelp() would exit 0 first).
+  if (subcmd !== undefined) {
+    console.error(`${NAME}: unknown subcommand '${subcmd}'.`);
+    printUsage();
+    process.exit(1);
+  }
+
   try {
     // Load project config (cwd-keyed)
     const config = loadConfig();
     const cwd = process.cwd();
 
     // Bootstrap workspace directories (chrome-user-data/, sessions/)
-    const workspace = workspacePaths(cwd, config.workspace);
+    // Anchor relative workspace paths to the project root.
+    const workspaceBase = isAbsolute(config.workspace)
+      ? config.workspace
+      : join(cwd, config.workspace);
+    const workspace = workspacePaths(cwd, workspaceBase);
     await ensureWorkspace(workspace);
 
     // Resolve provider + per-role models (driver, vision, summary)

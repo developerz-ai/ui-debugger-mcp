@@ -7,6 +7,7 @@ import {
   ensureSession,
   ensureWorkspace,
   generateSessionId,
+  resolveProfileDir,
   resolveProject,
   sessionPaths,
   workspacePaths,
@@ -34,6 +35,24 @@ test('workspacePaths builds correct paths', () => {
 test('workspacePaths default base is cwd/tmp/ui-debugger-mcp/<project>', () => {
   const paths = workspacePaths('/projects/my-app');
   expect(paths.root).toBe('/projects/my-app/tmp/ui-debugger-mcp/my-app');
+});
+
+// --- resolveProfileDir ------------------------------------------------------
+
+test('resolveProfileDir falls back to the workspace chrome-user-data dir', () => {
+  const ws = workspacePaths('/home/user/my-app', '/tmp/ws');
+  expect(resolveProfileDir(ws)).toBe('/tmp/ws/my-app/chrome-user-data');
+});
+
+test('resolveProfileDir anchors a relative profile at the workspace root', () => {
+  const ws = workspacePaths('/home/user/my-app', '/tmp/ws');
+  expect(resolveProfileDir(ws, 'chrome-user-data')).toBe('/tmp/ws/my-app/chrome-user-data');
+  expect(resolveProfileDir(ws, 'profiles/logged-in')).toBe('/tmp/ws/my-app/profiles/logged-in');
+});
+
+test('resolveProfileDir honors an absolute profile path as-is', () => {
+  const ws = workspacePaths('/home/user/my-app', '/tmp/ws');
+  expect(resolveProfileDir(ws, '/var/chrome/shared')).toBe('/var/chrome/shared');
 });
 
 // --- sessionPaths -----------------------------------------------------------

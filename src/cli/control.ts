@@ -19,7 +19,7 @@ import { isAbsolute, join } from 'node:path';
 import { loadWorkspaceDir } from '../config/load.js';
 import { FindingsSchema } from '../findings/schema.js';
 import { ownerAlive } from '../session/process-identity.js';
-import { markStatus, readState } from '../session/state-file.js';
+import { markStatus, readState, restoreRunning } from '../session/state-file.js';
 import { resolveProject, workspacePaths } from '../session/workspace.js';
 
 /** Read + validate a session's `findings.json`; `null` when absent/malformed. */
@@ -59,8 +59,15 @@ export async function runStatus(cwd = process.cwd()): Promise<void> {
     ? `${findings.bugs.length} bugs, ${findings.visual.length} visual, ${findings.steps.length} steps`
     : 'no findings yet';
   // A recycled PID owns a different process now — say so rather than imply our server lives.
+  // If state says running but the server is dead (check not stale), report the mismatch.
   const serverState =
-    check === 'stale' ? 'not running (PID reused)' : alive ? 'running' : 'not running';
+    check === 'stale'
+      ? 'not running (PID reused)'
+      : alive
+        ? 'running'
+        : state.status === 'running'
+          ? 'unknown (server died)'
+          : 'not running';
 
   console.log(`ui-debugger-mcp — ${project}`);
   console.log(`  run:      ${state.sessionId}`);
@@ -73,8 +80,16 @@ export async function runStatus(cwd = process.cwd()): Promise<void> {
   console.log(`  session:  ${state.sessionDir}`);
 }
 
+/** Signal seam — `process.kill` in production, a stub under test. */
+export type Kill = (pid: number, signal: NodeJS.Signals) => void;
+
 /** `ui-debugger-mcp stop` — signal the server to tear the run down, mark state stopped. */
-export async function runStop(cwd = process.cwd()): Promise<void> {
+export async function runStop(
+  cwd = process.cwd(),
+  kill: Kill = (pid, signal) => {
+    process.kill(pid, signal);
+  },
+): Promise<void> {
   const { project, stateJson } = stateJsonPath(cwd);
   const state = await readState(stateJson);
   if (!state) {
@@ -106,17 +121,23 @@ export async function runStop(cwd = process.cwd()): Promise<void> {
   }
 
   if (alive) {
-    const signaled = signalStop(state.pid);
+    // Record the terminal status BEFORE signaling. The server's SIGTERM handler
+    // ends the run and calls `markStatus('ended')`, whose read-modify-write can
+    // only preserve our `stopped` if it is already on disk when the signal lands.
+    // Marking afterwards races that handler and can leave `ended` — or nothing.
+    await markStatus(stateJson, 'stopped');
+    const signaled = signalStop(state.pid, kill);
     if (!signaled.ok) {
       // The signal failed for a reason other than the process already being gone
-      // (e.g. EPERM). Teardown did NOT happen — don't lie by marking it stopped.
+      // (e.g. EPERM). Teardown did NOT happen — roll the mark back rather than
+      // report a live run as stopped.
+      await restoreRunning(stateJson);
       console.error(
         `ui-debugger-mcp: failed to signal server (pid ${state.pid}): ${signaled.reason}. Run '${state.sessionId}' left as-is.`,
       );
       process.exitCode = 1;
       return;
     }
-    await markStatus(stateJson, 'stopped');
     const how = signaled.gone ? `pid ${state.pid} already exited` : `SIGTERM → pid ${state.pid}`;
     console.log(`ui-debugger-mcp: stopping run '${state.sessionId}' (${how}).`);
     return;
@@ -136,9 +157,9 @@ type SignalResult = { ok: true; gone: boolean } | { ok: false; reason: string };
  * the liveness check and here — teardown already happened) is treated as benign
  * (`gone`); any other failure surfaces so the caller never reports a false stop.
  */
-function signalStop(pid: number): SignalResult {
+function signalStop(pid: number, kill: Kill): SignalResult {
   try {
-    process.kill(pid, 'SIGTERM');
+    kill(pid, 'SIGTERM');
     return { ok: true, gone: false };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
