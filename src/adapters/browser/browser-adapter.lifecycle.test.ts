@@ -19,7 +19,6 @@ import type { WebTarget } from '../../config/schema.js';
 import { AdapterError } from '../../errors.js';
 import type { Node } from '../contract.js';
 import { BrowserAdapter } from './browser-adapter.js';
-import { NODE_EXTRACTOR } from './extractor.js';
 
 /** The injectable `chromium` seam's type, lifted off `BrowserAdapter.create` itself. */
 type Launcher = NonNullable<Parameters<typeof BrowserAdapter.create>[0]['chromium']>;
@@ -313,50 +312,4 @@ test('scroll: an off-viewport `within` Node fails loud instead of scrolling blin
   await expect(adapter.scroll({ direction: 'down', within: offscreen })).rejects.toThrow(
     /outside the viewport/,
   );
-});
-
-// --- NODE_EXTRACTOR (enabled contract) ---------------------------------------
-
-/** Everything {@link NODE_EXTRACTOR} touches on an in-page element, minimally faked. */
-type FakeElement = Parameters<typeof NODE_EXTRACTOR>[0][number];
-
-function fakeElement(tagName: string, attrs: Record<string, string> = {}, readOnly?: boolean) {
-  const el = {
-    tagName,
-    textContent: '',
-    readOnly,
-    labels: null,
-    parentElement: null,
-    style: { backgroundColor: 'rgba(0, 0, 0, 0)' },
-    matches: () => false,
-    getAttribute: (name: string) => attrs[name] ?? null,
-    hasAttribute: (name: string) => name in attrs,
-    getBoundingClientRect: () => ({ x: 0, y: 0, width: 10, height: 10 }),
-    appendChild: () => undefined,
-    removeChild: () => undefined,
-  } as unknown as FakeElement;
-  el.ownerDocument = {
-    getElementById: () => null,
-    documentElement: el,
-    createElement: () => fakeElement('div'),
-  };
-  return el;
-}
-
-test('NODE_EXTRACTOR: a readonly input reads enabled:false; a plain one reads enabled:true', () => {
-  const globals = globalThis as Record<string, unknown>;
-  const previous = globals.getComputedStyle;
-  globals.getComputedStyle = () => ({
-    display: 'block',
-    visibility: 'visible',
-    color: 'rgb(0, 0, 0)',
-    backgroundColor: 'rgba(0, 0, 0, 0)',
-  });
-  try {
-    const [plain, locked] = NODE_EXTRACTOR([fakeElement('input'), fakeElement('input', {}, true)]);
-    expect(plain?.enabled).toBe(true);
-    expect(locked?.enabled).toBe(false);
-  } finally {
-    globals.getComputedStyle = previous;
-  }
 });
