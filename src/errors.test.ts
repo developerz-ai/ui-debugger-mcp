@@ -1,15 +1,19 @@
 import { expect, test } from 'bun:test';
 import {
   AdapterError,
+  AdbError,
   AgentError,
   ConfigError,
   FindingsError,
+  McpServerError,
   ProviderError,
+  ReplayError,
   SessionBusyError,
   SessionNotFoundError,
   SessionSettledError,
   TargetNotFoundError,
   UiDebuggerError,
+  VisionUnavailableError,
 } from './errors.js';
 
 test('UiDebuggerError: message, name, instanceof', () => {
@@ -92,9 +96,56 @@ test('FindingsError: message, name, instanceof chain', () => {
   expect(e instanceof UiDebuggerError).toBe(true);
 });
 
+test('McpServerError: message, name, instanceof chain', () => {
+  const e = new McpServerError('duplicate tool');
+  expect(e.message).toBe('duplicate tool');
+  expect(e.name).toBe('McpServerError');
+  expect(e instanceof McpServerError).toBe(true);
+  expect(e instanceof UiDebuggerError).toBe(true);
+});
+
+test('ReplayError: message, name, instanceof chain', () => {
+  const e = new ReplayError('ffmpeg failed');
+  expect(e.message).toBe('ffmpeg failed');
+  expect(e.name).toBe('ReplayError');
+  expect(e instanceof ReplayError).toBe(true);
+  expect(e instanceof UiDebuggerError).toBe(true);
+});
+
+test('AdbError: message, name, instanceof chain (extends AdapterError)', () => {
+  const e = new AdbError('adb call failed');
+  expect(e.message).toBe('adb call failed');
+  expect(e.name).toBe('AdbError');
+  expect(e instanceof AdbError).toBe(true);
+  expect(e instanceof AdapterError).toBe(true);
+  expect(e instanceof UiDebuggerError).toBe(true);
+});
+
+test('VisionUnavailableError: message, name, instanceof chain (extends AgentError)', () => {
+  const e = new VisionUnavailableError('vision model is text-only');
+  expect(e.message).toBe('vision model is text-only');
+  expect(e.name).toBe('VisionUnavailableError');
+  expect(e instanceof VisionUnavailableError).toBe(true);
+  expect(e instanceof AgentError).toBe(true);
+  expect(e instanceof UiDebuggerError).toBe(true);
+});
+
 test('error classes do not cross-instanceof', () => {
   const cfg = new ConfigError('x');
   const sess = new SessionBusyError('x');
   expect(cfg instanceof SessionBusyError).toBe(false);
   expect(sess instanceof ConfigError).toBe(false);
+});
+
+test('AdbError, McpServerError, ReplayError, VisionUnavailableError do not cross-instanceof', () => {
+  const adb = new AdbError('x');
+  const mcp = new McpServerError('x');
+  const replay = new ReplayError('x');
+  const vision = new VisionUnavailableError('x');
+  expect(adb instanceof McpServerError).toBe(false);
+  expect(adb instanceof AgentError).toBe(false);
+  expect(mcp instanceof AdapterError).toBe(false);
+  expect(replay instanceof McpServerError).toBe(false);
+  expect(vision instanceof AdapterError).toBe(false);
+  expect(vision instanceof AdbError).toBe(false);
 });

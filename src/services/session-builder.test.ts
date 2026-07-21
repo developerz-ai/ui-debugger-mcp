@@ -1,8 +1,13 @@
-import { expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { execSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
+import { chromium } from 'playwright-core';
+import { z } from 'zod';
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import { AdapterError, ConfigError, TargetNotFoundError } from '../errors.js';
@@ -12,6 +17,7 @@ import {
   makeSessionBuilder,
   resolveRunTarget,
   type SessionBuilderDeps,
+  withToolLog,
 } from './session-builder.js';
 
 // --- resolveRunTarget (per-run URL: "the boss tells the driver where to go") ---
@@ -51,6 +57,19 @@ const CONFIG: ResolvedConfig = {
   provider: { apiKey: 'sk-test', baseUrl: 'https://openrouter.ai/api/v1' },
 };
 
+// Every test that calls `deps()` writes real files (story.md, screenshots/, logs/)
+// under this workspace — `mkdtemp`'d fresh per test and removed after, so runs
+// never accumulate a stray `/tmp/ui-dbg-builder-test` shared across the whole suite.
+let builderTmpDir: string;
+
+beforeEach(async () => {
+  builderTmpDir = await mkdtemp(join(tmpdir(), 'ui-dbg-builder-test-'));
+});
+
+afterEach(async () => {
+  await rm(builderTmpDir, { recursive: true, force: true });
+});
+
 function deps(): SessionBuilderDeps {
   return {
     config: CONFIG,
@@ -59,7 +78,7 @@ function deps(): SessionBuilderDeps {
       vision: new MockLanguageModelV3(),
       summary: new MockLanguageModelV3(),
     },
-    workspace: workspacePaths('/project/app', '/tmp/ui-dbg-builder-test'),
+    workspace: workspacePaths('/project/app', builderTmpDir),
   };
 }
 
@@ -160,9 +179,142 @@ test('buildSession leaves the default profile dir alone when `profile` is unset'
   }
 });
 
+// --- web target end-to-end (real Chromium) ----------------------------------
+// Unlike desktop/android, `BrowserAdapter.create()` itself launches the browser
+// (`open()` only navigates) — so wiring a web target for real means a real,
+// headless Chromium process, not a mock. Same detection/skip guard as
+// `e2e.test.ts` / `browser-adapter.integration.test.ts`: runs locally, skips
+// where no binary is installed.
+
+function findChrome(): string | null {
+  if (process.env.SKIP_BROWSER_TESTS) return null;
+  const env = process.env.CHROMIUM_PATH;
+  if (env && existsSync(env)) return env;
+  try {
+    const p = chromium.executablePath();
+    if (p && existsSync(p)) return p;
+  } catch {
+    /* not installed */
+  }
+  for (const cmd of ['chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable']) {
+    try {
+      const p = execSync(`which ${cmd} 2>/dev/null`, { encoding: 'utf-8', stdio: 'pipe' }).trim();
+      if (p && existsSync(p)) return p;
+    } catch {
+      /* not found */
+    }
+  }
+  return null;
+}
+
+const CHROME = findChrome();
+
+(CHROME ? test : test.skip)(
+  'buildSession wires a web target end-to-end (real headless Chromium, no navigation)',
+  async () => {
+    const web: Target = {
+      adapter: 'browser',
+      url: 'http://localhost:1', // never dialed — `buildSession` doesn't call `open()`
+      headless: true,
+      ...(typeof CHROME === 'string' ? { executablePath: CHROME } : {}),
+    };
+    const d: SessionBuilderDeps = {
+      ...deps(),
+      config: { ...CONFIG, targets: { ...CONFIG.targets, web } },
+    };
+    const built = await buildSession(d, { id: 'web1', target: 'web', goal: 'open the app' });
+    try {
+      expect(built.session).toBeDefined();
+      expect(typeof built.open).toBe('function');
+      expect(typeof built.run).toBe('function');
+    } finally {
+      await built.session.close(); // releases the real Chromium process
+    }
+  },
+);
+
 test('makeSessionBuilder binds the deps into a per-run builder', async () => {
   const build = makeSessionBuilder(deps());
   await expect(build({ id: 's1', target: 'ghost', goal: 'x' })).rejects.toThrow(
     TargetNotFoundError,
   );
+});
+
+// --- withToolLog -------------------------------------------------------------
+// `withToolLog` wraps every belt tool with logging via a spread (`{ ...t, execute }`).
+// That spread is what carries `toModelOutput` through unchanged — the self-look
+// tool (`belt/look.ts`) relies on `toModelOutput` surviving the wrap to turn its
+// base64 frame into a multimodal `file-data` part; `pruneStaleFrames` (`loop.ts`)
+// then keys off that same shape to drop stale screenshots from later turns. Losing
+// the wrap (e.g. rebuilding the tool object field-by-field instead of spreading)
+// would silently degrade self-look to plain JSON output with no test failing
+// elsewhere, since nothing else exercises `withToolLog` directly.
+
+test('withToolLog preserves toModelOutput unchanged (load-bearing for self-look frame pruning)', async () => {
+  const selfLookLike = tool({
+    description: 'look',
+    inputSchema: z.object({}),
+    execute: async () => ({ frame: 'YWJj' }),
+    toModelOutput: ({ output }) => ({
+      type: 'content',
+      value: [{ type: 'file-data' as const, data: output.frame, mediaType: 'image/png' }],
+    }),
+  });
+
+  const wrapped = withToolLog('look', selfLookLike, () => {});
+
+  // Same function reference — the spread carries it through untouched.
+  expect(wrapped.toModelOutput).toBe(selfLookLike.toModelOutput);
+
+  const modelOutput = await wrapped.toModelOutput?.({
+    toolCallId: 't1',
+    input: {},
+    output: { frame: 'YWJj' },
+  });
+  expect(modelOutput).toEqual({
+    type: 'content',
+    value: [{ type: 'file-data', data: 'YWJj', mediaType: 'image/png' }],
+  });
+});
+
+test('withToolLog logs the input on call and returns the original output unchanged', async () => {
+  const lines: string[] = [];
+  const t = tool({
+    description: 'observe',
+    inputSchema: z.object({ kind: z.string() }),
+    execute: async (input) => ({ echoed: input.kind }),
+  });
+
+  const wrapped = withToolLog('observe', t, (line) => lines.push(line));
+  const out = await wrapped.execute?.({ kind: 'tree' }, { toolCallId: 'c1', messages: [] });
+
+  expect(out).toEqual({ echoed: 'tree' });
+  expect(lines).toEqual(['observe {"kind":"tree"}']);
+});
+
+test('withToolLog logs an ERROR line and rethrows when execute throws', async () => {
+  const lines: string[] = [];
+  const boom = new Error('selector not found');
+  const t = tool({
+    description: 'act',
+    inputSchema: z.object({ action: z.string() }),
+    execute: async (): Promise<{ ok: boolean }> => {
+      throw boom;
+    },
+  });
+
+  const wrapped = withToolLog('act', t, (line) => lines.push(line));
+  await expect(
+    wrapped.execute?.({ action: 'click' }, { toolCallId: 'c1', messages: [] }),
+  ).rejects.toThrow(boom);
+
+  expect(lines).toEqual(['act {"action":"click"}', 'act ERROR selector not found']);
+});
+
+test('withToolLog returns the tool unchanged when it has no execute function', () => {
+  const t = tool({ description: 'no-op', inputSchema: z.object({}) });
+  const wrapped = withToolLog('noop', t, () => {
+    throw new Error('log must never be called for a tool with no execute');
+  });
+  expect(wrapped).toBe(t);
 });
