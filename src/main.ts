@@ -93,18 +93,21 @@ async function main(): Promise<void> {
 
     // Graceful stop: a CLI `stop` (or any SIGTERM/SIGINT) tears the run down —
     // abort the loop, close the browser, free the profile — then exits cleanly.
-    const shutdown = (signal: NodeJS.Signals) => {
+    const shutdown = (exitCode: number) => {
       service
         .endActive()
         .catch(() => undefined)
-        .finally(() => process.exit(signal === 'SIGINT' ? 130 : 0));
+        .finally(() => process.exit(exitCode));
     };
-    process.once('SIGTERM', () => shutdown('SIGTERM'));
-    process.once('SIGINT', () => shutdown('SIGINT'));
+    process.once('SIGTERM', () => shutdown(0));
+    process.once('SIGINT', () => shutdown(130));
 
-    // Boot stdio MCP server with outer tools
+    // Boot stdio MCP server with outer tools. A dead client is a shutdown too:
+    // nothing can read findings or `end_session` any more, so the run must not
+    // keep a browser (and the profile lock) alive until its cap. Same idempotent
+    // teardown path as the signals above.
     const tools = outerTools(service);
-    await startStdioServer(tools);
+    await startStdioServer(tools, { onClose: () => shutdown(0) });
   } catch (err) {
     console.error(`${NAME} v${VERSION}: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);

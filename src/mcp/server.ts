@@ -1,3 +1,4 @@
+import type { Readable, Writable } from 'node:stream';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { McpServerError } from '../errors.js';
@@ -35,13 +36,54 @@ export function createMcpServer(tools: readonly McpTool[]): McpServer {
   return server;
 }
 
+/** Wiring for {@link startStdioServer}. */
+export interface StdioServerInit {
+  /**
+   * Called exactly once when the client connection drops for any reason — the
+   * client process dying (stdin EOF) or an explicit close. The caller's hook to
+   * tear a live run down: with nobody left to read findings or send
+   * `end_session`, a browser must not outlive the client.
+   */
+  readonly onClose?: () => void;
+  /** Stream the transport reads. Defaults to this process's stdin; a test seam. */
+  readonly stdin?: Readable;
+  /** Stream the transport writes. Defaults to this process's stdout; a test seam. */
+  readonly stdout?: Writable;
+}
+
 /**
  * Boot the stdio MCP server: register the tools, connect the stdio transport,
  * and return the live server. Callers wire dependencies into the tools.
  */
-export async function startStdioServer(tools: readonly McpTool[]): Promise<McpServer> {
+export async function startStdioServer(
+  tools: readonly McpTool[],
+  { onClose, stdin = process.stdin, stdout = process.stdout }: StdioServerInit = {},
+): Promise<McpServer> {
   const server = createMcpServer(tools);
-  const transport = new StdioServerTransport();
+  const transport = new StdioServerTransport(stdin, stdout);
+
+  // Both drop paths below can reach this, so it fires at most once.
+  let notified = false;
+  const dropped = (): void => {
+    if (notified) return;
+    notified = true;
+    onClose?.();
+  };
+  server.server.onclose = dropped;
+
+  // The SDK's stdio transport listens for `data`/`error` on stdin and nothing
+  // else — EOF (the client died) never reaches `onclose` on its own. Watch it
+  // here and close the server, so client death and an explicit close land on the
+  // same hook. Wired before `connect` starts the flow: no EOF can slip past.
+  const clientGone = (): void => {
+    void server
+      .close()
+      .catch(() => undefined)
+      .finally(dropped);
+  };
+  stdin.once('end', clientGone);
+  stdin.once('close', clientGone);
+
   await server.connect(transport);
   return server;
 }
