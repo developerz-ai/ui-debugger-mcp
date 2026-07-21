@@ -50,6 +50,59 @@ test('null when the catalog cannot answer (no architecture / unknown model / bad
   expect(await supportsImageInput('https://x/api/v1', 'k', 'multi/model', throwing)).toBeNull();
 });
 
+test('resolves a router-suffixed id against its base catalog entry', async () => {
+  // `#uptime` / `:nitro` are routing suffixes; the catalog lists the base id only
+  const probe = (id: string) => supportsImageInput('https://x/api/v1', 'k', id, fakeFetch(CATALOG));
+  expect(await probe('multi/model#uptime')).toBe(true);
+  expect(await probe('multi/model:nitro')).toBe(true);
+  expect(await probe('text-only/model:floor')).toBe(false);
+  // no base left to try, and no such row
+  expect(await probe('#uptime')).toBeNull();
+});
+
+test('an exact catalog match wins over the stripped base id', async () => {
+  const catalog = {
+    data: [
+      { id: 'x/y', architecture: { input_modalities: ['text'] } },
+      { id: 'x/y:free', architecture: { input_modalities: ['text', 'image'] } },
+    ],
+  };
+  expect(await supportsImageInput('https://x/api/v1', 'k', 'x/y:free', fakeFetch(catalog))).toBe(
+    true,
+  );
+});
+
+test('null on a payload that does not validate as a models catalog', async () => {
+  // `data` present but not an array
+  expect(
+    await supportsImageInput('https://x/api/v1', 'k', 'multi/model', fakeFetch({ data: 'nope' })),
+  ).toBeNull();
+  // body is not an object at all
+  expect(
+    await supportsImageInput('https://x/api/v1', 'k', 'multi/model', fakeFetch('nope')),
+  ).toBeNull();
+  // row is there but `input_modalities` is the wrong type — no answer, not a crash
+  const badModalities = {
+    data: [{ id: 'multi/model', architecture: { input_modalities: 'image' } }],
+  };
+  expect(
+    await supportsImageInput('https://x/api/v1', 'k', 'multi/model', fakeFetch(badModalities)),
+  ).toBeNull();
+});
+
+test('one malformed row does not blind the probe for the rest of the catalog', async () => {
+  const catalog = {
+    data: [
+      { architecture: { input_modalities: ['image'] } }, // no id
+      null,
+      { id: 'multi/model', architecture: { input_modalities: ['text', 'image'] } },
+    ],
+  };
+  expect(await supportsImageInput('https://x/api/v1', 'k', 'multi/model', fakeFetch(catalog))).toBe(
+    true,
+  );
+});
+
 test('sends the API key and hits <base>/models (trailing slash tolerated)', async () => {
   let seenUrl = '';
   let seenAuth = '';
