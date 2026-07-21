@@ -15,11 +15,15 @@ test('an unknown subcommand prints usage and exits 1 instead of booting the serv
     stdout: 'pipe',
     stderr: 'pipe',
   });
+  // Start both reads before awaiting exit — usage goes to stdout, the error to stderr.
+  const stdoutText = new Response(proc.stdout).text();
   const stderrText = new Response(proc.stderr).text();
   const exitCode = await proc.exited;
 
   expect(exitCode).toBe(1);
   expect(await stderrText).toContain("unknown subcommand 'stauts'");
+  // printUsage() must still run — a regression dropping it would otherwise pass.
+  expect(await stdoutText).toContain('SUBCOMMANDS');
 });
 
 test('--help exits 0 without touching project config', async () => {
