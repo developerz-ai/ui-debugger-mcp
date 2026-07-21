@@ -122,3 +122,55 @@ test('toToolResult omits structuredContent for a non-record value', () => {
   expect(result.structuredContent).toBeUndefined();
   expect(text(result)).toBe('"hi"');
 });
+
+test('toToolResult links absolute screenshot/evidence paths as resource_link content', () => {
+  const result = toToolResult({
+    status: 'passed',
+    steps: [{ step: 'click #save', ok: true, screenshot: '/ws/screenshots/001-click.png' }],
+    bugs: [{ kind: 'console', detail: 'TypeError', evidence: 'line 42' }],
+    visual: [
+      { issue: 'blurry', where: 'header', severity: 'low', screenshot: '/ws/screenshots/002.png' },
+    ],
+    evidence: '/ws/replay.mp4',
+  });
+
+  const links = result.content.filter((c) => c.type === 'resource_link');
+  expect(links).toHaveLength(3);
+  expect(links.map((l) => (l as { uri: string }).uri)).toEqual(
+    expect.arrayContaining([
+      'file:///ws/screenshots/001-click.png',
+      'file:///ws/screenshots/002.png',
+      'file:///ws/replay.mp4',
+    ]),
+  );
+  // Non-path evidence ("line 42") never becomes a resource_link.
+  expect(links.some((l) => (l as { uri: string }).uri.includes('line'))).toBe(false);
+});
+
+test('toToolResult dedupes resource_link paths seen more than once', () => {
+  const result = toToolResult({
+    steps: [{ step: 'replay', ok: true, screenshot: '/ws/replay.mp4' }],
+    evidence: '/ws/replay.mp4',
+  });
+  const links = result.content.filter((c) => c.type === 'resource_link');
+  expect(links).toHaveLength(1);
+});
+
+test('toToolResult caps an over-long top-level array and appends a steering note', () => {
+  const steps = Array.from({ length: 25 }, (_, i) => ({ step: `s${i}`, ok: true }));
+  const result = toToolResult({ status: 'passed', steps });
+
+  const parsed = JSON.parse(text(result)) as { steps: unknown[] };
+  expect(parsed.steps).toHaveLength(20);
+  expect((result.structuredContent as { steps: unknown[] }).steps).toHaveLength(20);
+
+  const notes = result.content
+    .filter((c) => c.type === 'text')
+    .map((c) => (c as { text: string }).text);
+  expect(notes.some((t) => t.includes('steps') && t.includes('get_findings'))).toBe(true);
+});
+
+test('toToolResult leaves short arrays untouched and adds no steering note', () => {
+  const result = toToolResult({ status: 'passed', steps: [{ step: 's0', ok: true }] });
+  expect(result.content).toHaveLength(1);
+});
