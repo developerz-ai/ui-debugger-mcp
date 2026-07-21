@@ -67,6 +67,14 @@ export interface FinishedStep {
   toolCalls: ReadonlyArray<{ toolName: string; input?: unknown }>;
   /** Tool results this step; `look`/`observe` outputs become streamed findings. */
   toolResults: ReadonlyArray<{ toolName: string; output: unknown }>;
+  /**
+   * Raw step content, AI SDK 6 shape — a *rejected* tool call lands here as a
+   * `tool-error` part, never in {@link toolResults} (that array only ever holds
+   * successful `tool-result` parts). Optional so hand-built test fixtures that
+   * never fail a tool call can omit it; `describeStep` treats an absent array as
+   * "no errors" rather than throwing.
+   */
+  content?: ReadonlyArray<{ type: string; toolName?: string; error?: unknown }>;
 }
 
 /**
@@ -347,9 +355,9 @@ export function describeStep(step: FinishedStep, index: number): string {
     step.toolCalls
       .map((c) => (c.input !== undefined ? `${c.toolName}(${compactArg(c.input)})` : c.toolName))
       .join(', ') || '(no tool call)';
-  const errors = step.toolResults
-    .filter((r) => isErrorOutput(r.output))
-    .map((r) => `${r.toolName}: ${errorText(r.output)}`);
+  const errors = (step.content ?? [])
+    .filter((part) => part.type === 'tool-error')
+    .map((part) => `${part.toolName ?? 'tool'}: ${errorText(part.error)}`);
   const tail = errors.length > 0 ? ` — ERROR ${errors.join('; ')}` : '';
   return `step ${index}: ${calls}${tail}`;
 }
@@ -364,20 +372,9 @@ function compactArg(input: unknown): string {
   }
 }
 
-/** Whether a tool result output looks like an error envelope (`{ error: ... }` / Error). */
-function isErrorOutput(output: unknown): boolean {
-  if (output instanceof Error) return true;
-  return typeof output === 'object' && output !== null && 'error' in output;
-}
-
-/** Pull a short error string out of a tool result output. */
-function errorText(output: unknown): string {
-  if (output instanceof Error) return output.message;
-  if (typeof output === 'object' && output !== null && 'error' in output) {
-    const e = (output as { error: unknown }).error;
-    return e instanceof Error ? e.message : String(e);
-  }
-  return String(output);
+/** Pull a short error string out of a `tool-error` part's `error` field. */
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**

@@ -9,6 +9,7 @@ import {
   consoleBugsFrom,
   createDebugAgent,
   DEFAULT_MAX_STEPS,
+  describeStep,
   foldInstructionsIntoStep,
   KICKOFF_PROMPT,
   type LoopInbox,
@@ -335,4 +336,35 @@ test('pruneStaleFrames ignores non-look tool results and non-content outputs', (
   const messages = [actResult, lookFrameMessage('a'), lookFrameMessage('b')];
   const pruned = pruneStaleFrames(messages);
   expect(pruned[0]).toBe(actResult);
+});
+
+test('describeStep surfaces a tool-error content part (AI SDK 6 shape), not toolResults', () => {
+  const line = describeStep(
+    {
+      toolCalls: [{ toolName: 'act', input: { act: 'click #save' } }],
+      toolResults: [], // AI SDK 6 never puts a failed call's error here
+      content: [
+        { type: 'tool-call', toolName: 'act' },
+        { type: 'tool-error', toolName: 'act', error: new Error('element not found') },
+      ],
+    },
+    3,
+  );
+  expect(line).toBe('step 3: act({"act":"click #save"}) — ERROR act: element not found');
+});
+
+test('describeStep stays clean when the step has no content (or no errors in it)', () => {
+  expect(describeStep({ toolCalls: [{ toolName: 'observe' }], toolResults: [] }, 1)).toBe(
+    'step 1: observe',
+  );
+  expect(
+    describeStep(
+      {
+        toolCalls: [{ toolName: 'observe' }],
+        toolResults: [{ toolName: 'observe', output: { kind: 'console', entries: [] } }],
+        content: [{ type: 'tool-result', toolName: 'observe' }],
+      },
+      2,
+    ),
+  ).toBe('step 2: observe');
 });

@@ -355,17 +355,25 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
     return findings && findings.status !== 'running' ? findings.status : 'failed';
   }
 
-  /** Write a `failed` verdict carrying the agent failure so `get_findings` surfaces it. */
+  /**
+   * Write a `failed` verdict carrying the agent failure so `get_findings` surfaces
+   * it. Layers onto whatever the run already persisted rather than rebuilding from
+   * scratch: `evidence` (e.g. a replay path) and any prior `summary` survive —
+   * appended to, not dropped — so a crash after partial progress still reports
+   * everything the run found plus why it died.
+   */
   async #surfaceAgentError(error: unknown): Promise<void> {
     const agentError = toAgentError(error);
     const prior = await this.#findingsStore.tryReadFindings().catch(() => null);
+    const failureLine = `Debug run failed: ${agentError.message}`;
     try {
       await this.#findingsStore.writeFindings({
+        ...prior,
         status: 'failed',
         steps: prior?.steps ?? [],
         bugs: prior?.bugs ?? [],
         visual: prior?.visual ?? [],
-        summary: `Debug run failed: ${agentError.message}`,
+        summary: hasText(prior?.summary) ? `${prior.summary}\n${failureLine}` : failureLine,
       });
     } catch {
       // Best-effort surfacing — `status` is already `failed`, so the loud signal stands.
