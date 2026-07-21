@@ -209,6 +209,22 @@ describe('integration: real MCP server + outer tools + fake DebugService', () =>
     expect(data.status).toBe('running');
   });
 
+  test('get_findings rejects an empty fields array at the schema boundary', async () => {
+    const startRes = callResult(
+      await client.callTool({
+        name: 'start_debug',
+        arguments: { target: 'web', goal: 'check sidebar' },
+      }),
+    );
+    const { session_id } = JSON.parse(resultText(startRes)) as { session_id: string };
+
+    const findRes = callResult(
+      await client.callTool({ name: 'get_findings', arguments: { session_id, fields: [] } }),
+    );
+    expect(findRes.isError).toBe(true);
+    expect(resultText(findRes)).toMatch(/too_small|at least 1|fields/i);
+  });
+
   test('end_session returns { ok: true, session_id }', async () => {
     const AckSchema = z.object({ ok: z.literal(true), session_id: z.string().min(1) });
 
