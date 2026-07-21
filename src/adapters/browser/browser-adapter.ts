@@ -190,6 +190,9 @@ interface AdapterHandles {
   capture: CdpCapture;
 }
 
+/** The slice of `chromium` this adapter actually calls — the test seam below overrides it. */
+type ChromiumLauncher = Pick<typeof chromium, 'launchPersistentContext' | 'connectOverCDP'>;
+
 export interface BrowserAdapterInit {
   /** Resolved web-target config (url, headless, debugLogin, cdpUrl, …). */
   config: WebTarget;
@@ -197,6 +200,8 @@ export interface BrowserAdapterInit {
   profileDir: string;
   /** Optional sink for streaming captured console/network lines to `findings-store`. */
   onLog?: CaptureSink;
+  /** Override the Playwright launcher/connector (test seam) — defaults to the real `chromium`. */
+  chromium?: ChromiumLauncher;
 }
 
 /**
@@ -223,12 +228,13 @@ export class BrowserAdapter implements Adapter {
   /** Open the adapter: attach over `cdpUrl` when set, else launch a managed persistent context. */
   static async create(init: BrowserAdapterInit): Promise<BrowserAdapter> {
     const { cdpUrl } = init.config;
+    const launcher = init.chromium ?? chromium;
     // Nothing raw escapes: launch, connect and post-connect wiring all leave here as
     // AdapterError (header contract). Cleanup of a half-built adapter happens below.
     try {
       return cdpUrl
-        ? await BrowserAdapter.#attach(init.config, init.onLog)
-        : await BrowserAdapter.#launch(init.config, init.profileDir, init.onLog);
+        ? await BrowserAdapter.#attach(init.config, launcher, init.onLog)
+        : await BrowserAdapter.#launch(init.config, init.profileDir, launcher, init.onLog);
     } catch (error) {
       throw createFailure(
         error,
@@ -240,13 +246,14 @@ export class BrowserAdapter implements Adapter {
   static async #launch(
     config: WebTarget,
     profileDir: string,
+    launcher: ChromiumLauncher,
     onLog?: CaptureSink,
   ): Promise<BrowserAdapter> {
     // Still CDP: Playwright drives Chromium exclusively over the DevTools Protocol
     // (here a CDP pipe; `#attach` uses a CDP WebSocket). A persistent context is the
     // supported way to own a Chrome process WITH the per-project profile — both
     // managed and attach speak the same protocol, only the transport differs.
-    const context = await chromium.launchPersistentContext(profileDir, {
+    const context = await launcher.launchPersistentContext(profileDir, {
       headless: config.headless,
       ...resolveLaunchBinary(config),
     });
@@ -259,11 +266,15 @@ export class BrowserAdapter implements Adapter {
     });
   }
 
-  static async #attach(config: WebTarget, onLog?: CaptureSink): Promise<BrowserAdapter> {
+  static async #attach(
+    config: WebTarget,
+    launcher: ChromiumLauncher,
+    onLog?: CaptureSink,
+  ): Promise<BrowserAdapter> {
     if (!config.cdpUrl) {
       throw new AdapterError('attach mode requires `cdpUrl`');
     }
-    const browser = await chromium.connectOverCDP(config.cdpUrl);
+    const browser = await launcher.connectOverCDP(config.cdpUrl);
     // Cleanup here drops the CONNECTION only — same disconnect semantics `close()`
     // relies on, so a failed attach never stops a browser we did not start.
     return closeOnFailure(browser, async () => {

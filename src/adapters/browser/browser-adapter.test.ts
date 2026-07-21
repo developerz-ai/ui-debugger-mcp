@@ -14,6 +14,11 @@ import {
   scrollDelta,
 } from './browser-adapter.js';
 
+// See `browser-adapter.lifecycle.test.ts` for tests that exercise class-level
+// behavior (create/attach wiring, waitFor, scroll, close) against a fake
+// `chromium` launcher — kept out of this file to stay under the 500-LOC cap
+// and to keep this file's scope to the pure helper functions.
+
 // --- resolveLaunchBinary ----------------------------------------------------
 
 const webTarget = (over: Partial<WebTarget> = {}): WebTarget => ({
