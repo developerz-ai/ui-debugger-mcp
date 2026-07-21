@@ -264,6 +264,58 @@ test('BusctlAtspi.readTree marks a node without Component unmeasured', async () 
   expect(nodes[1]?.bounds).toEqual({ x: 10, y: 20, width: 100, height: 40 });
 });
 
+test('BusctlAtspi.readTree with a query skips State/Extents for non-matching nodes', async () => {
+  // The app frame doesn't match `button "OK"`, so its GetState/GetExtents calls
+  // should never happen — only the matching button gets fully described.
+  const bus = fakeBus();
+  const stateOrExtentsCalls: string[] = [];
+  const exec = async (args: string[]): Promise<string> => {
+    if (args.includes('GetState') || args.includes('GetExtents')) {
+      stateOrExtentsCalls.push(args[4] ?? '');
+    }
+    return bus.exec(args);
+  };
+  const nodes = await new BusctlAtspi({ exec }).readTree({ query: { role: 'button' } });
+  expect(nodes.map((n) => n.name)).toEqual(['OK']);
+  expect(stateOrExtentsCalls).toEqual(['/btn', '/btn']); // never called for '/app'
+});
+
+test('BusctlAtspi.readTree stops early once maxNodes matches are found', async () => {
+  // Two buttons under the app; maxNodes: 1 with a query should return only the
+  // first match instead of walking (and fully describing) the whole tree.
+  let describedButtons = 0;
+  const call = (data: unknown): string => JSON.stringify({ type: 'x', data });
+  const exec = async (args: string[]): Promise<string> => {
+    if (args.includes('GetAddress')) return call(['unix:path=/tmp/at-spi/bus']);
+    const path = args[4] ?? '';
+    if (args.includes('GetChildren')) {
+      if (path === '/org/a11y/atspi/accessible/root') return call([[[':1.5', '/app']]]);
+      if (path === '/app')
+        return call([
+          [
+            [':1.5', '/btn1'],
+            [':1.6', '/btn2'],
+          ],
+        ]);
+      return call([[]]);
+    }
+    if (args.includes('GetRoleName')) return call([path === '/app' ? 'frame' : 'push button']);
+    if (args.includes('get-property')) return call(path === '/app' ? 'My App' : 'OK');
+    if (args.includes('GetState')) {
+      if (path.startsWith('/btn')) describedButtons += 1;
+      return call([[STATE_ENABLED_VISIBLE, 0]]);
+    }
+    if (args.includes('GetExtents')) return call([[0, 0, 100, 40]]);
+    throw new Error(`unexpected busctl call: ${args.join(' ')}`);
+  };
+  const nodes = await new BusctlAtspi({ exec }).readTree({
+    query: { role: 'button' },
+    maxNodes: 1,
+  });
+  expect(nodes).toHaveLength(1);
+  expect(describedButtons).toBe(1); // btn2 never fully described once btn1 matched
+});
+
 test('BusctlAtspi.readTree fails loud when GetExtents blows its per-call cap', async () => {
   // A wedged bus is NOT "this node has no Component": swallowing the timeout would
   // spend the whole cap again on every remaining node of the walk.

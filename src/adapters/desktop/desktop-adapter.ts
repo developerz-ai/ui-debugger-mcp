@@ -30,7 +30,7 @@ import type {
   ScrollOptions,
   WaitOptions,
 } from '../contract.js';
-import { type AtspiSource, BusctlAtspi, shapeNodes } from './atspi.js';
+import { type AtspiSource, BusctlAtspi, parseRoleNameQuery, shapeNodes } from './atspi.js';
 import { type ScreenCapture, Screenshot } from './capture.js';
 import {
   centerOf,
@@ -47,7 +47,7 @@ const DEFAULT_LIMIT = 200;
 
 /** `waitFor` defaults — poll the a11y tree for a query until it appears or times out. */
 const DEFAULT_WAIT_MS = 5000;
-const POLL_MS = 200;
+const POLL_MS = 500;
 
 /** How long `open` waits for the launched window to appear before failing loud. */
 const WINDOW_WAIT_MS = 10_000;
@@ -198,7 +198,17 @@ export class DesktopAdapter implements Adapter {
   async readState(opts: Query = {}): Promise<Node[]> {
     return this.#run('readState', async () => {
       const region = opts.within !== undefined ? await this.#regionBounds(opts.within) : undefined;
-      const nodes = await this.#atspi.readTree();
+      // A bounded query (role/name) + maxNodes let the AT-SPI walk skip describing
+      // (and stop once it has found) more than the caller could ever use — `find`
+      // (and thus `waitFor`'s poll loop) asks for `limit: 1`, so a match on the first
+      // matching node ends the walk instead of describing the whole tree. Region
+      // scoping (`within`) is applied downstream in `shapeNodes`, not visible to the
+      // walk itself, so an early match-count stop could wrongly skip a same-query
+      // match that would have landed inside the region — only tighten `maxNodes`
+      // when there's no region to reconcile against.
+      const query = opts.query ? parseRoleNameQuery(opts.query) : undefined;
+      const maxNodes = region === undefined ? (opts.limit ?? DEFAULT_LIMIT) : DEFAULT_LIMIT;
+      const nodes = await this.#atspi.readTree({ query, maxNodes });
       return shapeNodes(nodes, opts, DEFAULT_LIMIT, region);
     });
   }

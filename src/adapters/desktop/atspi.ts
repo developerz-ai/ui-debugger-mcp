@@ -65,6 +65,15 @@ export interface AtspiRef {
 export interface AtspiReadOptions {
   maxNodes?: number;
   maxDepth?: number;
+  /**
+   * Prune the walk to nodes matching this role/name up front: a non-matching node
+   * skips its `GetState`/`GetExtents` calls (2 of the ~4 busctl spawns per node) since
+   * its full description would just be filtered out downstream anyway. The tree is
+   * still walked in full (children are always fetched) — only the expensive per-node
+   * describe calls are skipped. Combined with `maxNodes`, the walk also stops as soon
+   * as enough *matches* are found, not merely enough nodes visited.
+   */
+  query?: ParsedQuery;
 }
 
 /** The read seam the adapter depends on — implemented by {@link BusctlAtspi}, faked in tests. */
@@ -350,6 +359,7 @@ export class BusctlAtspi implements AtspiSource {
   async readTree(opts: AtspiReadOptions = {}): Promise<AtspiNode[]> {
     const maxNodes = opts.maxNodes ?? DEFAULT_MAX_NODES;
     const maxDepth = opts.maxDepth ?? DEFAULT_MAX_DEPTH;
+    const query = opts.query;
     const out: AtspiNode[] = [];
     const seen = new Set<string>();
     // Start at the registry root's children (apps); the desktop root itself is not UI.
@@ -357,11 +367,21 @@ export class BusctlAtspi implements AtspiSource {
     for (let depth = 0; frontier.length > 0 && depth < maxDepth; depth += 1) {
       const next: AtspiRef[] = [];
       for (const ref of frontier) {
+        // With a query, `out` holds only matches — so this also stops the walk as
+        // soon as enough matches are found, not merely enough nodes visited.
         if (out.length >= maxNodes) return out;
         const key = `${ref.dest}${ref.path}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        out.push(await this.#describe(ref));
+        const { role, name } = await this.#roleAndName(ref);
+        // A query-pruned non-match: skip the State/Extents calls (they'd just be
+        // filtered out downstream) but keep walking its children for deeper matches.
+        if (
+          !query ||
+          matchesQuery({ role, name, bounds: UNMEASURED_BOUNDS, enabled: false }, query)
+        ) {
+          out.push(await this.#describeRest(ref, role, name));
+        }
         next.push(...(await this.#children(ref)));
       }
       frontier = next;
@@ -434,14 +454,17 @@ export class BusctlAtspi implements AtspiSource {
     return asString(data, 'Name');
   }
 
-  /** Read a single node's role/name/state/extents into a normalized {@link AtspiNode}. */
-  async #describe(ref: AtspiRef): Promise<AtspiNode> {
+  /** Read just role + name — cheap enough to spend on every node for query pruning. */
+  async #roleAndName(ref: AtspiRef): Promise<{ role: string; name: string }> {
     const roleName = asString(
       firstReturn(await this.#call(ref, A11Y_IFACE, 'GetRoleName'), 'GetRoleName'),
       'GetRoleName',
     );
-    const role = mapRole(roleName);
-    const name = await this.#name(ref);
+    return { role: mapRole(roleName), name: await this.#name(ref) };
+  }
+
+  /** Finish describing a node (state + extents) once its role/name are known to matter. */
+  async #describeRest(ref: AtspiRef, role: string, name: string): Promise<AtspiNode> {
     const { enabled, visible } = stateFlags(
       parseStateWords(firstReturn(await this.#call(ref, A11Y_IFACE, 'GetState'), 'GetState')),
     );
