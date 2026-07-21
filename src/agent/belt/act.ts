@@ -21,17 +21,18 @@
  *
  * After the action it records one step: a line to `logs/agent.log` plus an ordered
  * post-action frame to `screenshots/` (the replay video). Recording is not
- * best-effort — a failed capture surfaces, never a silent fallback. A step that
- * throws is recorded too, as `ok: false` through {@link FailedStepSink}, then
- * rethrown — the trail tells the truth about what did NOT work.
+ * best-effort — a failed capture surfaces, never a silent fallback. Every finished
+ * step lands on the run's {@link ActTrail} at act time, `ok: true` with its frame
+ * or `ok: false` with the error (then rethrown, so the driver still sees it) — the
+ * trail tells the truth about what worked AND what did not.
  */
 
 import { tool } from 'ai';
 import { z } from 'zod';
 import type { Adapter, Node } from '../../adapters/contract.js';
 import { AgentError } from '../../errors.js';
-import type { Step } from '../../findings/schema.js';
 import type { LogChannel } from '../../session/findings-store.js';
+import type { ActTrail } from './trail.js';
 
 /** The six action verbs `act` routes to the shared contract. */
 export const ACT_ACTIONS = ['click', 'type', 'key', 'scroll', 'navigate', 'wait'] as const;
@@ -90,25 +91,14 @@ export interface ActResult {
   /** Target-derived step label, e.g. `click button "Save"`. */
   label: string;
   /**
-   * Whether the step worked — always `true` here, since a failed act throws
-   * (recorded via {@link FailedStepSink}). Carried so the loop's trail lift reads
-   * a recorded outcome instead of hardcoding one.
+   * Whether the step worked — always `true` here, since a failed act throws (and
+   * reaches the trail as `ok: false`). Told to the driver so it never has to
+   * guess whether an act landed.
    */
   ok: true;
   /** Path to the post-action screenshot saved as evidence. */
   screenshot: string;
 }
-
-/**
- * Sink for an act that THREW, so the failure still reaches the step trail.
- *
- * Successful acts ride the tool result into the trail (`stepTrailFrom`), but a
- * throw never produces one — the SDK routes it to a `tool-error` part the loop
- * does not read — so without this sink every persisted trail reads all-green.
- * Called at failure time (successes are lifted at step end), so two acts in ONE
- * step can land failure-first; the entries themselves stay truthful.
- */
-export type FailedStepSink = (step: Step) => void;
 
 /**
  * The slice of the findings store `act` records through. {@link FindingsStore}
@@ -222,17 +212,23 @@ async function performAct(adapter: Adapter, input: ActInput): Promise<string> {
  * Route one `act` call through the {@link Adapter}, then record the step. Pure
  * over the contract + {@link StepRecorder} seams, so it unit-tests against fakes.
  *
- * Anything that throws — a missing operand, an unresolved target, a dead adapter,
- * a failed capture — is pushed to `onFailedStep` as an `ok: false` entry and then
- * RETHROWN: the driver still sees the error (and can retry), while the evidence
- * trail keeps the step that did not work instead of silently dropping it.
+ * The step lands on `trail` the moment it finishes — announced through
+ * {@link ActTrail.begin} first, so a `report` racing in the SAME step waits for it
+ * instead of writing a verdict that never mentions this act. Anything that throws
+ * — a missing operand, an unresolved target, a dead adapter, a failed capture — is
+ * recorded as an `ok: false` entry and then RETHROWN: the driver still sees the
+ * error (and can retry), while the evidence trail keeps the step that did not work
+ * instead of silently dropping it.
  */
 export async function runAct(
   adapter: Adapter,
   recorder: StepRecorder,
   input: ActInput,
-  onFailedStep?: FailedStepSink,
+  trail?: ActTrail,
 ): Promise<ActResult> {
+  // Enter the gate BEFORE the first await, so a same-step terminal read sees this
+  // act in flight rather than an empty trail.
+  const settle = trail?.begin();
   // Label the attempt from the input up front: a throw inside `performAct` yields
   // no target-derived label, and an unlabelled failed step is not evidence.
   let label = describeAttempt(input);
@@ -241,27 +237,28 @@ export async function runAct(
     const png = await adapter.screenshot();
     const screenshot = await recorder.saveScreenshot(label, png);
     await recorder.appendLog('agent', `act ${label} → ${screenshot}`);
+    trail?.record({ step: label, ok: true, screenshot });
     return { action: input.action, label, ok: true, screenshot };
   } catch (error) {
-    onFailedStep?.({ step: label, ok: false, note: failureNote(error) });
+    trail?.record({ step: label, ok: false, note: failureNote(error) });
     throw error;
+  } finally {
+    // After the record on BOTH paths — a waiter released early would read a trail
+    // that is missing the very step it waited for.
+    settle?.();
   }
 }
 
 /**
  * Build the `act` tool bound to one adapter + recorder, for the debug agent's belt.
- * `onFailedStep` (when wired by the loop) receives the run's shared step trail, so
- * acts that threw land in the persisted findings alongside the ones that worked.
+ * `trail` (when wired by the loop) is the run's shared step trail, so every act —
+ * the ones that worked and the ones that threw — lands in the persisted findings.
  */
-export function createActTool(
-  adapter: Adapter,
-  recorder: StepRecorder,
-  onFailedStep?: FailedStepSink,
-) {
+export function createActTool(adapter: Adapter, recorder: StepRecorder, trail?: ActTrail) {
   return tool({
     description:
       'Drive the target with one action, chosen by action: click | type | key | scroll | navigate | wait. Resolves target via find, then routes to the adapter (click/type/open/waitFor) and records a step to agent.log plus a post-action screenshot. Use observe to read state before and after.',
     inputSchema: ActInputSchema,
-    execute: (input) => runAct(adapter, recorder, input, onFailedStep),
+    execute: (input) => runAct(adapter, recorder, input, trail),
   });
 }

@@ -21,12 +21,12 @@ import { createActTool } from '../agent/belt/act.js';
 import { createLookTool, createSelfLookTool } from '../agent/belt/look.js';
 import { createObserveTool } from '../agent/belt/observe.js';
 import { createReportTool } from '../agent/belt/report.js';
+import { createActTrail } from '../agent/belt/trail.js';
 import { createDebugAgent, runDebugLoop } from '../agent/loop.js';
 import { composeSystemPrompt, type TargetName } from '../agent/prompts/compose.js';
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import { ConfigError, TargetNotFoundError } from '../errors.js';
-import type { Step } from '../findings/schema.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
 import { ensureSession, sessionPaths, type WorkspacePaths } from '../session/workspace.js';
@@ -233,20 +233,18 @@ export async function buildSession(
   };
 
   const run: LoopRunner = async ({ inbox, progress, signal }) => {
-    // One trail per run, shared between the loop (which appends each act step), the
-    // `act` tool (which appends the acts that THREW, as `ok: false`) and the `report`
-    // tool (which merges it with the driver's reported steps), so the persisted
-    // findings and the returned counts derive from the same object.
-    const trail: Step[] = [];
+    // One trail per run, shared between the `act` tool (which records every step as
+    // it finishes, `ok: false` included), the loop (which snapshots it into each
+    // running flush) and the `report` tool (which merges it with the driver's
+    // reported steps), so the persisted findings and the returned counts derive from
+    // the same object. `report` reads it through `settled()`, so an act racing it in
+    // the SAME step still makes the verdict.
+    const trail = createActTrail();
     const agent = createDebugAgent({
       model: models.driver,
       tools: {
         observe: withToolLog('observe', createObserveTool(adapter, store), logAgent),
-        act: withToolLog(
-          'act',
-          createActTool(adapter, store, (step) => trail.push(step)),
-          logAgent,
-        ),
+        act: withToolLog('act', createActTool(adapter, store, trail), logAgent),
         look: withToolLog(
           'look',
           models.selfLook
@@ -256,7 +254,7 @@ export async function buildSession(
         ),
         report: withToolLog(
           'report',
-          createReportTool(store, () => trail),
+          createReportTool(store, () => trail.settled()),
           logAgent,
         ),
       },
@@ -264,7 +262,7 @@ export async function buildSession(
       inbox,
       progress,
       log: logAgent,
-      trail,
+      trail: trail.steps,
     });
     await flushAgentLog(`run start: target=${target} goal=${JSON.stringify(goal)}`);
     try {

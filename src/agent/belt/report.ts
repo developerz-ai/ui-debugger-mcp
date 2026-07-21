@@ -198,12 +198,21 @@ export async function runReport(
  * Build the `report` tool bound to one findings store, for the debug agent's belt.
  * `getTrail` (when wired by the loop) supplies the recorded act-trail so the
  * written verdict and its counts both reflect the steps actually taken.
+ *
+ * It may be async — and the wired one is. `report` executes CONCURRENTLY with the
+ * other tool calls of its own step, so when the driver emits `act` + `report`
+ * together the act is still running here; the wired read is the act trail's
+ * `settled()`, which waits for it (see `belt/trail.ts`). Waiting is safe: the
+ * step's own `Promise.all` already awaits that act.
  */
-export function createReportTool(writer: FindingsWriter, getTrail?: () => readonly Step[]) {
+export function createReportTool(
+  writer: FindingsWriter,
+  getTrail?: () => readonly Step[] | Promise<readonly Step[]>,
+) {
   return tool({
     description:
       'Emit the final structured findings and END the run. Call exactly once, when the goal is met or you hit the step limit. Validates and writes findings.json: status (passed|failed) plus steps/bugs/visual/summary. This is terminal — the loop stops after report, so do not act again. Make summary actionable for the smart agent: what broke, where, what to fix.',
     inputSchema: ReportInputSchema,
-    execute: (input) => runReport(writer, input, getTrail?.() ?? []),
+    execute: async (input) => runReport(writer, input, (await getTrail?.()) ?? []),
   });
 }

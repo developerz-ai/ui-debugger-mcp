@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { FindingsError } from '../../errors.js';
-import type { Findings } from '../../findings/schema.js';
+import type { Findings, Step } from '../../findings/schema.js';
 import {
   createReportTool,
   type FindingsWriter,
@@ -239,4 +239,25 @@ test('createReportTool exposes a described tool with an input schema', () => {
   const report = createReportTool(writer);
   expect(typeof report.description).toBe('string');
   expect(report.inputSchema).toBeDefined();
+});
+
+test('createReportTool awaits an async trail read before it writes the verdict', async () => {
+  const { writer, written } = fakeWriter();
+  // The wired read is the act trail's `settled()`: it resolves only once the acts
+  // racing `report` in the same step have recorded (see `belt/trail.ts`).
+  const late = new Promise<readonly Step[]>((resolve) => {
+    setTimeout(() => resolve([{ step: 'click Pay', ok: true, screenshot: '001.png' }]), 5);
+  });
+  const report = createReportTool(writer, () => late);
+  const execute = report.execute;
+  if (!execute) throw new Error('expected an executable report tool');
+  const result = (await execute(
+    { status: 'passed', steps: [], bugs: [], visual: [] },
+    {
+      toolCallId: 't1',
+      messages: [],
+    },
+  )) as ReportResult;
+  expect(result.counts.steps).toBe(1);
+  expect(written[0]?.steps).toEqual([{ step: 'click Pay', ok: true, screenshot: '001.png' }]);
 });

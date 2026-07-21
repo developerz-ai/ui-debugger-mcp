@@ -9,6 +9,7 @@ import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import type { Findings } from '../findings/schema.js';
 import { createReportTool } from './belt/report.js';
+import { type ActTrail, createActTrail } from './belt/trail.js';
 import {
   type BeltTools,
   createDebugAgent,
@@ -30,14 +31,18 @@ function fakeInbox(...items: string[]): LoopInbox {
 }
 
 /**
- * Minimal LanguageModelV3GenerateResult for one tool call — the shape
- * `doGenerate` must return for the SDK loop to execute that tool.
+ * Minimal LanguageModelV3GenerateResult for one or more tool calls in the SAME
+ * step — the shape `doGenerate` must return for the SDK loop to execute them. The
+ * SDK runs a step's calls concurrently, so several here means a real race.
  */
-function toolCallResponse(id: string, toolName: string, args: unknown) {
+function toolCallsResponse(...calls: Array<{ id: string; toolName: string; args: unknown }>) {
   return {
-    content: [
-      { type: 'tool-call' as const, toolCallId: id, toolName, input: JSON.stringify(args) },
-    ],
+    content: calls.map((call) => ({
+      type: 'tool-call' as const,
+      toolCallId: call.id,
+      toolName: call.toolName,
+      input: JSON.stringify(call.args),
+    })),
     finishReason: { unified: 'tool-calls' as const, raw: 'tool_calls' },
     usage: {
       inputTokens: {
@@ -50,6 +55,11 @@ function toolCallResponse(id: string, toolName: string, args: unknown) {
     },
     warnings: [] as [],
   };
+}
+
+/** One tool call in a step — the common case. */
+function toolCallResponse(id: string, toolName: string, args: unknown) {
+  return toolCallsResponse({ id, toolName, args });
 }
 
 /** A findings tracker shared by the progress seam and the report tool. */
@@ -67,11 +77,14 @@ function findingsTracker() {
 /**
  * Build a minimal real belt for integration tests:
  * - observe → empty tree (no step trail)
- * - act     → { action, label, ok, screenshot } so step trail picks it up
+ * - act     → records its step on the shared trail, like the real `act` does
  * - look    → description (no step trail)
  * - report  → writes verdict via the provided writer and signals stop
+ *
+ * `act` takes a tick of real work between announcing itself and recording, so a
+ * `report` in the SAME step genuinely races it (as it does in a live run).
  */
-function realBelt(progress: ProgressWriter): BeltTools {
+function realBelt(progress: ProgressWriter, trail: ActTrail = createActTrail()): BeltTools {
   return {
     observe: tool({
       description: 'observe',
@@ -81,25 +94,31 @@ function realBelt(progress: ProgressWriter): BeltTools {
     act: tool({
       description: 'act',
       inputSchema: z.object({ action: z.string(), target: z.string().optional() }),
-      execute: async (input) => ({
-        action: input.action,
-        label: `did ${input.action}${input.target ? ` on ${input.target}` : ''}`,
-        ok: true,
-        screenshot: '001.png',
-      }),
+      execute: async (input) => {
+        const settle = trail.begin();
+        const label = `did ${input.action}${input.target ? ` on ${input.target}` : ''}`;
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          trail.record({ step: label, ok: true, screenshot: '001.png' });
+          return { action: input.action, label, ok: true, screenshot: '001.png' };
+        } finally {
+          settle();
+        }
+      },
     }),
     look: tool({
       description: 'look',
       inputSchema: z.object({ question: z.string().optional() }),
       execute: async () => ({ description: 'looks fine', issues: [] }),
     }),
-    report: createReportTool(progress),
+    report: createReportTool(progress, () => trail.settled()),
   };
 }
 
 test('scripted loop (observe→act→report) records running steps and finalizes findings', async () => {
   const { written, writer } = findingsTracker();
-  const belt = realBelt(writer);
+  const trail = createActTrail();
+  const belt = realBelt(writer, trail);
 
   let callCount = 0;
   const model = new MockLanguageModelV3({
@@ -118,6 +137,7 @@ test('scripted loop (observe→act→report) records running steps and finalizes
     instructions: 'debug this app',
     inbox: fakeInbox(),
     progress: writer,
+    trail: trail.steps,
     maxSteps: 10,
   });
 
@@ -141,6 +161,41 @@ test('scripted loop (observe→act→report) records running steps and finalizes
 
   // All three steps ran: observe, act, report
   expect(callCount).toBe(3);
+});
+
+test('an act emitted in the SAME step as report still reaches the verdict', async () => {
+  const { written, writer } = findingsTracker();
+  const trail = createActTrail();
+  const belt = realBelt(writer, trail);
+
+  // The driver ignores "report is terminal" and fires both calls at once. The SDK
+  // runs them concurrently, so `report` writes while the act is still in flight —
+  // the verdict must still carry the last thing the run actually did.
+  const model = new MockLanguageModelV3({
+    doGenerate: async () =>
+      toolCallsResponse(
+        { id: 'c1', toolName: 'act', args: { action: 'click', target: 'Pay' } },
+        { id: 'c2', toolName: 'report', args: { status: 'passed', summary: 'Checkout works.' } },
+      ),
+  });
+
+  const agent = createDebugAgent({
+    model,
+    tools: belt,
+    instructions: 'debug this app',
+    inbox: fakeInbox(),
+    progress: writer,
+    trail: trail.steps,
+    maxSteps: 10,
+  });
+
+  await runDebugLoop({ agent });
+
+  const verdict = written.filter((f) => f.status !== 'running').at(-1);
+  if (!verdict) throw new Error('expected a terminal findings write');
+  expect(verdict.steps).toEqual([{ step: 'did click on Pay', ok: true, screenshot: '001.png' }]);
+  // And no `running` snapshot raced the verdict onto disk after it.
+  expect(written.at(-1)?.status).toBe('passed');
 });
 
 test('scripted loop streams look issues + console errors before any verdict', async () => {

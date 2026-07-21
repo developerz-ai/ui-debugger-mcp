@@ -16,7 +16,6 @@ import {
   pruneStaleFrames,
   type RunTrail,
   STALE_FRAME_NOTE,
-  stepTrailFrom,
   visualFrom,
 } from './loop.js';
 
@@ -55,6 +54,15 @@ const actResult = (label: string, screenshot: string, ok = true) => ({
   toolName: 'act',
   output: { action: 'click', label, ok, screenshot },
 });
+
+/**
+ * What the `act` tool does to the shared trail before the step finishes: record the
+ * step, then hand back the matching tool result (see `belt/act.ts`).
+ */
+const acted = (running: RunTrail, label: string, screenshot: string, ok = true) => {
+  running.steps.push({ step: label, ok, screenshot });
+  return actResult(label, screenshot, ok);
+};
 
 /** A vision-guy `look` result carrying flagged issues plus the frame they were judged on. */
 const lookResult = (
@@ -113,21 +121,6 @@ test('foldInstructionsIntoStep re-appends standing instructions after the inbox 
   expect(standing).toEqual(['check mobile view']);
 });
 
-test('stepTrailFrom lifts act results into steps and ignores everything else', () => {
-  const steps = stepTrailFrom([
-    { toolName: 'observe', output: { kind: 'tree' } },
-    actResult('click button "Save"', '001-save.png'),
-    { toolName: 'look', output: { description: 'fine', issues: [] } },
-    { toolName: 'act', output: { malformed: true } },
-  ]);
-  expect(steps).toEqual([{ step: 'click button "Save"', ok: true, screenshot: '001-save.png' }]);
-});
-
-test('stepTrailFrom carries the recorded ok flag — never hardcodes success', () => {
-  const steps = stepTrailFrom([actResult('click button "Pay"', '002-pay.png', false)]);
-  expect(steps).toEqual([{ step: 'click button "Pay"', ok: false, screenshot: '002-pay.png' }]);
-});
-
 test('visualFrom lifts vision-guy issues with their frame, and ignores a self-look result', () => {
   const issues = visualFrom([
     lookResult('003-cart.png', {
@@ -167,11 +160,13 @@ test('consoleBugsFrom lifts error rows only, keeping the source location as evid
 test('progressForStep steps aside for the terminal report step (verdict owned by report)', () => {
   const running = runTrail();
   const out = progressForStep(
-    { toolCalls: [{ toolName: 'report' }], toolResults: [actResult('click x', '1.png')] },
+    { toolCalls: [{ toolName: 'report' }], toolResults: [acted(running, 'click x', '1.png')] },
     running,
   );
+  // No running write to clobber the verdict — but the act itself is NOT lost: `act`
+  // recorded it on the shared trail, and `report` merged that trail into `steps`.
   expect(out).toBeNull();
-  expect(running.steps).toHaveLength(0);
+  expect(running.steps).toEqual([{ step: 'click x', ok: true, screenshot: '1.png' }]);
 });
 
 test('progressForStep skips steps that surfaced nothing new', () => {
@@ -185,7 +180,7 @@ test('progressForStep skips steps that surfaced nothing new', () => {
 test('progressForStep flushes a running trail and accumulates across steps', () => {
   const running = runTrail();
   const first = progressForStep(
-    { toolCalls: [{ toolName: 'act' }], toolResults: [actResult('typed email', '1.png')] },
+    { toolCalls: [{ toolName: 'act' }], toolResults: [acted(running, 'typed email', '1.png')] },
     running,
   );
   expect(first).toEqual({
@@ -195,7 +190,7 @@ test('progressForStep flushes a running trail and accumulates across steps', () 
     visual: [],
   });
   const second = progressForStep(
-    { toolCalls: [{ toolName: 'act' }], toolResults: [actResult('clicked Submit', '2.png')] },
+    { toolCalls: [{ toolName: 'act' }], toolResults: [acted(running, 'clicked Submit', '2.png')] },
     running,
   );
   expect(second?.steps).toHaveLength(2);
@@ -255,7 +250,7 @@ test('progressForStep keeps streamed findings when a later step only acts', () =
     running,
   );
   const next = progressForStep(
-    { toolCalls: [{ toolName: 'act' }], toolResults: [actResult('clicked Pay', '9.png')] },
+    { toolCalls: [{ toolName: 'act' }], toolResults: [acted(running, 'clicked Pay', '9.png')] },
     running,
   );
   expect(next?.visual).toHaveLength(1);
