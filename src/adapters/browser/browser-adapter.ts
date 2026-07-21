@@ -37,6 +37,7 @@ import type {
   ScrollOptions,
   WaitOptions,
 } from '../contract.js';
+import { capToLimit } from '../limit.js';
 import type { CaptureSink } from './cdp.js';
 import { CdpCapture } from './cdp.js';
 import { closeOnFailure, createFailure } from './launch.js';
@@ -112,11 +113,12 @@ interface DomDocument {
 interface DomEl {
   tagName: string;
   textContent: string | null;
-  disabled?: boolean;
+  readOnly?: boolean;
   labels?: ArrayLike<DomEl> | null;
   parentElement: DomEl | null;
   ownerDocument: DomDocument;
   style: { backgroundColor: string };
+  matches(selector: string): boolean;
   getAttribute(name: string): string | null;
   hasAttribute(name: string): boolean;
   getBoundingClientRect(): { x: number; y: number; width: number; height: number };
@@ -292,6 +294,22 @@ const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
     return clean(el.getAttribute('title'));
   };
 
+  // Contract: `enabled` is "interactable" — false when disabled OR readonly.
+  //   - `:disabled` catches the INHERITED state a `disabled` property misses:
+  //     controls inside `fieldset[disabled]` (bar its first `<legend>`), options
+  //     under a disabled `<optgroup>`.
+  //   - `readonly` blocks input without disabling the element, so the driver must
+  //     see it as not-interactable too (typing there is a no-op it can't explain).
+  //     Assumption: `readOnly` set on a control where HTML ignores it (checkbox,
+  //     button) is an authoring mistake — we report it as such rather than guess.
+  //   - ARIA equivalents cover custom widgets (`div role="textbox"`), which carry
+  //     no native disabled/readonly state at all.
+  const interactable = (el: DomEl): boolean =>
+    !el.matches(':disabled') &&
+    el.getAttribute('aria-disabled') !== 'true' &&
+    el.readOnly !== true &&
+    el.getAttribute('aria-readonly') !== 'true';
+
   return elements.map((el) => {
     const r = el.getBoundingClientRect();
     const style = getComputedStyle(el);
@@ -306,7 +324,7 @@ const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
         width: Math.round(r.width),
         height: Math.round(r.height),
       },
-      enabled: el.disabled !== true && el.getAttribute('aria-disabled') !== 'true',
+      enabled: interactable(el),
       visible:
         r.width > 0 &&
         r.height > 0 &&
@@ -655,18 +673,23 @@ export class BrowserAdapter implements Adapter {
   }
 
   /**
-   * Coordinate click at a {@link Node}'s bounds center, shared by `click` and
-   * `type`. Bounds are viewport-relative, so an off-screen center would make CDP
-   * click nothing — fail loud instead so the agent knows to scroll first.
+   * Center of `bounds`, asserted on-screen. Bounds are viewport-relative, so CDP
+   * mouse events at an off-screen center land on nothing — silently. Fail loud
+   * instead so the agent knows to scroll it into view first.
    */
-  async #clickBoundsCenter(node: Node): Promise<void> {
-    const { x, y, width, height } = node.bounds;
-    const center = { x: x + width / 2, y: y + height / 2 };
+  #centerInViewport(bounds: Bounds): { x: number; y: number } {
+    const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
     if (isOutsideViewport(center, this.#page.viewportSize())) {
       throw new AdapterError(
         `element center (${Math.round(center.x)}, ${Math.round(center.y)}) is outside the viewport — scroll it into view first, then re-read its bounds`,
       );
     }
+    return center;
+  }
+
+  /** Coordinate click at a {@link Node}'s bounds center, shared by `click` and `type`. */
+  async #clickBoundsCenter(node: Node): Promise<void> {
+    const center = this.#centerInViewport(node.bounds);
     await this.#page.mouse.click(center.x, center.y);
   }
 
@@ -688,9 +711,11 @@ export class BrowserAdapter implements Adapter {
       // Scope: park the cursor over the region first, so the wheel event targets the
       // scrollable element under it instead of the viewport. No scope → wheel where
       // the mouse already is (`Input.dispatchMouseEvent` of type `mouseWheel`).
+      // Same viewport guard as the coordinate click: an off-screen region would
+      // move the cursor nowhere and scroll the viewport instead — silently wrong.
       if (opts.within !== undefined) {
-        const { x, y, width, height } = await this.#regionBox(opts.within);
-        await this.#page.mouse.move(x + width / 2, y + height / 2);
+        const center = this.#centerInViewport(await this.#regionBox(opts.within));
+        await this.#page.mouse.move(center.x, center.y);
       }
       await this.#page.mouse.wheel(dx, dy);
     });
@@ -766,9 +791,7 @@ export class BrowserAdapter implements Adapter {
     }
     nodes = applyNodeFilters(nodes, opts.filters);
 
-    const limit = opts.limit ?? defaultLimit;
-    if (limit !== undefined) nodes = nodes.slice(0, limit);
-    return nodes.map(toNode);
+    return capToLimit(nodes, opts.limit ?? defaultLimit).map(toNode);
   }
 
   /** Resolve a scroll `within` scope to an on-screen rectangle (Node bounds, or a located selector). */

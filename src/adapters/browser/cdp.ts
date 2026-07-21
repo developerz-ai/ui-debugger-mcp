@@ -28,6 +28,7 @@
 import type { ConsoleMessage, Page, Request, Response } from 'playwright-core';
 import { AdapterError } from '../../errors.js';
 import type { ConsoleEntry, Filters, FilterValue, LogQuery, NetworkEntry } from '../contract.js';
+import { capToLimit } from '../limit.js';
 
 /** Default ring size per channel — keeps memory bounded on chatty pages. */
 const DEFAULT_BUFFER_CAP = 1000;
@@ -229,16 +230,11 @@ export function filterNetwork(entries: NetworkEntry[], filters?: Filters): Netwo
 
 /**
  * Reverse to newest-first and apply `limit` — the shared `console`/`network` read
- * tail. Rejects bad limits loud: `slice` would silently coerce `-1` to "all but
- * the oldest" and `NaN` to `[]`, so non-negative integers only.
+ * tail. The cap goes through {@link capToLimit}, so a bad limit fails loud here
+ * exactly as it does on the node reads.
  */
 function newestFirst<T>(filtered: T[], limit?: number): T[] {
-  const out = [...filtered].reverse();
-  if (limit === undefined) return out;
-  if (!Number.isInteger(limit) || limit < 0) {
-    throw new AdapterError('`limit` must be a non-negative integer');
-  }
-  return out.slice(0, limit);
+  return capToLimit([...filtered].reverse(), limit);
 }
 
 /**
