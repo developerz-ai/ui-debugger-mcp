@@ -12,8 +12,9 @@
  *   - {@link Adb.execOut} — `adb exec-out <cmd>` → **raw bytes** (binary-safe `screencap -p`).
  *   - {@link Adb.adb}     — top-level `adb <args>` (`wait-for-device`, `emu kill`).
  *
- * Target selection is baked into the `flags` at construction: `['-s', serial]` for an
- * attached device, `['-e']` for the single managed emulator. Fails loud — a non-zero
+ * Target selection is baked into the `flags` at construction and is always an explicit
+ * serial — `['-s', serial]`, the configured one when attaching, `emulator-<port>` for
+ * the emulator a managed run started (never the ambiguous `-e`). Fails loud — a non-zero
  * exit or a missing binary rejects as an {@link AdbError}, never a silent fallback.
  */
 
@@ -40,7 +41,7 @@ export interface Adb {
 
 /**
  * `execFile`-backed {@link Adb}. Construct with the device-selection `flags`
- * (`['-s', serial]` to attach · `['-e']` for the managed emulator).
+ * (`['-s', serial]` — the config serial when attaching, `emulator-<port>` when managed).
  */
 export class AdbCli implements Adb {
   readonly #flags: string[];

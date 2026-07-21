@@ -88,10 +88,15 @@ function makeNode(overrides: Partial<AndroidNode> = {}): AndroidNode {
   };
 }
 
-/** Fake ADB seam — records calls for assertions. */
+/** Fake ADB seam — records calls (and the serial it was bound to) for assertions. */
 class FakeAdb implements Adb {
+  readonly serial: string;
   calls: Array<{ method: string; args: string[] }> = [];
   responses: Map<string, string | Uint8Array> = new Map();
+
+  constructor(serial = 'emulator-fake') {
+    this.serial = serial;
+  }
 
   setResponse(key: string, value: string | Uint8Array): void {
     this.responses.set(key, value);
@@ -133,10 +138,13 @@ class FakeAdb implements Adb {
   }
 }
 
-/** Minimal fake emulator child for the spawn seam — an EventEmitter with a pid. */
-function makeFakeEmulator(): ChildProcess {
+/**
+ * Minimal fake emulator child for the spawn seam — an EventEmitter with a pid.
+ * Pass `undefined` when the test calls `close`, so the real `process.kill` is skipped.
+ */
+function makeFakeEmulator(pid: number | undefined = 4242): ChildProcess {
   const child = new EventEmitter() as unknown as ChildProcess;
-  (child as { pid?: number }).pid = 4242;
+  (child as { pid?: number }).pid = pid;
   return child;
 }
 
@@ -898,10 +906,11 @@ describe('AndroidAdapter managed boot', () => {
         spawned = [bin, ...args];
         return makeFakeEmulator();
       },
+      pickPort: async () => 5554,
       bootWaitMs: 2000,
     });
     await adapter.open('com.example');
-    expect(spawned).toEqual(['emulator', '@test_avd']);
+    expect(spawned).toEqual(['emulator', '@test_avd', '-port', '5554']);
     expect(adb.calls.some((c) => c.method === 'adb' && c.args[0] === 'get-state')).toBe(true);
     expect(adb.calls.some((c) => c.args[0] === 'monkey')).toBe(true);
   });
@@ -919,6 +928,7 @@ describe('AndroidAdapter managed boot', () => {
         queueMicrotask(() => child.emit('error', new Error('spawn /nope/emulator ENOENT')));
         return child;
       },
+      pickPort: async () => 5554,
       bootWaitMs: 2000,
     });
     const err = await adapter.open('com.example').catch((e: unknown) => e);
@@ -938,6 +948,7 @@ describe('AndroidAdapter managed boot', () => {
         queueMicrotask(() => child.emit('exit', 1, null));
         return child;
       },
+      pickPort: async () => 5554,
       bootWaitMs: 2000,
     });
     const err = await adapter.open('com.example').catch((e: unknown) => e);
@@ -953,11 +964,109 @@ describe('AndroidAdapter managed boot', () => {
       adb,
       ui: new FakeUi([]),
       spawn: () => makeFakeEmulator(),
+      pickPort: async () => 5554,
       bootWaitMs: 50,
     });
     const err = await adapter.open('com.example').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AdapterError);
     expect((err as AdapterError).message).toContain('no device appeared');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Managed-vs-attach binding: managed drives ONLY the emulator it spawned.
+// ---------------------------------------------------------------------------
+
+describe('AndroidAdapter device binding', () => {
+  /** Managed adapter whose transport factory records the serial each call is bound to. */
+  function makeBoundAdapter(
+    ports: number[],
+    overrides: Partial<AndroidAdapterInit> = {},
+  ): { adapter: AndroidAdapter; bound: FakeAdb[]; spawns: string[][] } {
+    const bound: FakeAdb[] = [];
+    const spawns: string[][] = [];
+    let next = 0;
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', avd: 'test_avd' },
+      adb: (serial) => {
+        const adb = new FakeAdb(serial);
+        bound.push(adb);
+        return adb;
+      },
+      ui: new FakeUi([]),
+      spawn: (bin, args) => {
+        spawns.push([bin, ...args]);
+        // No pid → `close` skips the SIGTERM (never signal a real process group in tests).
+        return makeFakeEmulator(undefined);
+      },
+      pickPort: async () => ports[next++] ?? 5554,
+      bootWaitMs: 2000,
+      ...overrides,
+    });
+    return { adapter, bound, spawns };
+  }
+
+  test('managed open spawns on a picked port and binds adb to that serial', async () => {
+    const { adapter, bound, spawns } = makeBoundAdapter([5560]);
+    await adapter.open('com.example');
+    expect(spawns).toEqual([['emulator', '@test_avd', '-port', '5560']]);
+    expect(bound.map((a) => a.serial)).toEqual(['emulator-5560']);
+    // Every device call went through the bound transport — nothing is left to `-e`.
+    expect(bound[0]?.calls.some((c) => c.args[0] === 'monkey')).toBe(true);
+  });
+
+  test('managed close kills only the bound emulator, and re-open binds the next one', async () => {
+    const { adapter, bound } = makeBoundAdapter([5556, 5558]);
+    await adapter.open('com.example');
+    await adapter.close();
+    const first = bound[0];
+    expect(first?.serial).toBe('emulator-5556');
+    expect(first?.calls.filter((c) => c.method === 'adb' && c.args[0] === 'emu')).toHaveLength(1);
+
+    await adapter.open('com.example');
+    expect(bound.map((a) => a.serial)).toEqual(['emulator-5556', 'emulator-5558']);
+    // The dead binding is never touched again — no stray kill on a re-used serial.
+    expect(first?.calls.filter((c) => c.method === 'adb' && c.args[0] === 'emu')).toHaveLength(1);
+    expect(bound[1]?.calls.some((c) => c.args[0] === 'monkey')).toBe(true);
+  });
+
+  test('managed calls before open fail loud instead of guessing a device', async () => {
+    const { adapter } = makeBoundAdapter([5554]);
+    await expect(adapter.readState({})).rejects.toThrow(AdapterError);
+    await expect(adapter.screenshot()).rejects.toThrow(AdapterError);
+  });
+
+  test('attach binds the transport to the configured serial', () => {
+    const bound: FakeAdb[] = [];
+    AndroidAdapter.create({
+      config: { adapter: 'android', avd: 'test_avd', adbSerial: 'emulator-5582' },
+      adb: (serial) => {
+        const adb = new FakeAdb(serial);
+        bound.push(adb);
+        return adb;
+      },
+      ui: new FakeUi([]),
+    });
+    expect(bound.map((a) => a.serial)).toEqual(['emulator-5582']);
+  });
+
+  test('attach never spawns an emulator nor kills the device', async () => {
+    const adb = new FakeAdb('emulator-5582');
+    let spawns = 0;
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', avd: 'test_avd', adbSerial: 'emulator-5582' },
+      adb,
+      ui: new FakeUi([]),
+      spawn: () => {
+        spawns++;
+        return makeFakeEmulator(undefined);
+      },
+      pickPort: () => Promise.reject(new Error('attach mode must never pick a port')),
+    });
+    await adapter.open('com.example');
+    await adapter.close();
+    expect(spawns).toBe(0);
+    expect(adb.calls.some((c) => c.method === 'adb' && c.args[0] === 'emu')).toBe(false);
   });
 });
 

@@ -9,8 +9,10 @@
  *
  * **Managed or attach** (`idea/adapters.md`): with an `adbSerial` the adapter attaches
  * to a running device and `close` is disconnect-only (never stops it); otherwise it
- * boots the configured `emulator @avd`, waits for `sys.boot_completed`, and `close`
- * stops it. Android is fully framework-driven — no vision needed for actions.
+ * boots the configured `emulator @avd` on a free console port (`ports.ts`), waits for
+ * `sys.boot_completed`, and `close` stops it. Either way every call is bound to one
+ * explicit serial (`adb -s <serial>`), so a managed run can never drive — or kill — an
+ * emulator it did not start. Android is fully framework-driven — no vision for actions.
  *
  * `console` is logcat-backed (real crash/error signal); `network` has no ADB channel
  * and throws loud ({@link AdapterError}). Every backend failure surfaces as an
@@ -46,6 +48,7 @@ import {
   tapArgs,
   textArgs,
 } from './commands.js';
+import { emulatorSerial, pickEmulatorPort } from './ports.js';
 import { AdbUiAutomator, shapeNodes, type UiAutomatorSource } from './uiautomator.js';
 
 /** Default cap on `readState` so the tree stays small (overridable via `limit`). */
@@ -132,13 +135,23 @@ export function applyLogFilters(entries: ConsoleEntry[], filters?: Filters): Con
   return out;
 }
 
-interface AndroidAdapterHandles {
-  config: AndroidTarget;
+/** The device seams, bound to one serial: the ADB transport plus the reader on top of it. */
+interface Transport {
   adb: Adb;
   ui: UiAutomatorSource;
+}
+
+interface AndroidAdapterHandles {
+  config: AndroidTarget;
+  /** Bound transport, or null while a managed emulator has no serial yet. */
+  transport: Transport | null;
+  /** Build the transport for a serial; null when an instance seam was injected. */
+  bind: ((serial: string) => Transport) | null;
   attach: boolean;
+  serial: string | null;
   spawn: SpawnEmulator;
   bootWaitMs: number;
+  pickPort: () => Promise<number>;
 }
 
 /** Launch the emulator process — the spawn seam tests replace with a fake child. */
@@ -147,14 +160,20 @@ export type SpawnEmulator = (bin: string, args: string[]) => ChildProcess;
 export interface AndroidAdapterInit {
   /** Resolved android-target config (avd, emulatorPath, adbSerial). */
   config: AndroidTarget;
-  /** Override the ADB transport (defaults to {@link AdbCli}); a seam for tests. */
-  adb?: Adb;
+  /**
+   * Override the ADB transport (defaults to an {@link AdbCli} bound to the device
+   * serial); a seam for tests. As a function it is the transport *factory* and gets
+   * the serial the adapter bound to — managed mode calls it at boot.
+   */
+  adb?: Adb | ((serial: string) => Adb);
   /** Override the read source (defaults to {@link AdbUiAutomator}); a seam for tests. */
   ui?: UiAutomatorSource;
   /** Override the emulator spawn (defaults to `spawn`, detached); a seam for tests. */
   spawn?: SpawnEmulator;
   /** Override the managed-boot deadline (defaults to {@link BOOT_WAIT_MS}); a seam for tests. */
   bootWaitMs?: number;
+  /** Override the managed console-port pick (defaults to {@link pickEmulatorPort}); a test seam. */
+  pickPort?: () => Promise<number>;
 }
 
 /**
@@ -163,11 +182,14 @@ export interface AndroidAdapterInit {
  */
 export class AndroidAdapter implements Adapter {
   readonly #config: AndroidTarget;
-  readonly #adb: Adb;
-  readonly #ui: UiAutomatorSource;
+  readonly #bind: ((serial: string) => Transport) | null;
   readonly #attach: boolean;
   readonly #spawn: SpawnEmulator;
   readonly #bootWaitMs: number;
+  readonly #pickPort: () => Promise<number>;
+  #transport: Transport | null;
+  /** The device every call is bound to (`emulator-<port>` once managed boot picks one). */
+  #serial: string | null;
   #emulator: ChildProcess | null = null;
   /** Why the managed emulator process is unusable (launch failure / early exit), or null. */
   #emulatorDown: string | null = null;
@@ -176,28 +198,63 @@ export class AndroidAdapter implements Adapter {
 
   private constructor(handles: AndroidAdapterHandles) {
     this.#config = handles.config;
-    this.#adb = handles.adb;
-    this.#ui = handles.ui;
+    this.#transport = handles.transport;
+    this.#bind = handles.bind;
     this.#attach = handles.attach;
+    this.#serial = handles.serial;
     this.#spawn = handles.spawn;
     this.#bootWaitMs = handles.bootWaitMs;
+    this.#pickPort = handles.pickPort;
     // Attach mode targets an already-running device — treat it as booted from the start.
     this.#booted = handles.attach;
   }
 
-  /** Wire the adapter from config: `adbSerial` → attach (`-s serial`), else managed emulator (`-e`). */
+  /**
+   * Wire the adapter from config. Both modes talk to **one explicit serial**
+   * (`adb -s <serial>`): attach reads it from `adbSerial` and binds here, managed
+   * only learns it when it picks a console port and spawns — so it binds at boot.
+   */
   static create(init: AndroidAdapterInit): AndroidAdapter {
-    const serial = init.config.adbSerial ?? null;
-    const attach = serial !== null;
-    const adb = init.adb ?? new AdbCli(serial !== null ? ['-s', serial] : ['-e']);
+    const attachSerial = init.config.adbSerial ?? null;
+    // An injected transport instance (test seam) is already bound — never rebuilt.
+    const seam = typeof init.adb === 'object' ? init.adb : null;
+    const makeAdb = typeof init.adb === 'function' ? init.adb : null;
+    const bind =
+      seam === null
+        ? (serial: string): Transport => {
+            const adb = makeAdb ? makeAdb(serial) : new AdbCli(['-s', serial]);
+            return { adb, ui: init.ui ?? new AdbUiAutomator(adb) };
+          }
+        : null;
+    let transport: Transport | null = null;
+    if (seam !== null) transport = { adb: seam, ui: init.ui ?? new AdbUiAutomator(seam) };
+    else if (attachSerial !== null && bind !== null) transport = bind(attachSerial);
     return new AndroidAdapter({
       config: init.config,
-      adb,
-      ui: init.ui ?? new AdbUiAutomator(adb),
-      attach,
+      transport,
+      bind,
+      attach: attachSerial !== null,
+      serial: attachSerial,
       spawn: init.spawn ?? ((bin, args) => spawn(bin, args, { detached: true, stdio: 'ignore' })),
       bootWaitMs: init.bootWaitMs ?? BOOT_WAIT_MS,
+      pickPort: init.pickPort ?? (() => pickEmulatorPort()),
     });
+  }
+
+  /** The bound ADB transport. Managed mode binds it at boot — nothing talks to a device before. */
+  get #adb(): Adb {
+    if (!this.#transport) {
+      throw new AdapterError('android: no device bound yet (open the target first)');
+    }
+    return this.#transport.adb;
+  }
+
+  /** The bound hierarchy reader — bound with {@link AndroidAdapter.#adb}. */
+  get #ui(): UiAutomatorSource {
+    if (!this.#transport) {
+      throw new AdapterError('android: no device bound yet (open the target first)');
+    }
+    return this.#transport.ui;
   }
 
   /** Ensure the device is up (managed: boot the emulator), then start the activity/package. */
@@ -309,17 +366,24 @@ export class AndroidAdapter implements Adapter {
     );
   }
 
-  /** Attach: disconnect-only (never stop the device). Managed: stop the emulator. */
+  /**
+   * Attach: disconnect-only (never stop the device). Managed: stop **our** emulator —
+   * the kill goes to the bound serial (`adb -s emulator-<port> emu kill`), so a
+   * co-running emulator we never started is untouched.
+   */
   async close(): Promise<void> {
     if (this.#attach) return;
     await this.#run('close', async () => {
-      if (this.#booted) {
+      if (this.#booted && this.#transport) {
         // Best-effort console kill; the SIGTERM below is the hard backstop.
-        await this.#adb.adb(['emu', 'kill']).catch(() => undefined);
+        await this.#transport.adb.adb(['emu', 'kill']).catch(() => undefined);
       }
       const pid = this.#emulator?.pid;
       this.#emulator = null;
       this.#booted = false;
+      this.#serial = null;
+      // Drop the binding so a re-`open` binds to the next emulator, not the dead one.
+      if (this.#bind) this.#transport = null;
       if (pid === undefined) return;
       try {
         // Negative pid → the whole detached group.
@@ -330,12 +394,20 @@ export class AndroidAdapter implements Adapter {
     });
   }
 
-  /** Managed boot: launch `emulator @avd` (once) and poll `sys.boot_completed`. No-op when attached. */
+  /**
+   * Managed boot: launch `emulator @avd -port <p>` (once) and poll `sys.boot_completed`.
+   * The port is picked free and bound **before** the spawn: the emulator answers as
+   * `emulator-<p>`, so every later call (and the `close` kill) targets the process we
+   * started — never a pre-existing emulator. No-op when attached.
+   */
   async #ensureBooted(): Promise<void> {
     if (this.#booted) return;
     if (!this.#emulator) {
       const bin = this.#config.emulatorPath ?? 'emulator';
-      const child = this.#spawn(bin, [`@${this.#config.avd}`]);
+      const port = await this.#pickPort();
+      this.#serial = emulatorSerial(port);
+      if (this.#bind) this.#transport = this.#bind(this.#serial);
+      const child = this.#spawn(bin, [`@${this.#config.avd}`, '-port', String(port)]);
       this.#emulatorDown = null;
       // Both fire async (later tick): without a listener a bad `emulatorPath` would
       // crash the whole server via an unhandled 'error' event. Capture the failure
@@ -355,7 +427,7 @@ export class AndroidAdapter implements Adapter {
       if (out === '1') break;
       if (Date.now() >= deadline) {
         throw new AdapterError(
-          `android: emulator @${this.#config.avd} did not boot within ${this.#bootWaitMs}ms`,
+          `android: emulator @${this.#config.avd} (${this.#serial}) did not boot within ${this.#bootWaitMs}ms`,
         );
       }
       await delay(POLL_MS);
@@ -378,7 +450,8 @@ export class AndroidAdapter implements Adapter {
       if (state.trim() === 'device') return;
       if (Date.now() >= deadline) {
         throw new AdapterError(
-          `android: no device appeared within ${this.#bootWaitMs}ms (emulator @${this.#config.avd})`,
+          `android: no device appeared within ${this.#bootWaitMs}ms ` +
+            `(emulator @${this.#config.avd} on ${this.#serial})`,
         );
       }
       await delay(POLL_MS);
