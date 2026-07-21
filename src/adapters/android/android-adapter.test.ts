@@ -16,7 +16,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { AdapterError } from '../../errors.js';
+import { AdapterError, AdbError } from '../../errors.js';
 import type { Bounds, Node } from '../contract.js';
 import type { Adb } from './adb.js';
 import {
@@ -970,6 +970,49 @@ describe('AndroidAdapter managed boot', () => {
     const err = await adapter.open('com.example').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AdapterError);
     expect((err as AdapterError).message).toContain('no device appeared');
+  });
+
+  /** Managed adapter over an ADB seam whose `get-state` is scripted per call. */
+  function makeStateAdapter(getState: () => Promise<string>, bootWaitMs: number): AndroidAdapter {
+    const adb: Adb = {
+      shell: async () => '1',
+      execOut: async () => new Uint8Array(),
+      adb: async (args) => (args[0] === 'get-state' ? await getState() : ''),
+    };
+    return AndroidAdapter.create({
+      config: { adapter: 'android', avd: 'test_avd' },
+      adb,
+      ui: new FakeUi([]),
+      spawn: () => makeFakeEmulator(undefined),
+      pickPort: async () => 5554,
+      bootWaitMs,
+    });
+  }
+
+  test('a device that is not up yet keeps the boot poll waiting', async () => {
+    let calls = 0;
+    const adapter = makeStateAdapter(async () => {
+      calls++;
+      if (calls < 3) {
+        throw new AdbError("adb get-state failed: error: device 'emulator-5554' not found");
+      }
+      return 'device';
+    }, 5000);
+    await adapter.open('com.example');
+    expect(calls).toBe(3);
+  });
+
+  test('a missing `adb` fails the boot at once instead of spinning the deadline', async () => {
+    // A swallowed failure would burn the whole (here: 60 s) deadline and then lie
+    // about the cause — the run must see the real error immediately.
+    const adapter = makeStateAdapter(async () => {
+      throw new AdbError('android: `adb` not found on PATH (install Android platform-tools)');
+    }, 60_000);
+    const started = Date.now();
+    const err = await adapter.open('com.example').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdbError);
+    expect((err as AdbError).message).toContain('not found on PATH');
+    expect(Date.now() - started).toBeLessThan(2000);
   });
 });
 

@@ -35,7 +35,7 @@ import type {
   ScrollOptions,
   WaitOptions,
 } from '../contract.js';
-import { type Adb, AdbCli } from './adb.js';
+import { type Adb, AdbCli, pendingStateOrThrow } from './adb.js';
 import {
   centerOf,
   keyArgs,
@@ -436,17 +436,18 @@ export class AndroidAdapter implements Adapter {
   }
 
   /**
-   * Bounded replacement for the unbounded `adb wait-for-device`: poll `get-state`
-   * until a device answers, failing loud when the emulator died or the boot
-   * deadline passed — a dead emulator must never hang `open` forever.
+   * Bounded replacement for the unbounded `adb wait-for-device`: poll `get-state` until
+   * a device answers, failing loud when the emulator died, the poll hit a real error
+   * ({@link pendingStateOrThrow}) or the deadline passed — never hang `open` forever.
    */
   async #awaitDevice(deadline: number): Promise<void> {
     for (;;) {
       if (this.#emulatorDown !== null) {
         throw new AdapterError(`android: ${this.#emulatorDown}`);
       }
-      // `get-state` exits non-zero while no device is connected — that's "keep waiting".
-      const state = await this.#adb.adb(['get-state']).catch(() => '');
+      // `get-state` exits non-zero while no device is connected — that alone is "keep
+      // waiting"; a missing `adb`, an ambiguous target or a wedged call surfaces now.
+      const state = await this.#adb.adb(['get-state']).catch(pendingStateOrThrow);
       if (state.trim() === 'device') return;
       if (Date.now() >= deadline) {
         throw new AdapterError(
