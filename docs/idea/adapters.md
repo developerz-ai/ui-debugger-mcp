@@ -82,8 +82,10 @@ the same managed/attach split applies:
   `input tap/swipe/text` → actions, `screencap` → screenshots. Appium's
   UiAutomator2 driver sits on top for richer queries. The emulator adds a
   **console / gRPC** for launch + sensors.
-- **Managed (default)** — server boots an emulator (`emulator @avd`, optional
-  `emulatorPath`) and owns its lifecycle.
+- **Managed (default)** — server boots an emulator (`emulator @avd -port <p>`, optional
+  `emulatorPath`) and owns its lifecycle. The port is picked free from 5554–5584, so the
+  emulator answers as `emulator-<p>` and **every call is bound to that serial**
+  (`adb -s`) — a co-running emulator is never driven, and never killed on `close`.
 - **Attach** — if an **`adbSerial`** (device/emulator id, e.g. `emulator-5554`
   or a network `host:port`) is configured, the adapter talks to that already-running
   device over ADB and **does not start/stop it**. For a physical phone or a
