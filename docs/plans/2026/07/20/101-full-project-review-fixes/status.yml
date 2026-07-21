@@ -1,0 +1,42 @@
+plan: 101-full-project-review-fixes
+title: Full project review — fixes
+status: not_started
+created_by: sebi
+worked_by: ""
+owner: sebi
+percent: 0
+current_focus: ""
+slices:
+  - file: 01-android-security.md
+    status: not_started
+    percent: 0
+  - file: 02-findings-pipeline.md
+    status: not_started
+    percent: 0
+  - file: 03-belt-prompts.md
+    status: not_started
+    percent: 0
+  - file: 04-browser-adapter.md
+    status: not_started
+    percent: 0
+  - file: 05-desktop-adapter.md
+    status: not_started
+    percent: 0
+  - file: 06-mcp-lifecycle.md
+    status: not_started
+    percent: 0
+  - file: 07-mcp-spec-alignment.md
+    status: not_started
+    percent: 0
+  - file: 08-session-config-cli.md
+    status: not_started
+    percent: 0
+  - file: 09-docs-sync.md
+    status: not_started
+    percent: 0
+  - file: 10-test-hardening.md
+    status: not_started
+    percent: 0
+evidence: []
+notes: "Source: 6 parallel review agents + MCP ecosystem research, 2026-07-20. 4 high-severity findings (2 android, 2 findings-pipeline)."
+last_updated: 2026-07-20
