@@ -97,7 +97,20 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   <div id="box" style="height:100px;overflow:auto;border:1px solid #000">
     <div style="height:1200px">scrollable region</div>
   </div>
+  <!-- enabled-state matrix: native disabled/readonly, inherited fieldset, ARIA -->
+  <input id="plain" value="editable">
+  <input id="ro" value="locked" readonly>
+  <input id="off" value="off" disabled>
+  <fieldset disabled>
+    <legend><input id="in-legend" value="legend"></legend>
+    <input id="in-fieldset" value="inherited">
+  </fieldset>
+  <div id="aria-ro" role="textbox" aria-readonly="true">aria readonly</div>
   <div style="height:3000px">page spacer</div>
+  <!-- Far below the fold: its bounds center never sits in the viewport. -->
+  <div id="offscreen" style="height:100px;overflow:auto;border:1px solid #000">
+    <div style="height:1200px">off-screen region</div>
+  </div>
   <script>
     // Fires immediately on load — captured by the console listener.
     console.error('fixture-error');
@@ -322,6 +335,44 @@ const FIXTURE_HTML = `<!DOCTYPE html>
     await pollText('#boxscroll', (t) => Number(t) > 0);
     expect(Number((await adapter.find({ query: '#boxscroll' }))?.name)).toBeGreaterThan(0);
     expect(Number((await adapter.find({ query: '#scrolly' }))?.name)).toBe(0);
+  });
+
+  test('scroll: an off-viewport `within` region fails loud instead of scrolling the page', async () => {
+    // Parking the cursor off-screen would wheel the VIEWPORT and report success —
+    // same guard the coordinate click applies.
+    await expect(adapter.scroll({ direction: 'down', within: '#offscreen' })).rejects.toThrow(
+      AdapterError,
+    );
+    await expect(adapter.scroll({ direction: 'down', within: '#offscreen' })).rejects.toThrow(
+      /outside the viewport/,
+    );
+    expect(Number((await adapter.find({ query: '#scrolly' }))?.name)).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // enabled (contract: false when disabled OR readonly)
+  // -------------------------------------------------------------------------
+
+  test('enabled: readonly, disabled, inherited fieldset and ARIA states all read false', async () => {
+    const enabledOf = async (query: string): Promise<boolean | undefined> =>
+      (await adapter.find({ query }))?.enabled;
+
+    expect(await enabledOf('#plain')).toBe(true);
+    expect(await enabledOf('#in-legend')).toBe(true); // a disabled fieldset's first legend stays live
+    expect(await enabledOf('#ro')).toBe(false);
+    expect(await enabledOf('#off')).toBe(false);
+    expect(await enabledOf('#in-fieldset')).toBe(false); // inherited from fieldset[disabled]
+    expect(await enabledOf('#aria-ro')).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // limit
+  // -------------------------------------------------------------------------
+
+  test('readState: caps at limit and rejects a bad one', async () => {
+    expect((await adapter.readState({ limit: 2 })).length).toBe(2);
+    // `slice(0, -1)` would silently drop the last node — fail loud instead.
+    await expect(adapter.readState({ limit: -1 })).rejects.toThrow(AdapterError);
   });
 
   // -------------------------------------------------------------------------

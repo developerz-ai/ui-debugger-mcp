@@ -5,6 +5,7 @@ import type { ScrollDirection } from '../contract.js';
 import {
   appendDebugLogin,
   applyNodeFilters,
+  BrowserAdapter,
   isOutsideViewport,
   type RawNode,
   remainingTimeout,
@@ -12,6 +13,11 @@ import {
   resolveTargetUrl,
   scrollDelta,
 } from './browser-adapter.js';
+
+// See `browser-adapter.lifecycle.test.ts` for tests that exercise class-level
+// behavior (create/attach wiring, waitFor, scroll, close) against a fake
+// `chromium` launcher — kept out of this file to stay under the 500-LOC cap
+// and to keep this file's scope to the pure helper functions.
 
 // --- resolveLaunchBinary ----------------------------------------------------
 
@@ -36,6 +42,19 @@ test('resolveLaunchBinary uses the managed Chromium when no executablePath', () 
 
 test('resolveLaunchBinary falls back to the system Chrome channel when none found', () => {
   expect(resolveLaunchBinary(webTarget(), () => null)).toEqual({ channel: 'chrome' });
+});
+
+// --- create (failure paths) -------------------------------------------------
+
+test('create surfaces a failed CDP attach as AdapterError, never a raw Playwright error', async () => {
+  // Port 1 is never listening, so `connectOverCDP` refuses immediately — no browser
+  // binary needed to prove the header contract ("every Playwright call is wrapped").
+  const failed = BrowserAdapter.create({
+    config: webTarget({ cdpUrl: 'http://127.0.0.1:1' }),
+    profileDir: '/tmp/unused-profile',
+  });
+  await expect(failed).rejects.toThrow(AdapterError);
+  await expect(failed).rejects.toThrow(/cannot attach to http:\/\/127\.0\.0\.1:1/);
 });
 
 // --- resolveTargetUrl -------------------------------------------------------

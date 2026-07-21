@@ -20,6 +20,7 @@
 
 import { AdapterError } from '../../errors.js';
 import type { Bounds, Filters, FilterValue, Node, Query } from '../contract.js';
+import { capToLimit } from '../limit.js';
 import { desktopEnv, type Exec, makeExec } from './proc.js';
 
 const A11Y_IFACE = 'org.a11y.atspi.Accessible';
@@ -313,8 +314,7 @@ export function shapeNodes(
     out = out.filter((n) => matchesQuery(n, parsed));
   }
   out = applyDesktopFilters(out, opts.filters);
-  const limit = opts.limit ?? defaultLimit;
-  return out.slice(0, limit).map(toNode);
+  return capToLimit(out, opts.limit ?? defaultLimit).map(toNode);
 }
 
 // --- busctl-backed reader ---------------------------------------------------

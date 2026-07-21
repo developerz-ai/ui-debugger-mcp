@@ -87,8 +87,6 @@ export type Filters = Record<string, FilterValue>;
 export interface Query {
   /** `WHERE` / selector — target node(s): CSS/role/text (web), a11y role+name (desktop), resource-id/text (android). */
   query?: string;
-  /** `SELECT cols` — which {@link Node} fields to populate for a sparse read; omit for all. */
-  fields?: NodeField[];
   /** `WHERE field_op` — structured predicates; see {@link Filters}. Whitelisted per adapter. */
   filters?: Filters;
   /** `LIMIT` — cap how many nodes come back, to keep the tree small. */
@@ -161,6 +159,9 @@ export interface NetworkEntry {
 /**
  * One contract, three protocols. The agent loop calls only these methods; each
  * adapter wires them to its real backend (CDP / X11-Wayland / ADB).
+ *
+ * **Attach mode (web):** when connecting to an existing browser process via CDP URL,
+ * the adapter controls only the first tab — multi-tab scenarios are not supported.
  */
 export interface Adapter {
   /** Go to the app: navigate to a URL (web) · launch/focus the window (desktop) · start the activity (android). */
@@ -190,10 +191,10 @@ export interface Adapter {
   /** Block until {@link WaitOptions} hold (node appears, network idle, …) or time out. */
   waitFor(opts: WaitOptions): Promise<void>;
 
-  /** Drain captured console messages, newest first, narrowed by {@link LogQuery}. */
+  /** Read captured console messages, newest first, narrowed by {@link LogQuery}. Reads are non-destructive. */
   console(opts?: LogQuery): Promise<ConsoleEntry[]>;
 
-  /** Drain captured network exchanges, newest first, narrowed by {@link LogQuery}. */
+  /** Read captured network exchanges, newest first, narrowed by {@link LogQuery}. Reads are non-destructive. */
   network(opts?: LogQuery): Promise<NetworkEntry[]>;
 
   /** Release the target: stop a **managed** process; for **attach**, disconnect only — never stop it. */

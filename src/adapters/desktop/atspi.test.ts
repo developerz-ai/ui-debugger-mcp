@@ -172,6 +172,13 @@ test('shapeNodes caps by limit', () => {
   expect(shapeNodes(nodes, {}, 2).map((n) => n.name)).toEqual(['a', 'b']);
 });
 
+test('shapeNodes rejects a bad limit instead of silently truncating', () => {
+  // `slice(0, -1)` would quietly drop the last node; NaN would return nothing.
+  const nodes = [node({ name: 'a' }), node({ name: 'b' })];
+  expect(() => shapeNodes(nodes, { limit: -1 }, 200)).toThrow(AdapterError);
+  expect(() => shapeNodes(nodes, { limit: Number.NaN }, 200)).toThrow(AdapterError);
+});
+
 // --- BusctlAtspi.readTree (injected fake bus) -------------------------------
 
 /** A canned a11y bus: root → app(frame) → button(push button), leaf has no children. */

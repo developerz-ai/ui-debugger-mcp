@@ -4,8 +4,8 @@
  */
 
 export class UiDebuggerError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = 'UiDebuggerError';
     Object.setPrototypeOf(this, UiDebuggerError.prototype);
   }
@@ -53,8 +53,8 @@ export class TargetNotFoundError extends UiDebuggerError {
 }
 
 export class AdapterError extends UiDebuggerError {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = 'AdapterError';
     Object.setPrototypeOf(this, AdapterError.prototype);
   }

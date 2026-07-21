@@ -21,13 +21,11 @@ import { URL } from 'node:url';
 import type { Browser, BrowserContext, Page } from 'playwright-core';
 import { chromium } from 'playwright-core';
 import type { WebTarget } from '../../config/schema.js';
-import { AdapterError } from '../../errors.js';
+import { AdapterError, UiDebuggerError } from '../../errors.js';
 import type {
   Adapter,
   Bounds,
   ConsoleEntry,
-  Filters,
-  FilterValue,
   LogQuery,
   NetworkEntry,
   Node,
@@ -37,9 +35,16 @@ import type {
   ScrollOptions,
   WaitOptions,
 } from '../contract.js';
+import { capToLimit } from '../limit.js';
 import type { CaptureSink } from './cdp.js';
 import { CdpCapture } from './cdp.js';
+import { NODE_EXTRACTOR, type RawNode } from './extractor.js';
+import { applyNodeFilters, centerWithin } from './filters.js';
+import { closeOnFailure, createFailure } from './launch.js';
 import { normalizeQuery } from './query.js';
+
+export type { RawNode } from './extractor.js';
+export { applyNodeFilters, NODE_FILTER_KEYS } from './filters.js';
 
 /** System Chrome channel used as the last resort when no binary can be resolved. */
 const DEFAULT_CHANNEL = 'chrome';
@@ -82,253 +87,6 @@ const DEFAULT_SCROLL_STEP = 600;
 /** Interactive + semantic elements `readState` surfaces when no `query` is given. */
 const DEFAULT_SELECTOR =
   'a[href], button, input, select, textarea, [role], [tabindex], [onclick], [contenteditable="true"], summary, label, h1, h2, h3, h4, h5, h6, [data-testid], p, img';
-
-/** Whitelisted `filters` keys for this adapter — anything else is rejected, not ignored. */
-export const NODE_FILTER_KEYS = [
-  'visible_eq',
-  'enabled_eq',
-  'role_in',
-  'name_contains',
-  'contrast_lt',
-] as const;
-
-/** A {@link Node} plus the computed `visible` flag backing the `visible_eq` filter. */
-export interface RawNode extends Node {
-  visible: boolean;
-}
-
-/**
- * Minimal in-page element shape. The DOM lib is off project-wide (Node/Bun only),
- * so we type the handful of members the extractor touches; annotations are erased
- * at runtime, so this never reaches the browser.
- */
-interface DomDocument {
-  getElementById(id: string): DomEl | null;
-  documentElement: DomEl;
-  createElement(tag: string): DomEl;
-}
-
-interface DomEl {
-  tagName: string;
-  textContent: string | null;
-  disabled?: boolean;
-  labels?: ArrayLike<DomEl> | null;
-  parentElement: DomEl | null;
-  ownerDocument: DomDocument;
-  style: { backgroundColor: string };
-  getAttribute(name: string): string | null;
-  hasAttribute(name: string): boolean;
-  getBoundingClientRect(): { x: number; y: number; width: number; height: number };
-  appendChild(child: DomEl): void;
-  removeChild(child: DomEl): void;
-}
-
-/**
- * In-page `window.getComputedStyle`, typed locally (the DOM lib is off project-wide).
- * Resolves to the page global at runtime — the extractor below is serialized into
- * the page, so this stays a free identifier, never a module reference.
- */
-declare function getComputedStyle(el: DomEl): {
-  display: string;
-  visibility: string;
-  color: string;
-  backgroundColor: string;
-};
-
-/**
- * Browser-side element → {@link RawNode} extractor. Playwright serializes this and
- * runs it in the page, so it MUST stay self-contained: no module references, only
- * its params and nested locals. One batched call powers both `find` and
- * `readState`.
- */
-const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
-  const clean = (s: string | null | undefined): string => (s ?? '').replace(/\s+/g, ' ').trim();
-
-  interface Rgba {
-    r: number;
-    g: number;
-    b: number;
-    a: number;
-  }
-
-  const parseColor = (value: string | null | undefined): Rgba | null => {
-    const m = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+%?))?\s*\)$/.exec(
-      value ?? '',
-    );
-    if (!m?.[1] || !m[2] || !m[3]) return null;
-    const rawAlpha = m[4];
-    const a =
-      rawAlpha === undefined
-        ? 1
-        : rawAlpha.endsWith('%')
-          ? Number.parseFloat(rawAlpha) / 100
-          : Number.parseFloat(rawAlpha);
-    return {
-      r: Number.parseFloat(m[1]),
-      g: Number.parseFloat(m[2]),
-      b: Number.parseFloat(m[3]),
-      a,
-    };
-  };
-
-  // The viewport canvas ("backplate") — the fallback background when no opaque
-  // ancestor paints one. Browsers DARKEN this backplate for pages that opt into
-  // `color-scheme: dark`, so hard-coding white would mis-judge contrast there.
-  // Resolve the CSS system `Canvas` color under the root's used color scheme via
-  // a throwaway probe (appended + removed in the same synchronous turn — never
-  // painted), degrading to white when `Canvas` is unsupported. Cached: one probe
-  // per extraction, not per node.
-  let canvasFallback: Rgba | undefined;
-  const canvasBackground = (doc: DomDocument): Rgba => {
-    if (canvasFallback) return canvasFallback;
-    const probe = doc.createElement('div');
-    probe.style.backgroundColor = 'Canvas';
-    doc.documentElement.appendChild(probe);
-    const resolved = parseColor(getComputedStyle(probe).backgroundColor);
-    doc.documentElement.removeChild(probe);
-    canvasFallback = resolved && resolved.a >= 0.99 ? resolved : { r: 255, g: 255, b: 255, a: 1 };
-    return canvasFallback;
-  };
-
-  // Nearest opaque ancestor background; else the actual viewport canvas color.
-  const effectiveBackground = (el: DomEl): Rgba => {
-    let node: DomEl | null = el;
-    while (node) {
-      const bg = parseColor(getComputedStyle(node).backgroundColor);
-      if (bg && bg.a >= 0.99) return bg;
-      node = node.parentElement;
-    }
-    return canvasBackground(el.ownerDocument);
-  };
-
-  const luminance = (c: Rgba): number => {
-    const chan = (v: number): number => {
-      const s = v / 255;
-      return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-    };
-    return 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
-  };
-
-  // WCAG ratio (1–21), with a translucent foreground blended over the background.
-  const contrastRatio = (fg: Rgba, bg: Rgba): number => {
-    const blended: Rgba =
-      fg.a >= 1
-        ? fg
-        : {
-            r: fg.r * fg.a + bg.r * (1 - fg.a),
-            g: fg.g * fg.a + bg.g * (1 - fg.a),
-            b: fg.b * fg.a + bg.b * (1 - fg.a),
-            a: 1,
-          };
-    const l1 = luminance(blended);
-    const l2 = luminance(bg);
-    const hi = Math.max(l1, l2);
-    const lo = Math.min(l1, l2);
-    return Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100;
-  };
-
-  const implicitRole = (el: DomEl): string => {
-    const tag = el.tagName.toLowerCase();
-    if (tag === 'a') return el.hasAttribute('href') ? 'link' : 'generic';
-    if (tag === 'select') return 'combobox';
-    if (tag === 'textarea') return 'textbox';
-    if (tag === 'input') {
-      const type = (el.getAttribute('type') ?? 'text').toLowerCase();
-      if (type === 'checkbox' || type === 'radio') return type;
-      if (type === 'range') return 'slider';
-      if (type === 'button' || type === 'submit' || type === 'reset' || type === 'image') {
-        return 'button';
-      }
-      return 'textbox';
-    }
-    if (tag === 'button') return 'button';
-    if (tag === 'img') return 'img';
-    if (tag === 'nav') return 'navigation';
-    if (tag === 'main') return 'main';
-    if (tag === 'form') return 'form';
-    if (
-      tag === 'h1' ||
-      tag === 'h2' ||
-      tag === 'h3' ||
-      tag === 'h4' ||
-      tag === 'h5' ||
-      tag === 'h6'
-    ) {
-      return 'heading';
-    }
-    return tag;
-  };
-
-  const accessibleName = (el: DomEl): string => {
-    const label = clean(el.getAttribute('aria-label'));
-    if (label) return label;
-    const labelledby = el.getAttribute('aria-labelledby');
-    if (labelledby) {
-      const text = clean(
-        labelledby
-          .split(/\s+/)
-          .map((id) => el.ownerDocument.getElementById(id)?.textContent ?? '')
-          .join(' '),
-      );
-      if (text) return text;
-    }
-    if (el.labels && el.labels.length > 0) {
-      const text = clean(
-        Array.from(el.labels)
-          .map((l) => l.textContent ?? '')
-          .join(' '),
-      );
-      if (text) return text;
-    }
-    const placeholder = clean(el.getAttribute('placeholder'));
-    if (placeholder) return placeholder;
-    const alt = clean(el.getAttribute('alt'));
-    if (alt) return alt;
-    const text = clean(el.textContent);
-    if (text) return text;
-    const value = clean(el.getAttribute('value'));
-    if (value) return value;
-    return clean(el.getAttribute('title'));
-  };
-
-  return elements.map((el) => {
-    const r = el.getBoundingClientRect();
-    const style = getComputedStyle(el);
-    const testid = clean(el.getAttribute('data-testid'));
-    const text = clean(el.textContent);
-    const node: RawNode = {
-      role: clean(el.getAttribute('role')) || implicitRole(el),
-      name: accessibleName(el),
-      bounds: {
-        x: Math.round(r.x),
-        y: Math.round(r.y),
-        width: Math.round(r.width),
-        height: Math.round(r.height),
-      },
-      enabled: el.disabled !== true && el.getAttribute('aria-disabled') !== 'true',
-      visible:
-        r.width > 0 &&
-        r.height > 0 &&
-        style.display !== 'none' &&
-        style.visibility !== 'hidden' &&
-        !el.hasAttribute('hidden') &&
-        el.getAttribute('aria-hidden') !== 'true',
-    };
-    if (testid) node.testid = testid;
-    if (text) {
-      const fg = parseColor(style.color);
-      if (fg) {
-        const bg = effectiveBackground(el);
-        node.style = {
-          color: style.color,
-          backgroundColor: `rgb(${bg.r}, ${bg.g}, ${bg.b})`,
-          contrast: contrastRatio(fg, bg),
-        };
-      }
-    }
-    return node;
-  });
-};
 
 /**
  * Resolve a navigate target against the configured base URL. Drivers often pass
@@ -410,96 +168,6 @@ export function scrollDelta(direction: ScrollDirection, amount: number): [number
   }
 }
 
-function expectBoolean(key: string, value: FilterValue): boolean {
-  if (typeof value !== 'boolean') {
-    throw new AdapterError(`filter \`${key}\` expects a boolean`);
-  }
-  return value;
-}
-
-function expectString(key: string, value: FilterValue): string {
-  if (typeof value !== 'string') {
-    throw new AdapterError(`filter \`${key}\` expects a string`);
-  }
-  return value;
-}
-
-function expectNumber(key: string, value: FilterValue): number {
-  if (typeof value !== 'number') {
-    throw new AdapterError(`filter \`${key}\` expects a number`);
-  }
-  return value;
-}
-
-function expectStringArray(key: string, value: FilterValue): string[] {
-  if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
-    throw new AdapterError(`filter \`${key}\` expects a string[]`);
-  }
-  return value;
-}
-
-/**
- * Apply the whitelisted node `filters` in JS. Throws {@link AdapterError} on an
- * unknown key (no silent injection surface) or a wrong value type.
- */
-export function applyNodeFilters(nodes: RawNode[], filters?: Filters): RawNode[] {
-  if (!filters) return nodes;
-  let out = nodes;
-  for (const [key, value] of Object.entries(filters)) {
-    switch (key) {
-      case 'visible_eq': {
-        const want = expectBoolean(key, value);
-        out = out.filter((n) => n.visible === want);
-        break;
-      }
-      case 'enabled_eq': {
-        const want = expectBoolean(key, value);
-        out = out.filter((n) => n.enabled === want);
-        break;
-      }
-      case 'role_in': {
-        const roles = expectStringArray(key, value);
-        out = out.filter((n) => roles.includes(n.role));
-        break;
-      }
-      case 'name_contains': {
-        const needle = expectString(key, value).toLowerCase();
-        out = out.filter((n) => n.name.toLowerCase().includes(needle));
-        break;
-      }
-      case 'contrast_lt': {
-        // Keep only VISIBLE text nodes whose contrast is BELOW the threshold —
-        // the one-call "find unreadable text" sweep runs without `visible_eq`,
-        // so hidden nodes with coincidentally low contrast must drop out here or
-        // they surface as false "hard-to-read text" findings (nodes without
-        // style drop out too).
-        const threshold = expectNumber(key, value);
-        out = out.filter(
-          (n) => n.visible && n.style?.contrast !== undefined && n.style.contrast < threshold,
-        );
-        break;
-      }
-      default:
-        throw new AdapterError(
-          `unknown filter \`${key}\` for browser adapter (allowed: ${NODE_FILTER_KEYS.join(', ')})`,
-        );
-    }
-  }
-  return out;
-}
-
-/** True when a node's center sits inside `region` — used to scope by a {@link Node} `within`. */
-function centerWithin(node: RawNode, region: Bounds): boolean {
-  const cx = node.bounds.x + node.bounds.width / 2;
-  const cy = node.bounds.y + node.bounds.height / 2;
-  return (
-    cx >= region.x &&
-    cx <= region.x + region.width &&
-    cy >= region.y &&
-    cy <= region.y + region.height
-  );
-}
-
 /** Drop the internal `visible` flag — the public contract returns plain {@link Node}s. */
 function toNode(node: RawNode): Node {
   const out: Node = {
@@ -522,6 +190,9 @@ interface AdapterHandles {
   capture: CdpCapture;
 }
 
+/** The slice of `chromium` this adapter actually calls — the test seam below overrides it. */
+type ChromiumLauncher = Pick<typeof chromium, 'launchPersistentContext' | 'connectOverCDP'>;
+
 export interface BrowserAdapterInit {
   /** Resolved web-target config (url, headless, debugLogin, cdpUrl, …). */
   config: WebTarget;
@@ -529,6 +200,8 @@ export interface BrowserAdapterInit {
   profileDir: string;
   /** Optional sink for streaming captured console/network lines to `findings-store`. */
   onLog?: CaptureSink;
+  /** Override the Playwright launcher/connector (test seam) — defaults to the real `chromium`. */
+  chromium?: ChromiumLauncher;
 }
 
 /**
@@ -554,38 +227,62 @@ export class BrowserAdapter implements Adapter {
 
   /** Open the adapter: attach over `cdpUrl` when set, else launch a managed persistent context. */
   static async create(init: BrowserAdapterInit): Promise<BrowserAdapter> {
-    return init.config.cdpUrl
-      ? BrowserAdapter.#attach(init.config, init.onLog)
-      : BrowserAdapter.#launch(init.config, init.profileDir, init.onLog);
+    const { cdpUrl } = init.config;
+    const launcher = init.chromium ?? chromium;
+    // Nothing raw escapes: launch, connect and post-connect wiring all leave here as
+    // AdapterError (header contract). Cleanup of a half-built adapter happens below.
+    try {
+      return cdpUrl
+        ? await BrowserAdapter.#attach(init.config, launcher, init.onLog)
+        : await BrowserAdapter.#launch(init.config, init.profileDir, launcher, init.onLog);
+    } catch (error) {
+      throw createFailure(
+        error,
+        cdpUrl ? { mode: 'attach', cdpUrl } : { mode: 'managed', profileDir: init.profileDir },
+      );
+    }
   }
 
   static async #launch(
     config: WebTarget,
     profileDir: string,
+    launcher: ChromiumLauncher,
     onLog?: CaptureSink,
   ): Promise<BrowserAdapter> {
     // Still CDP: Playwright drives Chromium exclusively over the DevTools Protocol
     // (here a CDP pipe; `#attach` uses a CDP WebSocket). A persistent context is the
     // supported way to own a Chrome process WITH the per-project profile — both
     // managed and attach speak the same protocol, only the transport differs.
-    const context = await chromium.launchPersistentContext(profileDir, {
+    const context = await launcher.launchPersistentContext(profileDir, {
       headless: config.headless,
       ...resolveLaunchBinary(config),
     });
-    const page = context.pages()[0] ?? (await context.newPage());
-    const capture = BrowserAdapter.#startCapture(page, onLog);
-    return new BrowserAdapter({ config, context, page, browser: null, mode: 'managed', capture });
+    // Chrome is LIVE from here on and holds the profile lock — a throw past this point
+    // must close it, or every later run of this project fails to launch.
+    return closeOnFailure(context, async () => {
+      const page = context.pages()[0] ?? (await context.newPage());
+      const capture = BrowserAdapter.#startCapture(page, onLog);
+      return new BrowserAdapter({ config, context, page, browser: null, mode: 'managed', capture });
+    });
   }
 
-  static async #attach(config: WebTarget, onLog?: CaptureSink): Promise<BrowserAdapter> {
+  static async #attach(
+    config: WebTarget,
+    launcher: ChromiumLauncher,
+    onLog?: CaptureSink,
+  ): Promise<BrowserAdapter> {
     if (!config.cdpUrl) {
       throw new AdapterError('attach mode requires `cdpUrl`');
     }
-    const browser = await chromium.connectOverCDP(config.cdpUrl);
-    const context = browser.contexts()[0] ?? (await browser.newContext());
-    const page = context.pages()[0] ?? (await context.newPage());
-    const capture = BrowserAdapter.#startCapture(page, onLog);
-    return new BrowserAdapter({ config, context, page, browser, mode: 'attach', capture });
+    const browser = await launcher.connectOverCDP(config.cdpUrl);
+    // Cleanup here drops the CONNECTION only — same disconnect semantics `close()`
+    // relies on, so a failed attach never stops a browser we did not start.
+    return closeOnFailure(browser, async () => {
+      const context = browser.contexts()[0] ?? (await browser.newContext());
+      const page = context.pages()[0] ?? (await context.newPage());
+      const capture = BrowserAdapter.#startCapture(page, onLog);
+      return new BrowserAdapter({ config, context, page, browser, mode: 'attach', capture });
+    });
   }
 
   /** Wire console/network capture onto the live page before the first navigation. */
@@ -636,18 +333,23 @@ export class BrowserAdapter implements Adapter {
   }
 
   /**
-   * Coordinate click at a {@link Node}'s bounds center, shared by `click` and
-   * `type`. Bounds are viewport-relative, so an off-screen center would make CDP
-   * click nothing — fail loud instead so the agent knows to scroll first.
+   * Center of `bounds`, asserted on-screen. Bounds are viewport-relative, so CDP
+   * mouse events at an off-screen center land on nothing — silently. Fail loud
+   * instead so the agent knows to scroll it into view first.
    */
-  async #clickBoundsCenter(node: Node): Promise<void> {
-    const { x, y, width, height } = node.bounds;
-    const center = { x: x + width / 2, y: y + height / 2 };
+  #centerInViewport(bounds: Bounds): { x: number; y: number } {
+    const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
     if (isOutsideViewport(center, this.#page.viewportSize())) {
       throw new AdapterError(
         `element center (${Math.round(center.x)}, ${Math.round(center.y)}) is outside the viewport — scroll it into view first, then re-read its bounds`,
       );
     }
+    return center;
+  }
+
+  /** Coordinate click at a {@link Node}'s bounds center, shared by `click` and `type`. */
+  async #clickBoundsCenter(node: Node): Promise<void> {
+    const center = this.#centerInViewport(node.bounds);
     await this.#page.mouse.click(center.x, center.y);
   }
 
@@ -669,9 +371,11 @@ export class BrowserAdapter implements Adapter {
       // Scope: park the cursor over the region first, so the wheel event targets the
       // scrollable element under it instead of the viewport. No scope → wheel where
       // the mouse already is (`Input.dispatchMouseEvent` of type `mouseWheel`).
+      // Same viewport guard as the coordinate click: an off-screen region would
+      // move the cursor nowhere and scroll the viewport instead — silently wrong.
       if (opts.within !== undefined) {
-        const { x, y, width, height } = await this.#regionBox(opts.within);
-        await this.#page.mouse.move(x + width / 2, y + height / 2);
+        const center = this.#centerInViewport(await this.#regionBox(opts.within));
+        await this.#page.mouse.move(center.x, center.y);
       }
       await this.#page.mouse.wheel(dx, dy);
     });
@@ -747,9 +451,7 @@ export class BrowserAdapter implements Adapter {
     }
     nodes = applyNodeFilters(nodes, opts.filters);
 
-    const limit = opts.limit ?? defaultLimit;
-    if (limit !== undefined) nodes = nodes.slice(0, limit);
-    return nodes.map(toNode);
+    return capToLimit(nodes, opts.limit ?? defaultLimit).map(toNode);
   }
 
   /** Resolve a scroll `within` scope to an on-screen rectangle (Node bounds, or a located selector). */
@@ -767,8 +469,10 @@ export class BrowserAdapter implements Adapter {
     try {
       return await fn();
     } catch (error) {
+      if (error instanceof UiDebuggerError) throw error;
       throw new AdapterError(
         `browser.${op} failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
       );
     }
   }
