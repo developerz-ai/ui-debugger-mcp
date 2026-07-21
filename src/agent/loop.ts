@@ -231,8 +231,8 @@ export interface DebugAgentOptions {
   /** Optional sink for a human-readable step trail (`logs/agent.log`). */
   log?: AgentLog;
   /**
-   * Shared act-trail the running flush appends to and the `report` tool overlays
-   * as the verdict's authoritative `steps` — pass the SAME array to
+   * Shared act-trail the running flush appends to and the `report` tool merges
+   * into the verdict's `steps` — pass the SAME array to
    * {@link createReportTool}'s `getTrail` so the write and its counts agree.
    * Defaults to a fresh array (the report tool then keeps the driver's steps).
    */

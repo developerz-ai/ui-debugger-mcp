@@ -235,7 +235,7 @@ export async function buildSession(
   const run: LoopRunner = async ({ inbox, progress, signal }) => {
     // One trail per run, shared between the loop (which appends each act step), the
     // `act` tool (which appends the acts that THREW, as `ok: false`) and the `report`
-    // tool (which overlays it as the verdict's authoritative steps), so the persisted
+    // tool (which merges it with the driver's reported steps), so the persisted
     // findings and the returned counts derive from the same object.
     const trail: Step[] = [];
     const agent = createDebugAgent({
