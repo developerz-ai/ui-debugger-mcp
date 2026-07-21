@@ -46,7 +46,11 @@ export interface StartInput {
   criteria?: string;
   /** Per-run URL the caller points the driver at (web); overrides the target's configured url. */
   url?: string;
-  /** Wall-clock cap (ms) before the run auto-ends; defaults to {@link DEFAULT_SESSION_TIMEOUT_MS}. */
+  /**
+   * Wall-clock cap (ms) before the run auto-ends, counted from THIS call — assembly,
+   * launch and the first navigation spend it too. Defaults to
+   * {@link DEFAULT_SESSION_TIMEOUT_MS}.
+   */
   timeoutMs?: number;
 }
 
@@ -128,7 +132,7 @@ export interface DebugServiceDeps {
   state?: StatePort;
   /** Default wall-clock cap (ms) for a run; defaults to {@link DEFAULT_SESSION_TIMEOUT_MS}. */
   defaultTimeoutMs?: number;
-  /** Injected clock (epoch ms) for session ids; defaults to `Date.now`. */
+  /** Injected clock (epoch ms) for session ids + the run deadline; defaults to `Date.now`. */
   now?: () => number;
 }
 
@@ -172,6 +176,10 @@ export class DebugService implements DebugApi {
    * the target, and kick the loop off in the background. Fails loud if a run is
    * already active for this cwd ({@link SessionBusyError}); never leaks a launched
    * browser — a lost lock race or a failed `open` tears the session back down.
+   *
+   * `timeout` is wall-clock from HERE: the deadline is fixed on entry and the
+   * remaining budget is threaded into the build and the first navigation, so a slow
+   * Chrome launch spends the caller's cap instead of sitting outside it.
    */
   async start({ target, goal, criteria, url, timeoutMs }: StartInput): Promise<StartResult> {
     const cwd = this.#cwd;
@@ -190,10 +198,13 @@ export class DebugService implements DebugApi {
       );
     }
     this.#starting = true;
+    const deadline = this.#now() + (timeoutMs ?? this.#defaultTimeoutMs);
+    /** Budget left on the caller's cap; never negative — a blown budget is simply spent. */
+    const remaining = (): number => Math.max(0, deadline - this.#now());
 
     try {
       const id = generateSessionId(this.#now());
-      const built = await this.#build({ id, target, goal, criteria, url });
+      const built = await this.#build({ id, target, goal, criteria, url, timeoutMs: remaining() });
 
       try {
         this.#manager.start(cwd, built.session);
@@ -206,22 +217,38 @@ export class DebugService implements DebugApi {
       this.#retained = undefined;
 
       try {
-        await built.open();
+        await built.open(remaining());
         built.session.start(built.run);
       } catch (err) {
         await this.#manager.end(cwd).catch(() => undefined);
         throw err;
       }
 
-      await this.#state.record({ sessionId: id, target, goal });
-      this.#armTimeout(timeoutMs ?? this.#defaultTimeoutMs);
+      // Armed BEFORE the breadcrumb write, on what is LEFT of the cap: a throwing
+      // StatePort must never leave a live run with no timer on it, and the launch
+      // already spent part of the budget.
+      this.#armTimeout(remaining());
+      try {
+        await this.#state.record({ sessionId: id, target, goal });
+      } catch (err) {
+        // The caller gets no session_id back, so nothing could ever end this run —
+        // tear it down here (and drop any half-written breadcrumb) and fail loud.
+        this.#clearTimeout();
+        await this.#manager.end(cwd).catch(() => undefined);
+        await this.#state.clear().catch(() => undefined);
+        throw err;
+      }
       return { session_id: id };
     } finally {
       this.#starting = false;
     }
   }
 
-  /** Arm the wall-clock cap: auto-end the run when it fires (replaces any prior timer). */
+  /**
+   * Arm the wall-clock cap on what is LEFT of the run's budget: auto-end the run when
+   * it fires (replaces any prior timer). `0` — the launch outlived the whole cap —
+   * ends the run on the next tick rather than granting it a fresh one.
+   */
   #armTimeout(ms: number): void {
     this.#clearTimeout();
     this.#timer = setTimeout(() => {

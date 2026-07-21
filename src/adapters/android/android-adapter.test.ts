@@ -379,6 +379,17 @@ describe('AndroidAdapter managed boot', () => {
     expect((err as AdbError).message).toContain('not found on PATH');
     expect(Date.now() - started).toBeLessThan(2000);
   });
+
+  test('the run budget shortens the boot deadline (a 2-min boot never outlives the cap)', async () => {
+    // The caller's wall-clock cap has 50 ms left; the emulator's own boot deadline is
+    // 60 s. Without the cap threading, `open` would sit here long past the run's end.
+    const adapter = makeStateAdapter(async () => 'unknown', 60_000);
+    const started = Date.now();
+    const err = await adapter.open('com.example', 50).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as AdapterError).message).toContain('no device appeared');
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
 });
 
 // ---------------------------------------------------------------------------

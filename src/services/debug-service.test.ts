@@ -15,7 +15,7 @@ import { SessionManager } from '../session/manager.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
 import type { StatePort } from '../session/state-file.js';
 import { _resetCounter, sessionPaths, workspacePaths } from '../session/workspace.js';
-import { DebugService } from './debug-service.js';
+import { DEFAULT_SESSION_TIMEOUT_MS, DebugService } from './debug-service.js';
 import type { BuiltSession, SessionBuilder } from './session-builder.js';
 
 const CWD = '/project/app';
@@ -50,9 +50,18 @@ const idleRun: LoopRunner = ({ signal }) =>
   });
 
 interface BuildLog {
-  params: Array<{ id: string; target: string; goal: string; criteria?: string }>;
+  params: Array<{
+    id: string;
+    target: string;
+    goal: string;
+    criteria?: string;
+    url?: string;
+    timeoutMs?: number;
+  }>;
   adapters: FakeAdapter[];
   openCalls: number;
+  /** The budget each `open()` was handed — what is left of the cap after the build. */
+  openBudgets: Array<number | undefined>;
 }
 
 let tmpDir: string;
@@ -74,7 +83,7 @@ function fakeBuilder(opts: { openFails?: boolean; closeFails?: boolean; run?: Lo
   build: SessionBuilder;
   log: BuildLog;
 } {
-  const log: BuildLog = { params: [], adapters: [], openCalls: 0 };
+  const log: BuildLog = { params: [], adapters: [], openCalls: 0, openBudgets: [] };
   const build: SessionBuilder = async (params) => {
     log.params.push({ ...params });
     const adapter = new FakeAdapter(opts.closeFails ?? false);
@@ -89,8 +98,9 @@ function fakeBuilder(opts: { openFails?: boolean; closeFails?: boolean; run?: Lo
     });
     const built: BuiltSession = {
       session,
-      open: async () => {
+      open: async (timeoutMs) => {
         log.openCalls += 1;
+        log.openBudgets.push(timeoutMs);
         if (opts.openFails) throw new AdapterError('open failed');
       },
       run: opts.run ?? idleRun,
@@ -118,6 +128,8 @@ test('start assembles, locks the cwd, opens, and runs in the background', async 
     target: 'web',
     goal: 'log in',
     criteria: 'cart has 1',
+    url: undefined,
+    timeoutMs: DEFAULT_SESSION_TIMEOUT_MS,
   });
   expect(log.openCalls).toBe(1);
   expect(manager.has(CWD)).toBe(true);
@@ -203,6 +215,105 @@ test('a per-run timeout overrides the default', async () => {
   await svc.start({ target: 'web', goal: 'x', timeoutMs: 20 });
   await tick(60);
   expect(manager.has(CWD)).toBe(false);
+});
+
+/** A clock the test advances by hand — stands in for time burnt launching Chrome. */
+function fakeClock(start = NOW): { now: () => number; advance: (ms: number) => void } {
+  let t = start;
+  return {
+    now: () => t,
+    advance: (ms: number) => {
+      t += ms;
+    },
+  };
+}
+
+test('the cap is wall-clock from start: build + open spend the same budget', async () => {
+  const { build, log } = fakeBuilder();
+  const clock = fakeClock();
+  // 120ms "launching Chrome", then 30ms "navigating" — 150ms of a 200ms cap.
+  const slowBuild: SessionBuilder = async (params) => {
+    clock.advance(120);
+    const built = await build(params);
+    return {
+      ...built,
+      open: async (ms) => {
+        clock.advance(30);
+        await built.open(ms);
+      },
+    };
+  };
+  const svc = new DebugService({
+    manager,
+    config: CONFIG,
+    cwd: CWD,
+    build: slowBuild,
+    now: clock.now,
+    defaultTimeoutMs: 200,
+  });
+
+  await svc.start({ target: 'web', goal: 'x' });
+  expect(log.params[0]?.timeoutMs).toBe(200); // whole cap at build entry
+  expect(log.openBudgets[0]).toBe(80); // what the launch left for the navigation
+
+  // Only ~50ms of cap remain, so the run is already down here; a cap restarted at
+  // `open` would still be running (it would not fire until 200ms).
+  await tick(120);
+  expect(manager.has(CWD)).toBe(false);
+  expect(log.adapters[0]?.closeCalls).toBe(1);
+});
+
+test('a launch that outlives the whole cap ends the run at once (never a fresh cap)', async () => {
+  const { build } = fakeBuilder();
+  const clock = fakeClock();
+  const slowBuild: SessionBuilder = async (params) => {
+    clock.advance(5_000);
+    return build(params);
+  };
+  const svc = new DebugService({
+    manager,
+    config: CONFIG,
+    cwd: CWD,
+    build: slowBuild,
+    now: clock.now,
+    defaultTimeoutMs: 200,
+  });
+
+  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
+  await tick(20);
+  expect(manager.has(CWD)).toBe(false);
+  // Spent, not lost: the findings of the run that never got going stay readable.
+  expect((await svc.getFindings({ session_id })).status).toBe('failed');
+});
+
+test('a failing state.json write tears the run down instead of leaving it uncapped', async () => {
+  const { build, log } = fakeBuilder();
+  let clears = 0;
+  const state: StatePort = {
+    async record() {
+      throw new AdapterError('disk full');
+    },
+    async clear() {
+      clears += 1;
+    },
+  };
+  const svc = new DebugService({
+    manager,
+    config: CONFIG,
+    cwd: CWD,
+    build,
+    state,
+    now: () => NOW,
+    defaultTimeoutMs: 20,
+  });
+
+  await expect(svc.start({ target: 'web', goal: 'x' })).rejects.toThrow(AdapterError);
+  expect(manager.has(CWD)).toBe(false); // no live run nobody holds an id for
+  expect(log.adapters[0]?.closeCalls).toBe(1);
+  expect(clears).toBe(1); // no half-written `running` breadcrumb for the CLI
+
+  await tick(60); // the armed timer was cancelled with the teardown
+  expect(log.adapters[0]?.closeCalls).toBe(1);
 });
 
 /**

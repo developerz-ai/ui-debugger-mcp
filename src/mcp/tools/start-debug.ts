@@ -58,7 +58,7 @@ export function startDebugTool(service: DebugApi): McpTool {
               .max(2_147_483)
               .optional()
               .describe(
-                'Wall-clock cap in SECONDS before the run auto-ends (frees the browser/profile). Omit for the default (300s). Max 2_147_483 (Node timer ceiling once × 1000).',
+                'Wall-clock cap in SECONDS before the run auto-ends (frees the browser/profile), counted from this call — launching the browser and the first navigation spend it too. Omit for the default (300s). Max 2_147_483 (Node timer ceiling once × 1000).',
               ),
           },
         },

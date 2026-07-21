@@ -68,14 +68,23 @@ export interface BuildSessionParams {
   criteria?: string;
   /** Per-run URL the caller points the driver at (web); overrides the target's configured url. */
   url?: string;
+  /**
+   * The run's remaining wall-clock budget (ms) at build time. Assembly happens inside
+   * the caller's `timeout`, so the launch/connect wait shortens to fit it.
+   */
+  timeoutMs?: number;
 }
 
 /** A built-but-unregistered session plus the seams the service fires post-lock. */
 export interface BuiltSession {
   /** Ready to register with the manager; not yet opened or started. */
   session: Session;
-  /** Navigate the adapter to the target (launches/attaches the browser page). */
-  open(): Promise<void>;
+  /**
+   * Navigate the adapter to the target (launches/attaches the browser page).
+   * `timeoutMs` is the run's budget left AFTER the build — the first navigation
+   * spends the caller's cap, never a fresh one of its own.
+   */
+  open(timeoutMs?: number): Promise<void>;
   /** The background loop runner handed to `session.start()`. */
   run: LoopRunner;
 }
@@ -208,7 +217,13 @@ export async function buildSession(
     void store.appendLog(channel, line).catch(() => undefined);
   };
 
-  const adapter = await createAdapter(target, effectiveConfig, workspace.chromeUserData, onLog);
+  const adapter = await createAdapter(
+    target,
+    effectiveConfig,
+    workspace.chromeUserData,
+    onLog,
+    params.timeoutMs,
+  );
   // The prompt's eye mode MUST match the `look` tool bound below — self-look tells
   // the driver to judge the attached frame itself; the vision variant tells it to ask
   // the vision guy (and how to cope when that model turns out to be text-only).
@@ -305,7 +320,7 @@ export async function buildSession(
 
   return {
     session,
-    open: () => adapter.open(openAddress(targetConfig)),
+    open: (timeoutMs) => adapter.open(openAddress(targetConfig), timeoutMs),
     run,
   };
 }

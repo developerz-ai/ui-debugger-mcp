@@ -22,6 +22,7 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import type { AndroidTarget } from '../../config/schema.js';
 import { AdapterError, UiDebuggerError } from '../../errors.js';
+import { capWait } from '../budget.js';
 import type {
   Adapter,
   Bounds,
@@ -258,9 +259,9 @@ export class AndroidAdapter implements Adapter {
   }
 
   /** Ensure the device is up (managed: boot the emulator), then start the activity/package. */
-  async open(target: string): Promise<void> {
+  async open(target: string, timeoutMs?: number): Promise<void> {
     await this.#run('open', async () => {
-      await this.#ensureBooted();
+      await this.#ensureBooted(timeoutMs);
       if (target.trim() !== '') await this.#adb.shell(startArgs(target));
     });
   }
@@ -398,12 +399,12 @@ export class AndroidAdapter implements Adapter {
   }
 
   /**
-   * Managed boot: launch `emulator @avd -port <p>` (once) and poll `sys.boot_completed`.
-   * The port is picked free and bound **before** the spawn: the emulator answers as
-   * `emulator-<p>`, so every later call (and the `close` kill) targets the process we
-   * started — never a pre-existing emulator. No-op when attached.
+   * Managed boot: launch `emulator @avd -port <p>` (once), poll `sys.boot_completed`. The port
+   * is picked free and bound **before** the spawn, so every later call (and the `close` kill)
+   * targets the emulator we started, never a pre-existing one. No-op when attached; `timeoutMs`
+   * (the run's remaining cap) shortens the boot deadline when it is the tighter of the two.
    */
-  async #ensureBooted(): Promise<void> {
+  async #ensureBooted(timeoutMs?: number): Promise<void> {
     if (this.#booted) return;
     if (!this.#emulator) {
       const bin = this.#config.emulatorPath ?? 'emulator';
@@ -425,7 +426,7 @@ export class AndroidAdapter implements Adapter {
       });
       this.#emulator = child;
     }
-    const deadline = Date.now() + this.#bootWaitMs;
+    const deadline = Date.now() + capWait(this.#bootWaitMs, timeoutMs);
     await this.#awaitDevice(deadline);
     for (;;) {
       const out = (await this.#adb.shell(['getprop', 'sys.boot_completed'])).trim();
