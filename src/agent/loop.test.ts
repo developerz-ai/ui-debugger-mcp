@@ -2,23 +2,22 @@ import { expect, test } from 'bun:test';
 import { type ModelMessage, tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
-import type { Findings, Step } from '../findings/schema.js';
-import { createReportTool } from './belt/report.js';
 import {
   type BeltTools,
   BUDGET_WARN,
   budgetNudge,
+  consoleBugsFrom,
   createDebugAgent,
   DEFAULT_MAX_STEPS,
+  describeStep,
   foldInstructionsIntoStep,
   KICKOFF_PROMPT,
   type LoopInbox,
-  type ProgressWriter,
   progressForStep,
   pruneStaleFrames,
-  runDebugLoop,
+  type RunTrail,
   STALE_FRAME_NOTE,
-  stepTrailFrom,
+  visualFrom,
 } from './loop.js';
 
 test('budgetNudge stays silent while there is ample budget', () => {
@@ -52,9 +51,46 @@ function fakeInbox(...items: string[]): LoopInbox {
   };
 }
 
-const actResult = (label: string, screenshot: string) => ({
+const actResult = (label: string, screenshot: string, ok = true) => ({
   toolName: 'act',
-  output: { action: 'click', label, screenshot },
+  output: { action: 'click', label, ok, screenshot },
+});
+
+/**
+ * What the `act` tool does to the shared trail before the step finishes: record the
+ * step, then hand back the matching tool result (see `belt/act.ts`).
+ */
+const acted = (running: RunTrail, label: string, screenshot: string, ok = true) => {
+  running.steps.push({ step: label, ok, screenshot });
+  return actResult(label, screenshot, ok);
+};
+
+/** A vision-guy `look` result carrying flagged issues plus the frame they were judged on. */
+const lookResult = (
+  screenshot: string,
+  ...issues: Array<{ what: string; where: string; severity: 'low' | 'medium' | 'high' }>
+) => ({
+  toolName: 'look',
+  output: { description: 'seen', issues, screenshot },
+});
+
+/** An `observe` console read — the channel the running flush lifts error rows from. */
+const consoleResult = (...entries: Array<{ level: string; text: string; location?: string }>) => ({
+  toolName: 'observe',
+  output: { kind: 'console', count: entries.length, entries },
+});
+
+/** Fresh run-long accumulators for the running flush. */
+const runTrail = (): RunTrail => ({ steps: [], bugs: [], visual: [] });
+
+/**
+ * A `tool-error` content part — AI SDK 6's shape for a rejected tool call (never
+ * `toolResults`; see `describeStep` and `progressForStep`'s `acted` check below).
+ */
+const toolErrorPart = (toolName: string, error: unknown) => ({
+  type: 'tool-error',
+  toolName,
+  error,
 });
 
 test('foldInstructionsIntoStep returns no override when nothing was ever injected', () => {
@@ -96,39 +132,67 @@ test('foldInstructionsIntoStep re-appends standing instructions after the inbox 
   expect(standing).toEqual(['check mobile view']);
 });
 
-test('stepTrailFrom lifts act results into steps and ignores everything else', () => {
-  const steps = stepTrailFrom([
-    { toolName: 'observe', output: { kind: 'tree' } },
-    actResult('click button "Save"', '001-save.png'),
-    { toolName: 'look', output: { description: 'fine', issues: [] } },
-    { toolName: 'act', output: { malformed: true } },
+test('visualFrom lifts vision-guy issues with their frame, and ignores a self-look result', () => {
+  const issues = visualFrom([
+    lookResult('003-cart.png', {
+      what: 'total is cut off',
+      where: 'cart footer',
+      severity: 'high',
+    }),
+    // self-look: the multimodal driver judged the frame itself — no issues[] to lift
+    { toolName: 'look', output: { screenshot: '004.png', bytes: 12, prompt: 'q', frame: 'AAAA' } },
+    { toolName: 'act', output: { label: 'click', ok: true, screenshot: '005.png' } },
   ]);
-  expect(steps).toEqual([{ step: 'click button "Save"', ok: true, screenshot: '001-save.png' }]);
+  expect(issues).toEqual([
+    {
+      issue: 'total is cut off',
+      where: 'cart footer',
+      severity: 'high',
+      screenshot: '003-cart.png',
+    },
+  ]);
+});
+
+test('consoleBugsFrom lifts error rows only, keeping the source location as evidence', () => {
+  const bugs = consoleBugsFrom([
+    consoleResult(
+      { level: 'error', text: 'TypeError: x is undefined', location: 'app.js:12:3' },
+      { level: 'warn', text: 'deprecated api' },
+      { level: 'error', text: 'failed to fetch' },
+    ),
+    { toolName: 'observe', output: { kind: 'tree', count: 0, nodes: [] } },
+  ]);
+  expect(bugs).toEqual([
+    { kind: 'console', detail: 'TypeError: x is undefined', evidence: 'app.js:12:3' },
+    { kind: 'console', detail: 'failed to fetch' },
+  ]);
 });
 
 test('progressForStep steps aside for the terminal report step (verdict owned by report)', () => {
-  const trail: Step[] = [];
+  const running = runTrail();
   const out = progressForStep(
-    { toolCalls: [{ toolName: 'report' }], toolResults: [actResult('click x', '1.png')] },
-    trail,
+    { toolCalls: [{ toolName: 'report' }], toolResults: [acted(running, 'click x', '1.png')] },
+    running,
   );
+  // No running write to clobber the verdict — but the act itself is NOT lost: `act`
+  // recorded it on the shared trail, and `report` merged that trail into `steps`.
   expect(out).toBeNull();
-  expect(trail).toHaveLength(0);
+  expect(running.steps).toEqual([{ step: 'click x', ok: true, screenshot: '1.png' }]);
 });
 
-test('progressForStep skips steps that produced no act results', () => {
+test('progressForStep skips steps that surfaced nothing new', () => {
   const out = progressForStep(
     { toolCalls: [{ toolName: 'observe' }], toolResults: [{ toolName: 'observe', output: {} }] },
-    [],
+    runTrail(),
   );
   expect(out).toBeNull();
 });
 
 test('progressForStep flushes a running trail and accumulates across steps', () => {
-  const trail: Step[] = [];
+  const running = runTrail();
   const first = progressForStep(
-    { toolCalls: [{ toolName: 'act' }], toolResults: [actResult('typed email', '1.png')] },
-    trail,
+    { toolCalls: [{ toolName: 'act' }], toolResults: [acted(running, 'typed email', '1.png')] },
+    running,
   );
   expect(first).toEqual({
     status: 'running',
@@ -137,11 +201,71 @@ test('progressForStep flushes a running trail and accumulates across steps', () 
     visual: [],
   });
   const second = progressForStep(
-    { toolCalls: [{ toolName: 'act' }], toolResults: [actResult('clicked Submit', '2.png')] },
-    trail,
+    { toolCalls: [{ toolName: 'act' }], toolResults: [acted(running, 'clicked Submit', '2.png')] },
+    running,
   );
   expect(second?.steps).toHaveLength(2);
-  expect(trail).toHaveLength(2);
+  expect(running.steps).toHaveLength(2);
+});
+
+test('progressForStep streams look issues + console errors — an act-less step still flushes', () => {
+  const running = runTrail();
+  const out = progressForStep(
+    {
+      toolCalls: [{ toolName: 'observe' }, { toolName: 'look' }],
+      toolResults: [
+        consoleResult({ level: 'error', text: 'boom', location: 'app.js:1:1' }),
+        lookResult('006.png', { what: 'button overlaps', where: 'header', severity: 'medium' }),
+      ],
+    },
+    running,
+  );
+  expect(out).toEqual({
+    status: 'running',
+    steps: [],
+    bugs: [{ kind: 'console', detail: 'boom', evidence: 'app.js:1:1' }],
+    visual: [
+      { issue: 'button overlaps', where: 'header', severity: 'medium', screenshot: '006.png' },
+    ],
+  });
+  expect(running.bugs).toHaveLength(1);
+  expect(running.visual).toHaveLength(1);
+});
+
+test('progressForStep dedupes re-read console rows and re-flagged visual issues by message', () => {
+  const running = runTrail();
+  const step = () => ({
+    toolCalls: [{ toolName: 'observe' }, { toolName: 'look' }],
+    toolResults: [
+      consoleResult({ level: 'error', text: 'boom' }, { level: 'error', text: 'boom' }),
+      lookResult('007.png', { what: 'Button  Overlaps', where: 'Header', severity: 'medium' }),
+    ],
+  });
+  const first = progressForStep(step(), running);
+  expect(first?.bugs).toHaveLength(1);
+  expect(first?.visual).toHaveLength(1);
+  // The console channel is a ring buffer, and looks repeat on the same screen:
+  // a second identical read adds nothing new, so there is nothing to flush.
+  expect(progressForStep(step(), running)).toBeNull();
+  expect(running.bugs).toHaveLength(1);
+  expect(running.visual).toHaveLength(1);
+});
+
+test('progressForStep keeps streamed findings when a later step only acts', () => {
+  const running = runTrail();
+  progressForStep(
+    {
+      toolCalls: [{ toolName: 'look' }],
+      toolResults: [lookResult('008.png', { what: 'clipped', where: 'nav', severity: 'low' })],
+    },
+    running,
+  );
+  const next = progressForStep(
+    { toolCalls: [{ toolName: 'act' }], toolResults: [acted(running, 'clicked Pay', '9.png')] },
+    running,
+  );
+  expect(next?.visual).toHaveLength(1);
+  expect(next?.steps).toEqual([{ step: 'clicked Pay', ok: true, screenshot: '9.png' }]);
 });
 
 test('createDebugAgent builds an agent driving the four-tool belt', () => {
@@ -158,289 +282,6 @@ test('createDebugAgent builds an agent driving the four-tool belt', () => {
 test('loop constants are sane', () => {
   expect(DEFAULT_MAX_STEPS).toBeGreaterThan(0);
   expect(KICKOFF_PROMPT).toContain('report');
-});
-
-// ---------------------------------------------------------------------------
-// Integration: scripted loop runs through observe→act→report
-// ---------------------------------------------------------------------------
-
-/**
- * Minimal LanguageModelV3GenerateResult for one tool call — the shape
- * `doGenerate` must return for the SDK loop to execute that tool.
- */
-function toolCallResponse(id: string, toolName: string, args: unknown) {
-  return {
-    content: [
-      { type: 'tool-call' as const, toolCallId: id, toolName, input: JSON.stringify(args) },
-    ],
-    finishReason: { unified: 'tool-calls' as const, raw: 'tool_calls' },
-    usage: {
-      inputTokens: {
-        total: 1,
-        noCache: 1 as number | undefined,
-        cacheRead: undefined,
-        cacheWrite: undefined,
-      },
-      outputTokens: { total: 1, text: 1 as number | undefined, reasoning: undefined },
-    },
-    warnings: [] as [],
-  };
-}
-
-/** A findings tracker shared by the progress seam and the report tool. */
-function findingsTracker() {
-  const written: Findings[] = [];
-  const writer = {
-    writeFindings: async (f: Findings): Promise<string> => {
-      written.push(f);
-      return 'findings.json';
-    },
-  };
-  return { written, writer };
-}
-
-/**
- * Build a minimal real belt for integration tests:
- * - observe → empty tree (no step trail)
- * - act     → { action, label, screenshot } so step trail picks it up
- * - look    → description (no step trail)
- * - report  → writes verdict via the provided writer and signals stop
- */
-function realBelt(progress: ProgressWriter): BeltTools {
-  return {
-    observe: tool({
-      description: 'observe',
-      inputSchema: z.object({ kind: z.string() }),
-      execute: async () => ({ kind: 'tree', count: 0, nodes: [] }),
-    }),
-    act: tool({
-      description: 'act',
-      inputSchema: z.object({ action: z.string(), target: z.string().optional() }),
-      execute: async (input) => ({
-        action: input.action,
-        label: `did ${input.action}${input.target ? ` on ${input.target}` : ''}`,
-        screenshot: '001.png',
-      }),
-    }),
-    look: tool({
-      description: 'look',
-      inputSchema: z.object({ question: z.string().optional() }),
-      execute: async () => ({ description: 'looks fine', issues: [] }),
-    }),
-    report: createReportTool(progress),
-  };
-}
-
-test('scripted loop (observe→act→report) records running steps and finalizes findings', async () => {
-  const { written, writer } = findingsTracker();
-  const belt = realBelt(writer);
-
-  let callCount = 0;
-  const model = new MockLanguageModelV3({
-    doGenerate: async () => {
-      callCount++;
-      if (callCount === 1) return toolCallResponse('c1', 'observe', { kind: 'tree' });
-      if (callCount === 2)
-        return toolCallResponse('c2', 'act', { action: 'click', target: 'Save' });
-      return toolCallResponse('c3', 'report', { status: 'passed', summary: 'All checks pass.' });
-    },
-  });
-
-  const agent = createDebugAgent({
-    model,
-    tools: belt,
-    instructions: 'debug this app',
-    inbox: fakeInbox(),
-    progress: writer,
-    maxSteps: 10,
-  });
-
-  await runDebugLoop({ agent });
-
-  // Running findings: the act step triggers a trail flush
-  const running = written.filter((f) => f.status === 'running');
-  expect(running.length).toBeGreaterThanOrEqual(1);
-  const firstRunning = running[0];
-  if (!firstRunning) throw new Error('expected at least one running findings write');
-  expect(firstRunning.steps[0]?.step).toBe('did click on Save');
-  expect(firstRunning.steps[0]?.screenshot).toBe('001.png');
-
-  // Terminal findings: the report tool writes the verdict
-  const terminal = written.filter((f) => f.status !== 'running');
-  expect(terminal.length).toBeGreaterThanOrEqual(1);
-  const verdict = terminal.at(-1);
-  if (!verdict) throw new Error('expected a terminal findings write');
-  expect(verdict.status).toBe('passed');
-  expect(verdict.summary).toBe('All checks pass.');
-
-  // All three steps ran: observe, act, report
-  expect(callCount).toBe(3);
-});
-
-test('mid-run injected message folds into the next model turn', async () => {
-  const { writer } = findingsTracker();
-  const belt = realBelt(writer);
-
-  // Mutable inbox: empty for step 1's prepareStep, then filled from inside
-  // doGenerate call 1 so step 2's prepareStep drains it.
-  const pending: string[] = [];
-  const inbox: LoopInbox = {
-    drain() {
-      const out = [...pending];
-      pending.length = 0;
-      return out;
-    },
-  };
-
-  // Capture the raw prompt messages for each doGenerate call so we can
-  // assert the injected message is present in call 2 but not call 1.
-  const seenPrompts: string[][] = [];
-
-  let callCount = 0;
-  const model = new MockLanguageModelV3({
-    doGenerate: async (opts) => {
-      callCount++;
-
-      // Collect all text across user messages for this call.
-      const texts: string[] = [];
-      for (const msg of opts.prompt) {
-        if (msg.role === 'user') {
-          for (const part of msg.content) {
-            if (part.type === 'text') texts.push(part.text);
-          }
-        }
-      }
-      seenPrompts.push(texts);
-
-      if (callCount === 1) {
-        // Inject mid-run message AFTER step 1 starts — prepareStep for step 2
-        // will drain it before doGenerate call 2.
-        pending.push('check mobile view');
-        return toolCallResponse('c1', 'observe', { kind: 'tree' });
-      }
-      return toolCallResponse('c2', 'report', { status: 'passed' });
-    },
-  });
-
-  const agent = createDebugAgent({
-    model,
-    tools: belt,
-    instructions: 'debug',
-    inbox,
-    progress: writer,
-    maxSteps: 10,
-  });
-
-  await runDebugLoop({ agent });
-
-  expect(callCount).toBe(2);
-
-  // Call 1 must NOT contain the injected message (it was injected after call 1 started)
-  const call1Text = seenPrompts[0]?.join('\n') ?? '';
-  expect(call1Text).not.toContain('check mobile view');
-
-  // Call 2 MUST contain the injected message (prepareStep drained it before call 2)
-  const call2Text = seenPrompts[1]?.join('\n') ?? '';
-  expect(call2Text).toContain('Mid-run instructions');
-  expect(call2Text).toContain('check mobile view');
-});
-
-test('mid-run instructions persist into EVERY later step, without duplicating', async () => {
-  const { writer } = findingsTracker();
-  const belt = realBelt(writer);
-
-  const pending: string[] = [];
-  const inbox: LoopInbox = {
-    drain() {
-      const out = [...pending];
-      pending.length = 0;
-      return out;
-    },
-  };
-
-  const seenPrompts: string[][] = [];
-  let callCount = 0;
-  const model = new MockLanguageModelV3({
-    doGenerate: async (opts) => {
-      callCount++;
-      const texts: string[] = [];
-      for (const msg of opts.prompt) {
-        if (msg.role === 'user') {
-          for (const part of msg.content) {
-            if (part.type === 'text') texts.push(part.text);
-          }
-        }
-      }
-      seenPrompts.push(texts);
-
-      if (callCount === 1) {
-        // Injected after step 1 starts; the inbox drains it once, before call 2.
-        pending.push('also verify the footer links');
-        return toolCallResponse('c1', 'observe', { kind: 'tree' });
-      }
-      if (callCount < 4) return toolCallResponse(`c${callCount}`, 'observe', { kind: 'tree' });
-      return toolCallResponse('c4', 'report', { status: 'passed' });
-    },
-  });
-
-  const agent = createDebugAgent({
-    model,
-    tools: belt,
-    instructions: 'debug',
-    inbox,
-    progress: writer,
-    maxSteps: 10,
-  });
-
-  await runDebugLoop({ agent });
-  expect(callCount).toBe(4);
-
-  // Step 1: injected after the call started — absent.
-  expect(seenPrompts[0]?.join('\n')).not.toContain('verify the footer links');
-
-  // Steps 2, 3 AND 4: the instruction is still in effect — the inbox drained empty
-  // after step 2, but the standing list re-folds it into every subsequent prompt.
-  for (const call of [1, 2, 3]) {
-    const text = seenPrompts[call]?.join('\n') ?? '';
-    expect(text).toContain('Mid-run instructions');
-    expect(text).toContain('also verify the footer links');
-    // Exactly one occurrence: one rebuilt block per step, never accumulation.
-    expect(text.split('also verify the footer links').length - 1).toBe(1);
-  }
-});
-
-test('abort signal propagates: loop rejects when the model throws AbortError', async () => {
-  const { writer } = findingsTracker();
-  const belt = realBelt(writer);
-
-  let callCount = 0;
-  const controller = new AbortController();
-
-  const model = new MockLanguageModelV3({
-    doGenerate: async () => {
-      callCount++;
-      if (callCount === 1) {
-        // First call succeeds; abort fires so next call is never reached cleanly
-        controller.abort();
-        return toolCallResponse('c1', 'observe', { kind: 'tree' });
-      }
-      // Simulate what happens when the signal is aborted: the network call throws
-      const err = new Error('The operation was aborted');
-      err.name = 'AbortError';
-      throw err;
-    },
-  });
-
-  const agent = createDebugAgent({
-    model,
-    tools: belt,
-    instructions: 'debug',
-    inbox: fakeInbox(),
-    progress: writer,
-    maxSteps: 10,
-  });
-
-  await expect(runDebugLoop({ agent, abortSignal: controller.signal })).rejects.toThrow();
 });
 
 // --- pruneStaleFrames --------------------------------------------------------
@@ -505,4 +346,60 @@ test('pruneStaleFrames ignores non-look tool results and non-content outputs', (
   const messages = [actResult, lookFrameMessage('a'), lookFrameMessage('b')];
   const pruned = pruneStaleFrames(messages);
   expect(pruned[0]).toBe(actResult);
+});
+
+test('describeStep surfaces a tool-error content part (AI SDK 6 shape), not toolResults', () => {
+  const line = describeStep(
+    {
+      toolCalls: [{ toolName: 'act', input: { act: 'click #save' } }],
+      toolResults: [], // AI SDK 6 never puts a failed call's error here
+      content: [
+        { type: 'tool-call', toolName: 'act' },
+        toolErrorPart('act', new Error('element not found')),
+      ],
+    },
+    3,
+  );
+  expect(line).toBe('step 3: act({"act":"click #save"}) — ERROR act: element not found');
+});
+
+test('progressForStep flushes a FAILED act too — a rejected tool call never reaches toolResults', () => {
+  const running = runTrail();
+  // What `runAct` does on a throw (see `belt/act.ts`): the trail gets the
+  // `ok: false` entry AT ACT TIME, before the step content — carrying only a
+  // `tool-error` part — ever reaches `onStepFinish`.
+  running.steps.push({ step: 'click #save', ok: false, note: 'AgentError: no element matched' });
+  const out = progressForStep(
+    {
+      toolCalls: [{ toolName: 'act', input: { action: 'click', target: '#save' } }],
+      toolResults: [], // the failed call's result is not here — only in `content`
+      content: [toolErrorPart('act', new Error('no element matched'))],
+    },
+    running,
+  );
+  // Gating on toolResults (the pre-fix check) would see no `act` result and no
+  // new bugs/visual, and return null — silently losing the one step a crashed
+  // run most needs: the failure itself. Gating on toolCalls catches it.
+  expect(out).toEqual({
+    status: 'running',
+    steps: [{ step: 'click #save', ok: false, note: 'AgentError: no element matched' }],
+    bugs: [],
+    visual: [],
+  });
+});
+
+test('describeStep stays clean when the step has no content (or no errors in it)', () => {
+  expect(describeStep({ toolCalls: [{ toolName: 'observe' }], toolResults: [] }, 1)).toBe(
+    'step 1: observe',
+  );
+  expect(
+    describeStep(
+      {
+        toolCalls: [{ toolName: 'observe' }],
+        toolResults: [{ toolName: 'observe', output: { kind: 'console', entries: [] } }],
+        content: [{ type: 'tool-result', toolName: 'observe' }],
+      },
+      2,
+    ),
+  ).toBe('step 2: observe');
 });

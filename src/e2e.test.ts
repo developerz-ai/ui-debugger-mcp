@@ -444,7 +444,7 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
       expect(findings.status).toBe('passed');
       expect(() => FindingsSchema.parse(findings)).not.toThrow();
 
-      // Both act verbs must produce a step entry via stepTrailFrom.
+      // Both act verbs must produce a step entry on the run's act trail.
       const steps: Array<{ step: string }> = findings.steps;
       expect(steps.some((s) => s.step.startsWith('key'))).toBe(true);
       expect(steps.some((s) => s.step.startsWith('scroll'))).toBe(true);

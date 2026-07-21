@@ -344,8 +344,8 @@ test('the loop streams progress that snapshot reads while the run is in flight',
     await ctx.progress.writeFindings({
       status: 'running',
       steps: [{ step: 'typed email', ok: true }],
-      bugs: [],
-      visual: [],
+      bugs: [{ kind: 'console', detail: 'TypeError: cart is undefined' }],
+      visual: [{ issue: 'total is cut off', where: 'cart footer', severity: 'high' }],
     });
     markWritten();
     await gate;
@@ -355,6 +355,12 @@ test('the loop streams progress that snapshot reads while the run is in flight',
   const midRun = await session.snapshot();
   expect(midRun.status).toBe('running'); // still in flight
   expect(midRun.steps).toEqual([{ step: 'typed email', ok: true }]);
+  // The streamed findings surface too — not just the step trail: a run that never
+  // reaches `report` still hands the smart agent everything found so far.
+  expect(midRun.bugs).toEqual([{ kind: 'console', detail: 'TypeError: cart is undefined' }]);
+  expect(midRun.visual).toEqual([
+    { issue: 'total is cut off', where: 'cart footer', severity: 'high' },
+  ]);
 
   release();
   await run;
@@ -439,6 +445,35 @@ test('an agent crash settles failed and surfaces the error (with its trail) into
   expect(findings.status).toBe('failed');
   expect(findings.steps).toEqual([{ step: 'opened', ok: true }]); // trail preserved
   expect(findings.summary).toContain('driver model timed out');
+});
+
+test('an agent crash after progress preserves prior evidence and appends to the prior summary', async () => {
+  const store = makeStore();
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+  });
+
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({
+      status: 'running',
+      steps: [{ step: 'opened', ok: true }],
+      bugs: [],
+      visual: [],
+      summary: 'checked out fine so far',
+      evidence: 'sessions/s1/replay.mp4',
+    });
+    throw new AgentError('driver model timed out');
+  });
+
+  const findings = await store.readFindings();
+  expect(findings.status).toBe('failed');
+  expect(findings.evidence).toBe('sessions/s1/replay.mp4'); // not dropped
+  expect(findings.summary).toBe(
+    'checked out fine so far\nDebug run failed: driver model timed out',
+  );
 });
 
 test('a non-AgentError crash is wrapped and surfaced into findings', async () => {

@@ -1,9 +1,10 @@
 import { expect, test } from 'bun:test';
 import { FindingsError } from '../../errors.js';
-import type { Findings } from '../../findings/schema.js';
+import type { Findings, Step } from '../../findings/schema.js';
 import {
   createReportTool,
   type FindingsWriter,
+  mergeSteps,
   ReportInputSchema,
   type ReportResult,
   runReport,
@@ -70,13 +71,12 @@ test('reports counts so the verdict reads without re-opening the file', async ()
   expect(res.counts).toEqual({ steps: 2, bugs: 1, visual: 2 });
 });
 
-test('overlays the recorded act-trail as authoritative steps; counts match the written file', async () => {
+test('takes the recorded act-trail when the driver reported no steps; counts match the file', async () => {
   const { writer, written } = fakeWriter();
   const trail = [
     { step: 'key Tab', ok: true, screenshot: '001.png' },
     { step: 'scroll down', ok: true, screenshot: '002.png' },
   ];
-  // Driver omitted steps; the recorded trail wins in the persisted verdict.
   const res = await runReport(writer, { status: 'passed', steps: [], bugs: [], visual: [] }, trail);
   const persisted = written[0];
   if (!persisted) throw new Error('expected a written findings');
@@ -84,6 +84,82 @@ test('overlays the recorded act-trail as authoritative steps; counts match the w
   // The returned counts derive from the SAME findings object — no 0-vs-N drift.
   expect(res.counts.steps).toBe(persisted.steps.length);
   expect(res.counts.steps).toBe(2);
+});
+
+test('merges reported steps with the trail — the driver’s ok:false + note survive', async () => {
+  const { writer, written } = fakeWriter();
+  const trail = [
+    { step: 'click button "Checkout"', ok: true, screenshot: '001.png' },
+    { step: 'wait for "network idle"', ok: true, screenshot: '002.png' },
+  ];
+  const reported = [
+    { step: 'Verified cart total', ok: true, note: 'shows $42' },
+    { step: 'Checkout button did nothing', ok: false, note: 'stayed on /cart' },
+  ];
+  const res = await runReport(
+    writer,
+    { status: 'failed', steps: reported, bugs: [], visual: [] },
+    trail,
+  );
+  const persisted = written[0];
+  if (!persisted) throw new Error('expected a written findings');
+  // Nothing discarded: both trail entries and both reported steps survive, each in order.
+  expect(persisted.steps).toEqual([...trail, ...reported]);
+  expect(res.counts.steps).toBe(4);
+});
+
+test('fuses a restated step: driver fields win, the trail attaches the frame', async () => {
+  const { writer, written } = fakeWriter();
+  const res = await runReport(
+    writer,
+    {
+      status: 'failed',
+      // Driver echoed the act label (models commonly do) and judged it a failure.
+      steps: [{ step: 'Click button "Save"', ok: false, note: 'no toast appeared' }],
+      bugs: [],
+      visual: [],
+    },
+    [{ step: 'click button "Save"', ok: true, screenshot: '003.png' }],
+  );
+  const persisted = written[0];
+  if (!persisted) throw new Error('expected a written findings');
+  expect(persisted.steps).toEqual([
+    { step: 'Click button "Save"', ok: false, note: 'no toast appeared', screenshot: '003.png' },
+  ]);
+  expect(res.counts.steps).toBe(1);
+});
+
+test('pairs repeated labels one-to-one instead of collapsing them', () => {
+  const trail = [
+    { step: 'click Add to cart', ok: true, screenshot: '001.png' },
+    { step: 'click Add to cart', ok: true, screenshot: '002.png' },
+  ];
+  const reported = [
+    { step: 'click Add to cart', ok: true },
+    { step: 'click Add to cart', ok: false, note: 'second one dead' },
+  ];
+  expect(mergeSteps(reported, trail)).toEqual([
+    { step: 'click Add to cart', ok: true, screenshot: '001.png' },
+    { step: 'click Add to cart', ok: false, note: 'second one dead', screenshot: '002.png' },
+  ]);
+});
+
+test('merge keeps a failed trail entry the driver never mentioned', () => {
+  const merged = mergeSteps(
+    [{ step: 'Opened /login', ok: true }],
+    [{ step: 'click #save', ok: false, note: 'AgentError: no element matched "#save"' }],
+  );
+  expect(merged).toEqual([
+    { step: 'click #save', ok: false, note: 'AgentError: no element matched "#save"' },
+    { step: 'Opened /login', ok: true },
+  ]);
+});
+
+test('merge is a no-op on either side being empty', () => {
+  const steps = [{ step: 'a', ok: true }];
+  expect(mergeSteps(steps, [])).toEqual(steps);
+  expect(mergeSteps([], steps)).toEqual(steps);
+  expect(mergeSteps([], [])).toEqual([]);
 });
 
 test('keeps the reported steps when no act-trail was recorded', async () => {
@@ -163,4 +239,25 @@ test('createReportTool exposes a described tool with an input schema', () => {
   const report = createReportTool(writer);
   expect(typeof report.description).toBe('string');
   expect(report.inputSchema).toBeDefined();
+});
+
+test('createReportTool awaits an async trail read before it writes the verdict', async () => {
+  const { writer, written } = fakeWriter();
+  // The wired read is the act trail's `settled()`: it resolves only once the acts
+  // racing `report` in the same step have recorded (see `belt/trail.ts`).
+  const late = new Promise<readonly Step[]>((resolve) => {
+    setTimeout(() => resolve([{ step: 'click Pay', ok: true, screenshot: '001.png' }]), 5);
+  });
+  const report = createReportTool(writer, () => late);
+  const execute = report.execute;
+  if (!execute) throw new Error('expected an executable report tool');
+  const result = (await execute(
+    { status: 'passed', steps: [], bugs: [], visual: [] },
+    {
+      toolCallId: 't1',
+      messages: [],
+    },
+  )) as ReportResult;
+  expect(result.counts.steps).toBe(1);
+  expect(written[0]?.steps).toEqual([{ step: 'click Pay', ok: true, screenshot: '001.png' }]);
 });

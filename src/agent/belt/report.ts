@@ -85,8 +85,8 @@ export interface FindingsWriter {
 
 /**
  * Build the canonical findings record from a validated report input. The base
- * verdict shape; {@link terminalFindings} overlays the loop's recorded act-trail
- * on top, so both the persisted write and the returned counts agree.
+ * verdict shape; {@link terminalFindings} merges the loop's recorded act-trail
+ * into its `steps`, so both the persisted write and the returned counts agree.
  */
 export function reportFindings(input: ReportInput): Findings {
   return {
@@ -98,23 +98,81 @@ export function reportFindings(input: ReportInput): Findings {
   };
 }
 
+/** Pairing key for a reported step and a recorded one — case- and whitespace-insensitive. */
+function stepKey(step: Step): string {
+  return step.step.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/**
+ * Fuse one reported step with the trail entry it restates: the driver's version
+ * wins field by field (its `ok`, its `note`), the recorded one fills what the
+ * driver left out — above all the evidence frame it never sees a path for.
+ */
+function fuseStep(recorded: Step, reported: Step): Step {
+  const skipped = reported.skipped ?? recorded.skipped;
+  const note = reported.note ?? recorded.note;
+  const screenshot = reported.screenshot ?? recorded.screenshot;
+  return {
+    step: reported.step,
+    ok: reported.ok,
+    ...(skipped !== undefined && { skipped }),
+    ...(note !== undefined && { note }),
+    ...(screenshot !== undefined && { screenshot }),
+  };
+}
+
+/**
+ * Merge the driver's reported steps with the loop's recorded act-`trail`. Nothing
+ * is discarded: the driver's `ok: false` steps and notes (the prompt mandates
+ * them) survive alongside the mechanical trail and its evidence frames.
+ *
+ * The trail is the spine — it is the true chronology, recorded at act time — and
+ * each entry the driver restated verbatim (models commonly echo the `act` result
+ * label) is fused in place, driver fields winning, trail filling the gaps. Steps
+ * the driver reported that no trail entry matches — assertions, observations, acts
+ * from a step that also called `report` — follow in reported order, since nothing
+ * places them in the chronology. Both inputs keep their relative order, and equal
+ * labels pair up first-come-first-served, so repeating an action pairs each
+ * occurrence with a distinct trail entry.
+ */
+export function mergeSteps(reported: readonly Step[], trail: readonly Step[]): Step[] {
+  if (trail.length === 0) return [...reported];
+  if (reported.length === 0) return [...trail];
+  const pending = new Map<string, Array<{ index: number; step: Step }>>();
+  reported.forEach((step, index) => {
+    const queue = pending.get(stepKey(step));
+    if (queue) queue.push({ index, step });
+    else pending.set(stepKey(step), [{ index, step }]);
+  });
+  const fused = new Set<number>();
+  const merged = trail.map((recorded) => {
+    const hit = pending.get(stepKey(recorded))?.shift();
+    if (!hit) return recorded;
+    fused.add(hit.index);
+    return fuseStep(recorded, hit.step);
+  });
+  for (const [index, step] of reported.entries()) {
+    if (!fused.has(index)) merged.push(step);
+  }
+  return merged;
+}
+
 /**
  * The authoritative terminal {@link Findings}: the report input with the loop's
- * recorded act-`trail` overlaid as `steps` whenever one was captured. The driver's
- * `report` rarely restates the steps it took (and the trail carries the evidence
- * frames), so the trail wins; the reported steps are the fallback for a run that
- * recorded none. The single source of truth for the terminal write AND the counts,
- * so they never drift (a `0`-step result returned over a trail-filled file).
+ * recorded act-`trail` merged into its `steps` (see {@link mergeSteps}) — never a
+ * wholesale replacement, which silently dropped every step the driver reported.
+ * The single source of truth for the terminal write AND the counts, so they never
+ * drift (a `0`-step result returned over a trail-filled file).
  */
 export function terminalFindings(input: ReportInput, trail: readonly Step[] = []): Findings {
   const findings = reportFindings(input);
-  return trail.length > 0 ? { ...findings, steps: [...trail] } : findings;
+  return { ...findings, steps: mergeSteps(input.steps, trail) };
 }
 
 /**
  * Write the terminal verdict and report the stop. Both the persisted findings and
  * the returned counts derive from one {@link terminalFindings} object — the loop's
- * `trail` (when present) is authoritative for `steps`. Pure over the
+ * `trail` merged with the driver's reported steps. Pure over the
  * {@link FindingsWriter} seam, so it unit-tests against a fake with no disk.
  */
 export async function runReport(
@@ -140,12 +198,21 @@ export async function runReport(
  * Build the `report` tool bound to one findings store, for the debug agent's belt.
  * `getTrail` (when wired by the loop) supplies the recorded act-trail so the
  * written verdict and its counts both reflect the steps actually taken.
+ *
+ * It may be async — and the wired one is. `report` executes CONCURRENTLY with the
+ * other tool calls of its own step, so when the driver emits `act` + `report`
+ * together the act is still running here; the wired read is the act trail's
+ * `settled()`, which waits for it (see `belt/trail.ts`). Waiting is safe: the
+ * step's own `Promise.all` already awaits that act.
  */
-export function createReportTool(writer: FindingsWriter, getTrail?: () => readonly Step[]) {
+export function createReportTool(
+  writer: FindingsWriter,
+  getTrail?: () => readonly Step[] | Promise<readonly Step[]>,
+) {
   return tool({
     description:
       'Emit the final structured findings and END the run. Call exactly once, when the goal is met or you hit the step limit. Validates and writes findings.json: status (passed|failed) plus steps/bugs/visual/summary. This is terminal — the loop stops after report, so do not act again. Make summary actionable for the smart agent: what broke, where, what to fix.',
     inputSchema: ReportInputSchema,
-    execute: (input) => runReport(writer, input, getTrail?.() ?? []),
+    execute: async (input) => runReport(writer, input, (await getTrail?.()) ?? []),
   });
 }
