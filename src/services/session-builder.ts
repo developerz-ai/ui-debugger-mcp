@@ -14,7 +14,7 @@
  * seam; swapping the driver model or the target never touches the service.
  */
 
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import type { LanguageModel, Tool } from 'ai';
 import type { CaptureSink } from '../adapters/browser/cdp.js';
 import { createAdapter } from '../adapters/factory.js';
@@ -191,6 +191,18 @@ function splitCriteria(criteria: string | undefined): string[] | undefined {
 }
 
 /**
+ * Render `sessions/<id>/story.md` — the human-readable record of what this run was
+ * asked to do, so a person poking through the workspace after the fact doesn't have
+ * to reconstruct the goal from `findings.json` alone.
+ */
+function renderStoryMd(target: string, goal: string, criteriaLines: string[] | undefined): string {
+  const criteriaBlock = criteriaLines
+    ? criteriaLines.map((line) => `- ${line}`).join('\n')
+    : '(none)';
+  return `# Story\n\n**Target:** ${target}\n\n## Goal\n\n${goal}\n\n## Criteria\n\n${criteriaBlock}\n`;
+}
+
+/**
  * Assemble a debug run: adapter + belt + composed prompt + loop runner, all bound
  * to a fresh {@link FindingsStore}. Throws {@link TargetNotFoundError} if `target`
  * is not configured — BEFORE any device or browser launches, so a bad request never
@@ -218,6 +230,8 @@ export async function buildSession(
 
   const paths = sessionPaths(workspace, id);
   await ensureSession(paths);
+  const criteriaLines = splitCriteria(criteria);
+  await writeFile(paths.storyMd, renderStoryMd(target, goal, criteriaLines), 'utf8');
   const store = new FindingsStore(paths);
   const onLog: CaptureSink = (channel, line) => {
     void store.appendLog(channel, line).catch(() => undefined);
@@ -238,7 +252,7 @@ export async function buildSession(
   const instructions = composeSystemPrompt({
     target: addendum,
     story: goal,
-    criteria: splitCriteria(criteria),
+    criteria: criteriaLines,
     selfLook,
   });
 

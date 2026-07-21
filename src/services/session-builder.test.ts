@@ -1,12 +1,12 @@
 import { expect, test } from 'bun:test';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import { AdapterError, ConfigError, TargetNotFoundError } from '../errors.js';
-import { workspacePaths } from '../session/workspace.js';
+import { sessionPaths, workspacePaths } from '../session/workspace.js';
 import {
   buildSession,
   makeSessionBuilder,
@@ -78,6 +78,30 @@ test('buildSession wires a desktop target (addendum + adapter) without launching
   expect(built.session).toBeDefined();
   expect(typeof built.open).toBe('function');
   expect(typeof built.run).toBe('function');
+});
+
+test('buildSession writes story.md with goal, criteria, and target', async () => {
+  const d = deps();
+  await buildSession(d, {
+    id: 'story1',
+    target: 'screen',
+    goal: 'open the settings dialog',
+    criteria: 'no console errors\nsettings dialog is visible',
+  });
+  const paths = sessionPaths(d.workspace, 'story1');
+  const content = await readFile(paths.storyMd, 'utf8');
+  expect(content).toContain('screen');
+  expect(content).toContain('open the settings dialog');
+  expect(content).toContain('no console errors');
+  expect(content).toContain('settings dialog is visible');
+});
+
+test('buildSession writes story.md without a criteria section when none given', async () => {
+  const d = deps();
+  await buildSession(d, { id: 'story2', target: 'screen', goal: 'open the settings dialog' });
+  const paths = sessionPaths(d.workspace, 'story2');
+  const content = await readFile(paths.storyMd, 'utf8');
+  expect(content).toContain('(none)');
 });
 
 test('buildSession wires an android target (addendum + adapter) without launching', async () => {

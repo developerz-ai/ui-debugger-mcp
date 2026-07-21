@@ -119,6 +119,15 @@ export class FindingsError extends UiDebuggerError {
   }
 }
 
+/** `ui-debugger-mcp init` scaffold failures (fs writes, gitignore updates). */
+export class InitError extends UiDebuggerError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InitError';
+    Object.setPrototypeOf(this, InitError.prototype);
+  }
+}
+
 export class McpServerError extends UiDebuggerError {
   constructor(message: string) {
     super(message);

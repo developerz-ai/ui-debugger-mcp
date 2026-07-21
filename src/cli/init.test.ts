@@ -68,6 +68,22 @@ test('is idempotent (second init is a no-op)', () => {
   expect(readFileSync(join(TMP, '.gitignore'), 'utf8')).toBe(gitignoreBefore);
 });
 
+test('respects an existing config workspace for mkdir instead of the tmp/ default', () => {
+  const configPath = join(TMP, '.ui-debugger-mcp.json');
+  writeFileSync(configPath, JSON.stringify({ workspace: './custom-ws', targets: {} }), 'utf8');
+  runInit(TMP);
+  expect(existsSync(join(TMP, 'custom-ws'))).toBe(true);
+  expect(existsSync(join(TMP, 'tmp', 'ui-debugger-mcp'))).toBe(false);
+});
+
+test('respects an existing config workspace for gitignore instead of tmp/', () => {
+  const configPath = join(TMP, '.ui-debugger-mcp.json');
+  writeFileSync(configPath, JSON.stringify({ workspace: './custom-ws', targets: {} }), 'utf8');
+  runInit(TMP);
+  const content = readFileSync(join(TMP, '.gitignore'), 'utf8');
+  expect(content).toContain('custom-ws/');
+});
+
 test('does not write .mcp.json or any API key to disk (snippet is stdout-only)', () => {
   runInit(TMP);
   // The .mcp.json snippet is only printed, never written.
