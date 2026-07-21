@@ -1,8 +1,7 @@
 # MCP tools — the two-layer design
 
-Two layers of tools, two different audiences. The bible's rule
-("[few parameterized tools beat many](../../sebyx07/claude-code-bible/docs/07-memory-and-mcp.md)")
-applies to both, but the win lands differently at each layer.
+Two layers of tools, two different audiences. The rule
+"few parameterized tools beat many" applies to both, but the win lands differently at each layer.
 
 ```
  smart Claude
@@ -11,7 +10,7 @@ applies to both, but the win lands differently at each layer.
  debug agent  (small model, in-server, Vercel AI SDK)
      │  ── INNER: agent tool belt (observe / act / report) ── few, parameterized
      ▼
- adapter contract  (open · find · click · type · readState · screenshot · waitFor)
+ adapter contract  (12 methods: open · find · click · type · pressKey · scroll · readState · screenshot · waitFor · console · network · close)
      │  ── protocol / libs ──
      ▼
  browser (CDP) · desktop (X11/Wayland) · android (ADB)
@@ -31,7 +30,7 @@ no matter how complex the debugging gets.
 
 | Tool | Input | Returns |
 |------|-------|---------|
-| `start_debug`   | `{ target, goal, criteria? }` | `session_id` |
+| `start_debug`   | `{ target, goal, criteria?, url?, timeout? }` | `session_id` |
 | `send_message`  | `{ session_id, message }`     | ack — inject work mid-run |
 | `get_findings`  | `{ session_id, wait?, fields? }` | status + findings + evidence paths |
 | `describe`      | `{}` or `{ target }`          | targets catalog + config (lazy) |
@@ -73,13 +72,13 @@ shape MCP tools should have."* So: a handful of verbs, lots of composable params
 
 | Tool | Shape | Maps to / routes |
 |------|-------|------------------|
-| `observe` | `{ kind, query?, fields?, filters?, limit? }` | `readState` / `screenshot` |
-| `act`     | discriminated union: `click \| type \| key \| scroll \| navigate \| wait` `{ target, ... }` | `find` + `click`/`type`/`waitFor`/`open` |
+| `observe` | `{ kind, query?, fields?, filters?, limit?, within? }` | `readState` / `screenshot` |
+| `act`     | flat object: `{ action: enum, target?, text?, key?, ... }` | `find` + `click`/`type`/`waitFor`/`open` |
 | `look`    | `{ question?, expect? }` → `{ description, matches?, issues[] }` | **vision model** (see [`models.md`](models.md)) |
 | `report`  | `{ bugs[], visual[], steps[], summary }` (Zod) | → surfaced via `get_findings` |
 
 - **One `act`, not six tools.** `act({action:"click", target})` beats
-  `click_element` / `fill_input` / `press_key` — gold-standards discriminated-union.
+  `click_element` / `fill_input` / `press_key` — one flat object with an enum discriminant.
 - **One `observe`, not four.** `kind` selects tree / screenshot / console / network.
 - **`look` is the eyes.** The driver is a fast **blind text model**; `look` sends
   the screenshot to a **vision model** that describes / judges how it looks and
@@ -160,7 +159,7 @@ off-the-shelf MCP worth wrapping → custom adapters over the libs above.
 ## Implementation notes
 
 - Outer tools: defined with Zod input schemas; `describe` doubles as the catalog.
-- Inner tools: Vercel AI SDK `tool()` with discriminated-union `inputSchema`.
+- Inner tools: Vercel AI SDK `tool()` with flat-object `inputSchema` (action enum + per-action params).
 - Everything Zod-validated at the boundary. Custom errors, never generic `Error`.
 - Cost: outer surface is flat (~5 tools); the smart agent's context never grows
   with debugging complexity — that's the design goal.
