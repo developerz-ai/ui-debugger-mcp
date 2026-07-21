@@ -39,6 +39,7 @@ import type {
 } from '../contract.js';
 import type { CaptureSink } from './cdp.js';
 import { CdpCapture } from './cdp.js';
+import { closeOnFailure, createFailure } from './launch.js';
 import { normalizeQuery } from './query.js';
 
 /** System Chrome channel used as the last resort when no binary can be resolved. */
@@ -554,9 +555,19 @@ export class BrowserAdapter implements Adapter {
 
   /** Open the adapter: attach over `cdpUrl` when set, else launch a managed persistent context. */
   static async create(init: BrowserAdapterInit): Promise<BrowserAdapter> {
-    return init.config.cdpUrl
-      ? BrowserAdapter.#attach(init.config, init.onLog)
-      : BrowserAdapter.#launch(init.config, init.profileDir, init.onLog);
+    const { cdpUrl } = init.config;
+    // Nothing raw escapes: launch, connect and post-connect wiring all leave here as
+    // AdapterError (header contract). Cleanup of a half-built adapter happens below.
+    try {
+      return cdpUrl
+        ? await BrowserAdapter.#attach(init.config, init.onLog)
+        : await BrowserAdapter.#launch(init.config, init.profileDir, init.onLog);
+    } catch (error) {
+      throw createFailure(
+        error,
+        cdpUrl ? { mode: 'attach', cdpUrl } : { mode: 'managed', profileDir: init.profileDir },
+      );
+    }
   }
 
   static async #launch(
@@ -572,9 +583,13 @@ export class BrowserAdapter implements Adapter {
       headless: config.headless,
       ...resolveLaunchBinary(config),
     });
-    const page = context.pages()[0] ?? (await context.newPage());
-    const capture = BrowserAdapter.#startCapture(page, onLog);
-    return new BrowserAdapter({ config, context, page, browser: null, mode: 'managed', capture });
+    // Chrome is LIVE from here on and holds the profile lock — a throw past this point
+    // must close it, or every later run of this project fails to launch.
+    return closeOnFailure(context, async () => {
+      const page = context.pages()[0] ?? (await context.newPage());
+      const capture = BrowserAdapter.#startCapture(page, onLog);
+      return new BrowserAdapter({ config, context, page, browser: null, mode: 'managed', capture });
+    });
   }
 
   static async #attach(config: WebTarget, onLog?: CaptureSink): Promise<BrowserAdapter> {
@@ -582,10 +597,14 @@ export class BrowserAdapter implements Adapter {
       throw new AdapterError('attach mode requires `cdpUrl`');
     }
     const browser = await chromium.connectOverCDP(config.cdpUrl);
-    const context = browser.contexts()[0] ?? (await browser.newContext());
-    const page = context.pages()[0] ?? (await context.newPage());
-    const capture = BrowserAdapter.#startCapture(page, onLog);
-    return new BrowserAdapter({ config, context, page, browser, mode: 'attach', capture });
+    // Cleanup here drops the CONNECTION only — same disconnect semantics `close()`
+    // relies on, so a failed attach never stops a browser we did not start.
+    return closeOnFailure(browser, async () => {
+      const context = browser.contexts()[0] ?? (await browser.newContext());
+      const page = context.pages()[0] ?? (await context.newPage());
+      const capture = BrowserAdapter.#startCapture(page, onLog);
+      return new BrowserAdapter({ config, context, page, browser, mode: 'attach', capture });
+    });
   }
 
   /** Wire console/network capture onto the live page before the first navigation. */
