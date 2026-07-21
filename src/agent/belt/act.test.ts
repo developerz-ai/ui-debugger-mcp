@@ -8,6 +8,7 @@ import type {
   WaitOptions,
 } from '../../adapters/contract.js';
 import { AdapterError, AgentError } from '../../errors.js';
+import type { Step } from '../../findings/schema.js';
 import { ActInputSchema, createActTool, runAct, type StepRecorder } from './act.js';
 
 /** Calls the fake adapter recorded, to assert routing + ordering. */
@@ -171,6 +172,91 @@ test('records the post-action frame: screenshot is taken AFTER the action', asyn
   const { recorder } = fakeRecorder();
   await runAct(adapter, recorder, { action: 'click', target: '#x' });
   expect(calls.order).toEqual(['click', 'screenshot']);
+});
+
+// --- Failed steps reach the trail (truthful `ok: false`) --------------------
+
+test('a successful act reports ok:true and never touches the failed-step sink', async () => {
+  const { adapter } = fakeAdapter(button);
+  const { recorder } = fakeRecorder();
+  const failed: Step[] = [];
+  const res = await runAct(adapter, recorder, { action: 'click', target: '#x' }, (s) =>
+    failed.push(s),
+  );
+  expect(res.ok).toBe(true);
+  expect(failed).toEqual([]);
+});
+
+test('an act that throws is recorded as ok:false with the error, then rethrown', async () => {
+  const { adapter } = fakeAdapter(button);
+  adapter.click = async () => {
+    throw new AdapterError('node detached');
+  };
+  const { recorder } = fakeRecorder();
+  const failed: Step[] = [];
+  await expect(
+    runAct(adapter, recorder, { action: 'click', target: '#save' }, (s) => failed.push(s)),
+  ).rejects.toThrow(AdapterError);
+  // labelled from the input (no target-derived label exists once the action threw),
+  // flagged false, error text kept as the note
+  expect(failed).toEqual([{ step: 'click #save', ok: false, note: 'AdapterError: node detached' }]);
+});
+
+test('an act that throws before resolving is labelled from its input', async () => {
+  const { adapter } = fakeAdapter(null);
+  const { recorder } = fakeRecorder();
+  const failed: Step[] = [];
+  await expect(
+    runAct(adapter, recorder, { action: 'click', target: '#missing' }, (s) => failed.push(s)),
+  ).rejects.toThrow(AgentError);
+  expect(failed[0]?.step).toBe('click #missing');
+  expect(failed[0]?.ok).toBe(false);
+  expect(failed[0]?.note).toContain('no element matched');
+});
+
+test('a missing operand is recorded too — labelled by the bare action', async () => {
+  const { adapter } = fakeAdapter(button);
+  const { recorder } = fakeRecorder();
+  const failed: Step[] = [];
+  await expect(runAct(adapter, recorder, { action: 'key' }, (s) => failed.push(s))).rejects.toThrow(
+    AgentError,
+  );
+  expect(failed).toEqual([
+    { step: 'key', ok: false, note: "AgentError: act 'key' requires 'key'" },
+  ]);
+});
+
+test('a failed type step never leaks the typed text into the trail', async () => {
+  const { adapter } = fakeAdapter(button);
+  adapter.type = async () => {
+    throw new AdapterError('input readonly');
+  };
+  const { recorder } = fakeRecorder();
+  const failed: Step[] = [];
+  await expect(
+    runAct(adapter, recorder, { action: 'type', target: '#email', text: 'hunter2@x.test' }, (s) =>
+      failed.push(s),
+    ),
+  ).rejects.toThrow(AdapterError);
+  expect(JSON.stringify(failed)).not.toContain('hunter2');
+});
+
+test('a failed evidence capture is recorded as ok:false under the acted label', async () => {
+  const { adapter } = fakeAdapter(button);
+  const { recorder } = fakeRecorder();
+  const failing: StepRecorder = {
+    ...recorder,
+    saveScreenshot: async () => {
+      throw new AgentError('disk full');
+    },
+  };
+  const failed: Step[] = [];
+  await expect(
+    runAct(adapter, failing, { action: 'click', target: '#x' }, (s) => failed.push(s)),
+  ).rejects.toThrow(AgentError);
+  expect(failed).toEqual([
+    { step: 'click button "Save"', ok: false, note: 'AgentError: disk full' },
+  ]);
 });
 
 test('click with no match → throws AgentError, never clicks or records', async () => {

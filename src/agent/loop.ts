@@ -67,8 +67,8 @@ export interface FinishedStep {
   toolResults: ReadonlyArray<{ toolName: string; output: unknown }>;
 }
 
-/** The `act` result fields lifted into the step trail: its label and the post-action frame. */
-const ActStepSchema = z.object({ label: z.string(), screenshot: z.string() });
+/** The `act` result fields lifted into the step trail: label, outcome, post-action frame. */
+const ActStepSchema = z.object({ label: z.string(), ok: z.boolean(), screenshot: z.string() });
 
 /**
  * `prepareStep`: fold mid-run messages into the next model turn. Drains the inbox
@@ -178,7 +178,12 @@ export function budgetNudge(stepNumber: number, maxSteps: number): string | null
   return `Step budget almost spent: ~${remaining} of ${maxSteps} steps left. Finish exploring and call \`report\` soon with all findings; an unreported run is wasted.`;
 }
 
-/** Lift a finished step's `act` results into ordered step-trail entries (each with its frame). */
+/**
+ * Lift a finished step's `act` results into ordered step-trail entries (each with
+ * its frame). The outcome is the one `act` RECORDED, never assumed — an act that
+ * threw produces no tool result at all and reaches the trail as `ok: false` at
+ * failure time (see {@link FailedStepSink} in `belt/act.ts`).
+ */
 export function stepTrailFrom(
   toolResults: ReadonlyArray<{ toolName: string; output: unknown }>,
 ): Step[] {
@@ -187,7 +192,11 @@ export function stepTrailFrom(
     if (result.toolName !== 'act') continue;
     const parsed = ActStepSchema.safeParse(result.output);
     if (parsed.success) {
-      steps.push({ step: parsed.data.label, ok: true, screenshot: parsed.data.screenshot });
+      steps.push({
+        step: parsed.data.label,
+        ok: parsed.data.ok,
+        screenshot: parsed.data.screenshot,
+      });
     }
   }
   return steps;

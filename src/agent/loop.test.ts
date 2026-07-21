@@ -52,9 +52,9 @@ function fakeInbox(...items: string[]): LoopInbox {
   };
 }
 
-const actResult = (label: string, screenshot: string) => ({
+const actResult = (label: string, screenshot: string, ok = true) => ({
   toolName: 'act',
-  output: { action: 'click', label, screenshot },
+  output: { action: 'click', label, ok, screenshot },
 });
 
 test('foldInstructionsIntoStep returns no override when nothing was ever injected', () => {
@@ -104,6 +104,11 @@ test('stepTrailFrom lifts act results into steps and ignores everything else', (
     { toolName: 'act', output: { malformed: true } },
   ]);
   expect(steps).toEqual([{ step: 'click button "Save"', ok: true, screenshot: '001-save.png' }]);
+});
+
+test('stepTrailFrom carries the recorded ok flag — never hardcodes success', () => {
+  const steps = stepTrailFrom([actResult('click button "Pay"', '002-pay.png', false)]);
+  expect(steps).toEqual([{ step: 'click button "Pay"', ok: false, screenshot: '002-pay.png' }]);
 });
 
 test('progressForStep steps aside for the terminal report step (verdict owned by report)', () => {
@@ -202,7 +207,7 @@ function findingsTracker() {
 /**
  * Build a minimal real belt for integration tests:
  * - observe → empty tree (no step trail)
- * - act     → { action, label, screenshot } so step trail picks it up
+ * - act     → { action, label, ok, screenshot } so step trail picks it up
  * - look    → description (no step trail)
  * - report  → writes verdict via the provided writer and signals stop
  */
@@ -219,6 +224,7 @@ function realBelt(progress: ProgressWriter): BeltTools {
       execute: async (input) => ({
         action: input.action,
         label: `did ${input.action}${input.target ? ` on ${input.target}` : ''}`,
+        ok: true,
         screenshot: '001.png',
       }),
     }),

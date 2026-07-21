@@ -233,15 +233,20 @@ export async function buildSession(
   };
 
   const run: LoopRunner = async ({ inbox, progress, signal }) => {
-    // One trail per run, shared between the loop (which appends each act step) and
-    // the `report` tool (which overlays it as the verdict's authoritative steps), so
-    // the persisted findings and the returned counts derive from the same object.
+    // One trail per run, shared between the loop (which appends each act step), the
+    // `act` tool (which appends the acts that THREW, as `ok: false`) and the `report`
+    // tool (which overlays it as the verdict's authoritative steps), so the persisted
+    // findings and the returned counts derive from the same object.
     const trail: Step[] = [];
     const agent = createDebugAgent({
       model: models.driver,
       tools: {
         observe: withToolLog('observe', createObserveTool(adapter, store), logAgent),
-        act: withToolLog('act', createActTool(adapter, store), logAgent),
+        act: withToolLog(
+          'act',
+          createActTool(adapter, store, (step) => trail.push(step)),
+          logAgent,
+        ),
         look: withToolLog(
           'look',
           models.selfLook
