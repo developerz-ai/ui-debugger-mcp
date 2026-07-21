@@ -56,6 +56,7 @@ Open a debug session: hand the driver agent a goal for a configured target. One 
 | `target` | `string` | yes | Target name from `.ui-debugger-mcp.json` (e.g. `"web"`). Use `describe` to list valid values. |
 | `goal` | `string` | yes | The story — what to accomplish in plain language (e.g. `"log in and add item 3 to cart"`). |
 | `criteria` | `string` | no | Explicit pass/fail rules, one per line. Omit to let the agent judge. |
+| `url` | `string` (URL) | no | Where to point the driver for this run (web targets) — e.g. a local dev server, a preview, or production. Overrides the target's configured url; required when the target has none. |
 | `timeout` | `number` (int, seconds) | no | Wall-clock cap before the run auto-ends and frees the browser/profile. Default: 300 s. Max: 2 147 483 s. |
 
 **Returns** — `{ session_id: string }`.
@@ -112,7 +113,7 @@ Findings {
   bugs     Bug[]
   visual   VisualIssue[]
   summary  string?
-  evidence string?          // workspace-relative path to screenshots / logs dir
+  evidence string?          // absolute path to the stitched replay.mp4, absent when ffmpeg is missing
 }
 ```
 
@@ -132,7 +133,8 @@ Ordered trail of actions the driver took.
 |-------|------|-------------|
 | `step` | `string` | Human-readable action description. |
 | `ok` | `boolean` | Whether the step succeeded. |
-| `note` | `string?` | Extra detail (error message, observation). |
+| `skipped` | `boolean?` | True for a deliberately skipped optional step (e.g. replay video when ffmpeg is absent). Not a failure — `ok` stays `true`; `note` explains why. |
+| `note` | `string?` | Extra detail (error message, observation, or skip reason). |
 | `screenshot` | `string?` | Path to screenshot captured at this step. |
 
 ### `bugs` — `Bug[]`
@@ -162,7 +164,9 @@ Visual/UX feedback from the vision agent.
 
 ### `evidence`
 
-`string | undefined` — Workspace-relative path to the session's evidence directory (`sessions/<id>/`), containing screenshots and logs.
+`string | undefined` — Absolute path to the run's captioned `replay.mp4`, written after the
+verdict. Absent when there were no frames to stitch or ffmpeg isn't installed (a `skipped` step
+explains why — see the `steps` table above).
 
 ---
 

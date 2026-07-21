@@ -16,8 +16,7 @@ for that app. Keyed by the current dir.
 │   └── logs/
 │       ├── console.log        browser / app console
 │       ├── network.log        requests, responses, failures, timings
-│       ├── agent.log          small agent's step-by-step trail
-│       └── cdp.log            raw protocol (deep debugging only)
+│       └── agent.log          small agent's step-by-step trail
 └── state.json                 session state, keyed by cwd
 ```
 
@@ -34,7 +33,6 @@ for that app. Keyed by the current dir.
 | `console.log`       | JS errors a code-only agent can't see. |
 | `network.log`       | The 500s / hangs / bad payloads behind a broken UI. |
 | `agent.log`         | Why the small agent decided pass/fail. Auditable. |
-| `cdp.log`           | Last-resort protocol-level debugging. |
 | `state.json`        | Resume / inspect the cwd-keyed session. |
 
 ## PR replay video

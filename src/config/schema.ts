@@ -65,7 +65,7 @@ export const AndroidTargetSchema = z.strictObject({
   adbSerial: z.string().nullish(), // set → attach to a running device, no start/stop
 });
 
-/** A single target, discriminated on `adapter`. Browser now; desktop/android reserved. */
+/** A single target, discriminated on `adapter`. All three adapters (browser, desktop, android) are operational. */
 export const TargetSchema = z.discriminatedUnion('adapter', [
   WebTargetSchema,
   DesktopTargetSchema,

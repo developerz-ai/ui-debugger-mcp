@@ -107,7 +107,7 @@ managed vs attach: `cdpUrl` (web) / `adbSerial` (android) → attach, never star
 `./tmp/ui-debugger-mcp/<project>/`
 - `chrome-user-data/` — persistent profile (login, cookies, storage).
 - `sessions/<id>/` — `story.md`, `screenshots/`, `findings.json`, `logs/`.
-- `logs/` — `console.log`, `network.log`, `agent.log`, `cdp.log`.
+- `logs/` — `console.log`, `network.log`, `agent.log`.
 - `state.json` — session keyed by cwd.
 
 ## Login bypass (captcha)
