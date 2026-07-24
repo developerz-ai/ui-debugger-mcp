@@ -50,3 +50,21 @@ jobs:
 
       - name: publish
         run: npm publish
+
+      # MCP Registry, on the SAME OIDC identity as npm above — no token, no
+      # interactive login. `github-oidc` authorizes the `io.github.developerz-ai/*`
+      # namespace from this run's repository owner, which is why the server.json
+      # name must stay under that namespace.
+      #
+      # Must run AFTER `npm publish`: the registry resolves the npm package named in
+      # server.json and rejects a version it cannot find, so publishing here first
+      # would fail on a package that does not exist yet.
+      - name: install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+
+      - name: publish to MCP Registry
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

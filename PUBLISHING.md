@@ -42,25 +42,38 @@ On npmjs.com:
 2. Publish a GitHub Release (or **Actions → release → Run workflow**).
 3. The workflow installs, builds, and runs `npm publish` over OIDC. No token.
 
-## Registry publication (mcp-publisher)
+## Registry publication (automated, same OIDC run)
 
 This package is registered in the official [MCP Registry](https://modelcontextprotocol.io/registry).
+`release.yml` publishes it right after `npm publish`, in the same job, using
+`mcp-publisher login github-oidc` — the identity GitHub already minted for npm.
+**No token, no interactive login, nothing to do by hand.**
 
-Before the first registry publish:
+Ordering matters: the registry resolves the npm package named in `server.json`
+and rejects a version it cannot find, so the registry step must follow npm.
+
+`server.json` (committed) holds the registry metadata — `registryType: npm`,
+`transport: stdio`, environment variables with `isSecret` markers. Its `version`
+must be bumped alongside `package.json`; `mcp-publisher validate` checks the
+schema without publishing.
+
+The namespace `io.github.developerz-ai/*` is authorized by the GitHub org that
+owns this repo, which is what makes OIDC sufficient — keep the `name` in
+`server.json` under it.
+
+### The CLI
+
+`mcp-publisher` is a **Go binary** from
+[`modelcontextprotocol/registry`](https://github.com/modelcontextprotocol/registry/releases),
+not an npm package. `npx mcp-publisher` fetches an unrelated package that starts
+a stdio MCP server and does nothing useful here. To run it locally:
 
 ```sh
-npx mcp-publisher init                 # Create or update .mcp-publisher.json
-npx mcp-publisher login                # Authenticate (one-time)
+curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+./mcp-publisher validate               # schema check, no auth needed
+./mcp-publisher login github           # interactive, only for a manual publish
+./mcp-publisher publish
 ```
-
-On each release, after npm publish completes:
-
-```sh
-npx mcp-publisher publish              # Submit to the registry
-```
-
-The `server.json` file (committed to git) contains the registry metadata (`registryType: npm`,
-`transport: stdio`, environment variables with `isSecret` markers).
 
 ## Requirements baked into the workflow
 
