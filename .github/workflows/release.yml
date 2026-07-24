@@ -48,8 +48,19 @@ jobs:
       - name: build
         run: bun run build
 
+      # Skip if this version is already on npm, so the job stays re-runnable: a run
+      # that published to npm but failed afterwards (or a workflow_dispatch to
+      # publish only the registry half) must not die here on E403 "cannot publish
+      # over an existing version" before reaching the steps that still have work.
       - name: publish
-        run: npm publish
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version is already on npm — skipping publish"
+          else
+            npm publish
+          fi
 
       # MCP Registry, on the SAME OIDC identity as npm above — no token, no
       # interactive login. `github-oidc` authorizes the `io.github.developerz-ai/*`
