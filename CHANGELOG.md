@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-07-24
+
+Release automation only — the published package is unchanged from 1.3.0
+(`files` is `dist`/`README`/`LICENSE`, none of which moved).
+
+### Changed
+
+- **MCP Registry publishing runs over OIDC in the same release job.** It follows `npm publish` and authenticates with `mcp-publisher login github-oidc` — the identity GitHub already mints for npm trusted publishing, so there is no token and no interactive login left in the release path. Ordering is load-bearing: the registry resolves the npm package named in `server.json` and rejects a version it cannot find.
+- **The release job is re-runnable.** It skips `npm publish` when the version is already on npm, so a run that published and then failed downstream can be retried, and `workflow_dispatch` can publish only the registry half. Previously any retry died on E403 before reaching the remaining steps.
+
+### Fixed
+
+- **`PUBLISHING.md` documented the wrong tool.** It told you to run `npx mcp-publisher`, which fetches an unrelated npm package that starts a stdio MCP server and does nothing useful here. The real CLI is a Go binary released from `modelcontextprotocol/registry`; the doc now says so, and notes that `mcp-publisher validate` schema-checks `server.json` without auth.
+
 ## [1.3.0] - 2026-07-24
 
 Found by dogfooding: a separate `claude -p` consumer drove this server against a

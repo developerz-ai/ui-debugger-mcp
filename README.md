@@ -215,6 +215,23 @@ You can also drive it **headless** from a script with `claude -p` — see
 [`docs/claude/SKILL.md`](docs/claude/SKILL.md) for the CLI recipe (MCP config,
 allowed tools, output formats).
 
+### What a run captures (web)
+
+You get findings, but the agent's evidence is what makes them actionable:
+
+| | |
+|---|---|
+| **HTTP** | Whole exchanges — method, url, status, `durationMs`, and for `fetch`/`xhr` the request **and response bodies** plus headers. A `4xx` carries the server's own reason (`{"error":"password too short"}`), not just a status. Credential header values are redacted to `<redacted, N chars>`: presence stays diagnostic, the secret never reaches the model, the logs, or your transcript. |
+| **DOM** | Roles, names, bounds, live `value`/`checked` on form controls, `data-testid`, and WCAG contrast per text node — so "is the box ticked?" and "is this text readable?" are answered structurally, without spending vision. |
+| **iframes** | Embedded documents are read too. Nodes carry `frame`, and their bounds are page coordinates, so clicking works the same as anywhere else. |
+| **Tabs** | A `target="_blank"` click is noticed and followable, instead of reading as "nothing happened". |
+| **Console** | Errors and uncaught exceptions, with source locations. |
+| **Frames** | An ordered screenshot per action, stitched into `replay.mp4`. |
+
+Static assets are held back from a default network read — on a Vite dev server
+they outnumber real API calls ~15:1 — with a count of what was hidden and the
+filter to see them. Failed requests are never hidden, whatever their type.
+
 ### CLI — check or stop a run
 
 The `ui-debugger-mcp` binary doubles as a control CLI for the active run
