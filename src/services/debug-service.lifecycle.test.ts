@@ -11,7 +11,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ResolvedConfig } from '../config/load.js';
-import { AdapterError, SessionBusyError, SessionNotFoundError } from '../errors.js';
+import { AdapterError, ConfigError, SessionBusyError, SessionNotFoundError } from '../errors.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { SessionManager } from '../session/manager.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
@@ -287,6 +287,9 @@ function spyState(opts: { recordFails?: boolean; foreign?: () => ForeignRun | nu
     async clear() {
       clears += 1;
     },
+    async foreignFindings() {
+      return null;
+    },
     async foreignRun() {
       foreignReads += 1;
       return opts.foreign?.() ?? null;
@@ -334,7 +337,9 @@ test('endActive clears state.json even when the session close throws', async () 
 
 test('start refuses when another live server holds a run for this cwd', async () => {
   const { build, log } = fakeBuilder();
-  const { state } = spyState({ foreign: () => ({ pid: 4242, sessionId: 'other-run' }) });
+  const { state } = spyState({
+    foreign: () => ({ pid: 4242, sessionId: 'other-run', sessionDir: '/tmp/foreign' }),
+  });
   const svc = makeService(build, { state });
 
   const err = await svc.start({ target: 'web', goal: 'x' }).catch((e: unknown) => e);
@@ -363,7 +368,7 @@ test('a stale breadcrumb from a dead server never blocks a start', async () => {
 
 test('the cross-process gate does not wedge the project once the other server exits', async () => {
   const { build } = fakeBuilder();
-  let live: ForeignRun | null = { pid: 4242, sessionId: 'other-run' };
+  let live: ForeignRun | null = { pid: 4242, sessionId: 'other-run', sessionDir: '/tmp/foreign' };
   const { state } = spyState({ foreign: () => live });
   const svc = makeService(build, { state });
 
@@ -373,4 +378,64 @@ test('the cross-process gate does not wedge the project once the other server ex
   // A stuck in-flight guard would surface a second SessionBusyError here instead.
   const { session_id } = await svc.start({ target: 'web', goal: 'x' });
   expect(manager.get(CWD).id).toBe(session_id);
+});
+
+// --- stale config -----------------------------------------------------------
+
+test('start refuses to run on config that changed after boot, naming the fix', async () => {
+  const stale = new DebugService({
+    manager: new SessionManager<Session>(),
+    config: CONFIG,
+    cwd: CWD,
+    // A stale-config start must die BEFORE anything is built or launched.
+    build: async () => {
+      throw new Error('build must never be reached');
+    },
+    configChanged: () => true,
+  });
+  const failure = stale.start({ target: 'web', goal: 'g' });
+  await expect(failure).rejects.toThrow(ConfigError);
+  // The message has to name the action, or the caller just edits and retries.
+  await expect(failure).rejects.toThrow(/[Rr]estart/);
+});
+
+// --- foreign run visibility -------------------------------------------------
+
+test('get_findings serves a foreign run instead of denying it exists', async () => {
+  const foreignFindings = {
+    status: 'failed',
+    steps: [],
+    bugs: [],
+    visual: [],
+    summary: 'the other server hit a wall',
+  };
+  const service = new DebugService({
+    manager: new SessionManager<Session>(),
+    config: CONFIG,
+    cwd: CWD,
+    build: async () => {
+      throw new Error('unused');
+    },
+    state: {
+      async record() {},
+      async clear() {},
+      async foreignRun() {
+        return { pid: 999, sessionId: 'other-1', sessionDir: '/tmp/other' };
+      },
+      async foreignFindings(sessionId: string) {
+        return sessionId === 'other-1' ? foreignFindings : null;
+      },
+    },
+  });
+
+  const found = await service.getFindings({ session_id: 'other-1' });
+  expect(found.summary).toBe('the other server hit a wall');
+  expect(found.status).toBe('failed');
+
+  // `fields` still projects, so the two paths read alike.
+  const projected = await service.getFindings({ session_id: 'other-1', fields: ['status'] });
+  expect(projected).toEqual({ status: 'failed' });
+
+  // An unrelated id is still a hard miss — this is a targeted fallback, not a catch-all.
+  await expect(service.getFindings({ session_id: 'nope' })).rejects.toThrow(SessionNotFoundError);
 });

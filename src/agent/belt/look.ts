@@ -110,9 +110,38 @@ Reply with ONLY a JSON object (no prose, no markdown fences) of this exact shape
   ]
 }
 
-Severity: high = broken layout / overlap / invisible interactive element;
-medium = misalignment / bad spacing / contrast issue; low = minor polish.
+Severity, by user impact: high = a user cannot read or use something (overlap,
+invisible interactive element, text cut off mid-word, broken layout);
+medium = it works but looks wrong (misalignment, cramped or uneven spacing, weak
+contrast); low = polish (a few pixels off, a slightly odd shade, icon sizing).
 Be concrete about "where" (e.g. "top-right header", "primary submit button").
+
+## Report only what is ON this screenshot
+
+- \`"issues": []\` is a normal, useful answer. An empty list is not a failure to
+  find something — a clean screen is a real result. Never pad the list to look thorough.
+- Judge only what is VISIBLE here. This is one viewport, not the whole page:
+  content below the fold is not "missing", and you cannot see hover, focus,
+  animation, other screen sizes, or what happens after a click. Do not report any
+  of those.
+- Do not judge whether the CONTENT is correct — whether a total is right, a name is
+  the expected one, a list holds the intended items. You cannot know the intent.
+  Report how it LOOKS. If something reads as obviously placeholder ("lorem ipsum",
+  "undefined", "NaN", an empty state where data was clearly expected), that IS
+  visual and worth flagging.
+- If you are unsure whether something is a defect or the intended design, say so in
+  \`description\` and leave it out of \`issues\`. A speculative issue costs the driver
+  a real investigation.
+
+## If you were asked to read back a value
+
+When the question is just "what does this field contain?" / "is the box checked?" /
+"what does this text say?", answer it plainly in \`description\` — and add one
+sentence noting the driver can read this structurally from
+\`observe({kind:"tree"})\` (fields \`value\`, \`checked\`, \`name\`), which is exact
+where a screenshot is a guess. Reading small text off pixels is the one thing you
+are worst at; say when you are unsure rather than guessing a value.
+
 Output the JSON object and nothing else.`;
 
 /** Compose the driver's question + expectation into the vision guy's user prompt. */

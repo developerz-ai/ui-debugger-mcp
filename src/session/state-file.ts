@@ -14,7 +14,7 @@
  */
 
 import { mkdir, readFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomic } from './atomic-write.js';
 import { captureIdentity, ownerAlive, ProcessIdentitySchema } from './process-identity.js';
@@ -80,6 +80,8 @@ export interface ForeignRun {
   pid: number;
   /** The run it has active. */
   sessionId: string;
+  /** Where that run writes its `findings.json` — how we read a run we do not own. */
+  sessionDir: string;
 }
 
 /** The seam {@link DebugService} writes run lifecycle through (no-op in tests). */
@@ -93,6 +95,16 @@ export interface StatePort {
    * cross-process half of the one-run gate. `null` when nobody else owns it.
    */
   foreignRun(): Promise<ForeignRun | null>;
+
+  /**
+   * The findings a foreign run has flushed to disk, by session id — `null` when
+   * that id is not the foreign run, or nothing readable is there yet.
+   *
+   * Without this, a second client is told "pid N holds session S" by `start_debug`
+   * and "no session S exists" by `get_findings` — two answers that cannot both be
+   * true, and no way to learn whether S is still working or long dead.
+   */
+  foreignFindings(sessionId: string): Promise<unknown | null>;
 }
 
 /** Default port: writes nothing, sees nobody (keeps the service fs-free under unit test). */
@@ -100,6 +112,9 @@ export const noopStatePort: StatePort = {
   async record() {},
   async clear() {},
   async foreignRun() {
+    return null;
+  },
+  async foreignFindings() {
     return null;
   },
 };
@@ -151,7 +166,18 @@ export class FileStatePort implements StatePort {
     if (state?.status !== 'running') return null; // absent, malformed, or already terminal
     if (state.pid === this.#pid) return null; // our own breadcrumb — the in-process gate rules
     if (!ownerAlive(state.pid, state.identity).alive) return null; // crashed server, stale file
-    return { pid: state.pid, sessionId: state.sessionId };
+    return { pid: state.pid, sessionId: state.sessionId, sessionDir: state.sessionDir };
+  }
+
+  /** Read the foreign run's on-disk findings; `null` unless `sessionId` is that run. */
+  async foreignFindings(sessionId: string): Promise<unknown | null> {
+    const foreign = await this.foreignRun();
+    if (foreign === null || foreign.sessionId !== sessionId) return null;
+    try {
+      return JSON.parse(await readFile(join(foreign.sessionDir, 'findings.json'), 'utf8'));
+    } catch {
+      return null; // not flushed yet, or unreadable — the caller falls back to its own error
+    }
   }
 }
 

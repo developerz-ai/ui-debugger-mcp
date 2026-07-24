@@ -259,10 +259,21 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
    * back under the settled terminal `status`, never a stale `running`.
    */
   async #ensureSummary(): Promise<void> {
-    if (this.#summarize === undefined) return;
     try {
       const findings = await this.#findingsStore.tryReadFindings();
       if (findings === null || hasText(findings.summary)) return;
+      // The driver never called `report` — the persisted verdict is still
+      // `running` even though the loop is over (step cap, or it simply stopped).
+      // There is nothing to condense, and a summary model handed an empty
+      // findings set will INVENT a cause: an observed run drove 30 clean steps
+      // and got back "the run failed due to a non-functional crash". A fabricated
+      // root cause is worse than none — it sends the caller hunting a bug that
+      // does not exist. State the real outcome instead.
+      if (findings.status === 'running') {
+        await this.#writeUnreportedSummary(findings);
+        return;
+      }
+      if (this.#summarize === undefined) return;
       // Summarize the terminal record: `#verdict()` may have settled `status` to a
       // value the persisted findings don't yet carry (e.g. `failed` over a stale
       // `running`), so the digest must reflect the final verdict, not the disk copy.
@@ -275,6 +286,21 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
     } catch {
       // Fail soft: the verdict stands; the driver's own summary (if any) is the fallback.
     }
+  }
+
+  /**
+   * Record, as the summary, the fact that the run produced no verdict — naming
+   * what actually happened and what to do about it, with no invented cause.
+   */
+  async #writeUnreportedSummary(findings: Findings): Promise<void> {
+    const steps = findings.steps ?? [];
+    const failed = steps.filter((step) => step.ok === false).length;
+    const summary =
+      'Run ended WITHOUT a verdict: the driver used up its step budget without calling `report`, ' +
+      `so no findings were recorded. ${steps.length} step(s) ran (${failed} failed) — read the step ` +
+      'trail and screenshots for what it actually did. This is NOT a clean pass and NOT evidence of ' +
+      'a crash: the run was simply cut short. Re-run with a narrower goal, or raise `timeout`.';
+    await this.#findingsStore.writeFindings({ ...findings, status: this.#status, summary });
   }
 
   /**

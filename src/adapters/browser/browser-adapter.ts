@@ -18,7 +18,7 @@
 
 import { existsSync } from 'node:fs';
 import { URL } from 'node:url';
-import type { Browser, BrowserContext, Page } from 'playwright-core';
+import type { Browser, BrowserContext, Frame, Locator, Page } from 'playwright-core';
 import { chromium } from 'playwright-core';
 import type { WebTarget } from '../../config/schema.js';
 import { AdapterError, UiDebuggerError } from '../../errors.js';
@@ -34,6 +34,7 @@ import type {
   Query,
   ScrollDirection,
   ScrollOptions,
+  TabInfo,
   WaitOptions,
 } from '../contract.js';
 import { capToLimit } from '../limit.js';
@@ -188,7 +189,49 @@ function toNode(node: RawNode): Node {
   };
   if (node.testid) out.testid = node.testid;
   if (node.style) out.style = node.style;
+  if (node.frame) out.frame = node.frame;
+  // Empty string and `false` are real answers here ("the field is empty", "the box
+  // is unchecked") — test for presence, never truthiness.
+  if (node.value !== undefined) out.value = node.value;
+  if (node.checked !== undefined) out.checked = node.checked;
   return out;
+}
+
+/**
+ * Where a frame's viewport sits in page coordinates: `{x:0,y:0}` for the main
+ * document, the iframe element's position for a child, `null` when the frame is
+ * gone or not rendered (detached, `display:none`) and must be skipped.
+ */
+async function frameOffset(frame: Frame): Promise<{ x: number; y: number } | null> {
+  if (frame.parentFrame() === null) return { x: 0, y: 0 };
+  try {
+    const element = await frame.frameElement();
+    const box = await element.boundingBox();
+    return box ? { x: box.x, y: box.y } : null;
+  } catch {
+    return null; // detached between listing and reading
+  }
+}
+
+/**
+ * Translate a node read inside a frame into page coordinates and stamp which
+ * frame it came from.
+ *
+ * Bounds arrive relative to the frame's own viewport; clicks dispatch against
+ * the page. Without the shift, every click on embedded content would land at the
+ * wrong place on the page — silently, since the coordinates stay plausible.
+ */
+function placeInPage(node: RawNode, offset: { x: number; y: number }, frame: Frame): RawNode {
+  if (frame.parentFrame() === null) return node;
+  return {
+    ...node,
+    bounds: {
+      ...node.bounds,
+      x: node.bounds.x + offset.x,
+      y: node.bounds.y + offset.y,
+    },
+    frame: frame.url(),
+  };
 }
 
 interface AdapterHandles {
@@ -226,7 +269,8 @@ export interface BrowserAdapterInit {
 export class BrowserAdapter implements Adapter {
   readonly #config: WebTarget;
   readonly #context: BrowserContext;
-  readonly #page: Page;
+  /** The tab currently driven — reassigned by {@link BrowserAdapter.selectTab}. */
+  #page: Page;
   readonly #browser: Browser | null;
   readonly #mode: 'managed' | 'attach';
   readonly #capture: CdpCapture;
@@ -331,7 +375,7 @@ export class BrowserAdapter implements Adapter {
   async click(target: NodeRef): Promise<void> {
     await this.#run('click', async () => {
       if (typeof target === 'string') {
-        await this.#page.locator(normalizeQuery(target)).first().click();
+        await (await this.#locate(target)).click();
         return;
       }
       await this.#clickBoundsCenter(target);
@@ -344,7 +388,7 @@ export class BrowserAdapter implements Adapter {
     // than `fill()` so it appends like the coordinate path instead of replacing.
     await this.#run('type', async () => {
       if (typeof target === 'string') {
-        await this.#page.locator(normalizeQuery(target)).first().click();
+        await (await this.#locate(target)).click();
       } else {
         await this.#clickBoundsCenter(target);
       }
@@ -454,16 +498,36 @@ export class BrowserAdapter implements Adapter {
     });
   }
 
-  /** Build, scope, filter, and cap the normalized node list shared by `find`/`readState`. */
+  /**
+   * Build, scope, filter, and cap the normalized node list shared by `find`/`readState`.
+   *
+   * Reads EVERY frame of the page, not just the main document: a page-level
+   * locator stops at an iframe boundary, so anything embedded (payment fields,
+   * editors, consent screens) was previously invisible — the agent saw an empty
+   * region and had no way to learn why. Child-frame bounds are translated into
+   * page coordinates, so a coordinate click needs no frame awareness at all.
+   */
   async #collect(opts: Query, defaultLimit?: number): Promise<Node[]> {
     // Agent queries are role+name / plain text (what the tree shows), not raw CSS —
     // normalize them onto a Playwright engine; an absent query reads the default set.
     const selector = opts.query ? normalizeQuery(opts.query) : DEFAULT_SELECTOR;
-    const scope =
-      typeof opts.within === 'string'
-        ? this.#page.locator(normalizeQuery(opts.within))
-        : this.#page;
-    let nodes = await scope.locator(selector).evaluateAll<RawNode[]>(NODE_EXTRACTOR);
+    const within = typeof opts.within === 'string' ? normalizeQuery(opts.within) : undefined;
+
+    let nodes: RawNode[] = [];
+    for (const frame of this.#page.frames()) {
+      const offset = await frameOffset(frame);
+      // A frame that detached mid-read (navigation, ad slot recycling) is not an
+      // error — it is one document out of many, and the rest still answer.
+      if (offset === null) continue;
+      const scope = within ? frame.locator(within) : frame;
+      let found: RawNode[];
+      try {
+        found = await scope.locator(selector).evaluateAll<RawNode[]>(NODE_EXTRACTOR);
+      } catch {
+        continue;
+      }
+      nodes.push(...found.map((node) => placeInPage(node, offset, frame)));
+    }
 
     if (opts.within && typeof opts.within !== 'string') {
       const region = opts.within.bounds;
@@ -472,6 +536,62 @@ export class BrowserAdapter implements Adapter {
     nodes = applyNodeFilters(nodes, opts.filters);
 
     return capToLimit(nodes, opts.limit ?? defaultLimit).map(toNode);
+  }
+
+  /**
+   * A locator for `selector` in whichever frame actually contains it — the main
+   * document first, then every child frame.
+   *
+   * `page.locator()` never crosses into an iframe, so a selector copied straight
+   * off an embedded node would simply fail to resolve. Falling back through the
+   * frames keeps `act` working on a target the agent can plainly see in the tree.
+   */
+  async #locate(selector: string): Promise<Locator> {
+    const normalized = normalizeQuery(selector);
+    const frames = this.#page.frames();
+    for (const frame of frames) {
+      const locator = frame.locator(normalized).first();
+      try {
+        if ((await locator.count()) > 0) return locator;
+      } catch {
+        // Detached frame — try the next one.
+      }
+    }
+    // Nothing matched anywhere: hand back the main-frame locator so the caller's
+    // own action reports the miss with Playwright's message, as it always did.
+    return this.#page.locator(normalized).first();
+  }
+
+  async tabs(): Promise<TabInfo[]> {
+    return this.#run('tabs', async () => {
+      const pages = this.#context.pages();
+      return Promise.all(
+        pages.map(async (page, index) => ({
+          index,
+          url: page.url(),
+          // A tab opened a moment ago may not have a document yet.
+          title: await page.title().catch(() => ''),
+          active: page === this.#page,
+        })),
+      );
+    });
+  }
+
+  async selectTab(index: number): Promise<void> {
+    await this.#run('selectTab', async () => {
+      const pages = this.#context.pages();
+      const page = pages[index];
+      if (!page) {
+        throw new AdapterError(
+          `no tab at index ${index} — ${pages.length} open (0…${Math.max(0, pages.length - 1)})`,
+        );
+      }
+      this.#page = page;
+      // Capture is page-scoped: without this the new tab records no console or
+      // network activity at all, while the old one keeps recording unseen.
+      this.#capture.rebind(page);
+      await page.bringToFront();
+    });
   }
 
   /** Resolve a scroll `within` scope to an on-screen rectangle (Node bounds, or a located selector). */

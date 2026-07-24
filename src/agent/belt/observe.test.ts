@@ -188,20 +188,89 @@ test('console → returns entries + count, forwards filters/limit', async () => 
   expect(rec.console).toEqual({ filters: { level_eq: 'error' }, limit: 10 });
 });
 
-test('console/network default to a bounded tail — chatty pages never flood context', async () => {
+test('console defaults to a bounded tail — chatty pages never flood context', async () => {
   const { adapter, rec } = fakeAdapter({});
   await runObserve(adapter, recorder(), { kind: 'console' });
-  await runObserve(adapter, recorder(), { kind: 'network', filters: { status_gte: 400 } });
   expect(rec.console).toEqual({ filters: undefined, limit: 50 });
-  expect(rec.network).toEqual({ filters: { status_gte: 400 }, limit: 50 });
 });
 
-test('an explicit log limit wins over the default — including 0', async () => {
+test('an explicit console limit wins over the default', async () => {
   const { adapter, rec } = fakeAdapter({});
   await runObserve(adapter, recorder(), { kind: 'console', limit: 200 });
   expect(rec.console?.limit).toBe(200);
-  await runObserve(adapter, recorder(), { kind: 'network', limit: 0 });
-  expect(rec.network?.limit).toBe(0);
+});
+
+// --- network: the asset default + its own cap -------------------------------
+
+/** A captured exchange; `ok` follows the status unless overridden. */
+const net = (over: Partial<NetworkEntry>): NetworkEntry => ({
+  method: 'GET',
+  url: 'http://x/a',
+  status: 200,
+  ok: true,
+  timestamp: 0,
+  ...over,
+});
+
+/** One API call buried in `n` script loads — the shape of any dev-server page. */
+const noisy = (scripts: number): NetworkEntry[] => [
+  net({ url: 'http://x/api/todos', resourceType: 'fetch' }),
+  ...Array.from({ length: scripts }, (_, i) =>
+    net({ url: `http://x/src/c${i}.tsx`, resourceType: 'script' }),
+  ),
+];
+
+test('network reads the adapter uncapped — the cap is applied after assets drop', async () => {
+  // Capping in the adapter would spend the whole budget on scripts and leave the
+  // one API call outside it: the exact failure this ordering exists to prevent.
+  const { adapter, rec } = fakeAdapter({ network: noisy(60) });
+  const res = await runObserve(adapter, recorder(), { kind: 'network' });
+  expect(rec.network).toEqual({ filters: undefined });
+  if (res.kind !== 'network') throw new Error('expected network result');
+  expect(res.entries.map((e) => e.url)).toEqual(['http://x/api/todos']);
+  expect(res.hidden).toBe(60);
+  expect(res.hint).toContain('resource_in');
+});
+
+test('network keeps failed requests of any type — a 404 asset is still a bug', async () => {
+  const { adapter } = fakeAdapter({
+    network: [
+      net({ url: 'http://x/logo.png', resourceType: 'image', status: 404, ok: false }),
+      net({ url: 'http://x/app.css', resourceType: 'stylesheet' }),
+    ],
+  });
+  const res = await runObserve(adapter, recorder(), { kind: 'network' });
+  if (res.kind !== 'network') throw new Error('expected network result');
+  expect(res.entries.map((e) => e.url)).toEqual(['http://x/logo.png']);
+  expect(res.hidden).toBe(1);
+});
+
+test('an explicit resource_in disables the asset default', async () => {
+  const { adapter } = fakeAdapter({ network: noisy(3) });
+  const res = await runObserve(adapter, recorder(), {
+    kind: 'network',
+    filters: { resource_in: ['script'] },
+  });
+  if (res.kind !== 'network') throw new Error('expected network result');
+  // The adapter's own filter is faked out here; what matters is that observe
+  // added no second opinion — every row it was handed came back.
+  expect(res.entries.length).toBe(4);
+  expect(res.hidden).toBeUndefined();
+});
+
+test('an explicit network limit wins over the default — including 0', async () => {
+  const { adapter } = fakeAdapter({ network: noisy(0) });
+  const zero = await runObserve(adapter, recorder(), { kind: 'network', limit: 0 });
+  if (zero.kind !== 'network') throw new Error('expected network result');
+  expect(zero.count).toBe(0);
+});
+
+test('network reports no hidden count when nothing was held back', async () => {
+  const { adapter } = fakeAdapter({ network: noisy(0) });
+  const res = await runObserve(adapter, recorder(), { kind: 'network' });
+  if (res.kind !== 'network') throw new Error('expected network result');
+  expect(res.hidden).toBeUndefined();
+  expect(res.hint).toBeUndefined();
 });
 
 test('tree limit is NOT defaulted — the adapter owns the tree cap', async () => {
@@ -322,4 +391,27 @@ test('tree with a JSON-string within scopes the adapter read by the parsed node'
   const { adapter, rec } = fakeAdapter({ nodes: [sampleNode] });
   await runObserve(adapter, recorder(), { kind: 'tree', within: JSON.stringify(sampleNode) });
   expect(rec.readState?.within).toEqual(sampleNode);
+});
+
+// --- tabs channel -----------------------------------------------------------
+
+test('observe kind:"tabs" lists the target’s tabs', async () => {
+  const { adapter } = fakeAdapter({});
+  const withTabs: Adapter = {
+    ...adapter,
+    tabs: async () => [
+      { index: 0, url: 'http://x/', title: 'Home', active: true },
+      { index: 1, url: 'http://x/popup', title: 'Popup', active: false },
+    ],
+  };
+  const res = await runObserve(withTabs, recorder(), { kind: 'tabs' });
+  if (res.kind !== 'tabs') throw new Error('expected tabs result');
+  expect(res.count).toBe(2);
+  expect(res.tabs[1]?.url).toBe('http://x/popup');
+});
+
+test('observe kind:"tabs" fails loud on a target with no tab concept', async () => {
+  const { adapter } = fakeAdapter({});
+  // Desktop/android expose no `tabs` — say so rather than inventing one.
+  await expect(runObserve(adapter, recorder(), { kind: 'tabs' })).rejects.toThrow(AgentError);
 });

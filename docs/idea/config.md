@@ -55,8 +55,8 @@ Per-project. Lives in the repo, travels with it. Describes the app + targets.
 ```jsonc
 {
   "models": {                                    // per-role, swappable — see models.md
-    "driver": "deepseek/deepseek-v4-flash#uptime",  // fast guy — controls (blind, text)
-    "vision": "z-ai/glm-5v-turbo",                  // vision guy — describes screenshots
+    "driver": "deepseek/deepseek-v4-flash",        // fast guy — controls (blind, text)
+    "vision": "qwen/qwen3-vl-32b-instruct",        // vision guy — describes screenshots
     "summary": "deepseek/deepseek-v4-flash"         // optional — compress findings
   },
   "workspace": "./tmp/ui-debugger-mcp",
@@ -120,8 +120,8 @@ Rules:
 2. `.ui-debugger-mcp.json` (project)
 3. env (`OPENAI_API_KEY`, `OPENAI_BASE_URL`)
 4. built-in defaults — managed + headless web, OpenRouter base url, and:
-   - `driver` → `deepseek/deepseek-v4-flash#uptime` (text)
-   - `vision` → `z-ai/glm-5v-turbo` (image)
+   - `driver` → `deepseek/deepseek-v4-flash` (text)
+   - `vision` → `qwen/qwen3-vl-32b-instruct` (image)
    - `summary` → `deepseek/deepseek-v4-flash` (text)
 
 All Zod-validated. Bad config fails fast and loud.
@@ -139,9 +139,11 @@ We talk to **any OpenAI-compatible endpoint**: one `OPENAI_BASE_URL` +
 `OPENAI_API_KEY`. No vendor lock-in (same posture as `../ai-task-master`).
 
 - **OpenRouter** (default base url) — one key reaches every provider; model
-  strings are `provider/model`, with optional routing suffixes
-  (e.g. `deepseek/deepseek-v4-flash#uptime` — `#uptime` is OpenRouter routing,
-  passed through verbatim).
+  strings are `provider/model`, with optional routing suffixes passed through
+  verbatim (`:floor` cheapest, `:nitro` fastest). Suffixes are NOT free-form: a
+  `#…` suffix is rejected outright (`… is not a valid model ID`, HTTP 400), so
+  the shipped defaults are plain catalog ids. If a run dies at step zero with
+  that message, the model string in your config is the thing to fix.
 - **z.ai, DeepSeek, OpenAI, local (vLLM/Ollama), …** — point `OPENAI_BASE_URL`
   at their OpenAI-compatible URL and use that provider's model names.
 
@@ -149,8 +151,8 @@ We talk to **any OpenAI-compatible endpoint**: one `OPENAI_BASE_URL` +
 
 | Role | Default | Why |
 |------|---------|-----|
-| `driver`  | `deepseek/deepseek-v4-flash#uptime` | fast, cheap, text — the high-frequency click loop |
-| `vision`  | `z-ai/glm-5v-turbo` | multimodal — describes screenshots, judges looks |
+| `driver`  | `deepseek/deepseek-v4-flash` | fast, cheap, text — the high-frequency click loop |
+| `vision`  | `qwen/qwen3-vl-32b-instruct` | multimodal — describes screenshots, judges looks |
 | `summary` | `deepseek/deepseek-v4-flash` | compress findings for the smart agent |
 
 Override any role in `.ui-debugger-mcp.json`. Cheap fast model drives; the

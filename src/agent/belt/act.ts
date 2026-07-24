@@ -29,13 +29,21 @@
 
 import { tool } from 'ai';
 import { z } from 'zod';
-import type { Adapter, Node } from '../../adapters/contract.js';
+import type { Adapter, Node, TabInfo } from '../../adapters/contract.js';
 import { AgentError } from '../../errors.js';
 import type { LogChannel } from '../../session/findings-store.js';
 import type { ActTrail } from './trail.js';
 
-/** The six action verbs `act` routes to the shared contract. */
-export const ACT_ACTIONS = ['click', 'type', 'key', 'scroll', 'navigate', 'wait'] as const;
+/** The action verbs `act` routes to the shared contract. */
+export const ACT_ACTIONS = [
+  'click',
+  'type',
+  'key',
+  'scroll',
+  'navigate',
+  'wait',
+  'switch_tab',
+] as const;
 
 /**
  * `act` input — ONE flat object the driver fills per call: `action` picks the
@@ -50,14 +58,20 @@ export const ACT_ACTIONS = ['click', 'type', 'key', 'scroll', 'navigate', 'wait'
  * text" out of the schema and into a loud runtime check.
  */
 export const ActInputSchema = z.object({
-  action: z.enum(ACT_ACTIONS).describe('what to do: click | type | key | scroll | navigate | wait'),
+  action: z
+    .enum(ACT_ACTIONS)
+    .describe('what to do: click | type | key | scroll | navigate | wait | switch_tab'),
   target: z
     .string()
     .optional()
     .describe(
-      'what to act on — CSS, role+name (button "Save"), or visible text (web); navigate: URL/window/activity; wait: selector to await (required unless networkIdle); scroll: region to scroll within (optional)',
+      'what to act on — CSS, role+name (button "Save"), or visible text (web); navigate: URL/window/activity; wait: selector to await (required unless networkIdle); scroll: region to scroll within (optional); switch_tab: tab index from observe({kind:"tabs"})',
     ),
   text: z.string().optional().describe('text to type (action=type)'),
+  clear: z
+    .boolean()
+    .optional()
+    .describe('replace the field contents instead of appending to them (action=type)'),
   key: z
     .string()
     .optional()
@@ -98,6 +112,16 @@ export interface ActResult {
   ok: true;
   /** Path to the post-action screenshot saved as evidence. */
   screenshot: string;
+  /**
+   * Every open tab — present ONLY once more than one is open.
+   *
+   * A click that opens a tab (`target="_blank"`, an OAuth popup) leaves a blind
+   * driver reading the tab it is still on, concluding "nothing happened", and
+   * abandoning the flow. Surfacing the tab list exactly when it becomes relevant
+   * turns that dead end into an obvious next step (`act switch_tab`), and costs
+   * nothing on the single-tab pages that are the norm.
+   */
+  tabs?: TabInfo[];
 }
 
 /**
@@ -151,6 +175,21 @@ function required<T extends string>(value: T | undefined, field: string, action:
 }
 
 /**
+ * The tab index `switch_tab` names. `target` is a string for every other verb, so
+ * the index arrives as one — reject anything that is not a whole, non-negative
+ * number rather than silently driving tab 0.
+ */
+function tabIndex(target: string): number {
+  const index = Number(target.trim());
+  if (!Number.isInteger(index) || index < 0) {
+    throw new AgentError(
+      `act 'switch_tab' needs a tab index as 'target' (e.g. "1"), got ${JSON.stringify(target)} — list them with observe({kind:"tabs"})`,
+    );
+  }
+  return index;
+}
+
+/**
  * Label an act from its INPUT — the fallback for a step that threw before a
  * target-derived label existed. Never echoes `text` (typed secrets stay out of
  * the trail, as they do out of the success label).
@@ -179,6 +218,23 @@ async function performAct(adapter: Adapter, input: ActInput): Promise<string> {
       // the real `requires 'text'` failure, nor cost an unnecessary `find()`.
       const text = required(input.text, 'text', 'type');
       const node = await resolve(adapter, required(input.target, 'target', 'type'));
+      if (input.clear === true) {
+        // `type` appends by design (it focuses and types, it does not `fill`), so
+        // re-typing a field silently produced doubled values like
+        // "Finish project reportFinish project report" — which the driver then
+        // reported as an app bug.
+        //
+        // Empty the field FIRST, then type: select-all-then-type would not work,
+        // because every `type` focuses its target by clicking, and that click
+        // collapses the selection it was meant to overwrite. Deleting instead
+        // leaves an empty field, where the re-click's caret position is moot.
+        // Built from existing contract verbs, so desktop and android get it too.
+        await adapter.type(node, '');
+        await adapter.pressKey('Control+a');
+        await adapter.pressKey('Delete');
+        await adapter.type(node, text);
+        return `type ${text.length} chars into ${describeNode(node)} (replacing)`;
+      }
       await adapter.type(node, text);
       return `type ${text.length} chars into ${describeNode(node)}`;
     }
@@ -214,6 +270,14 @@ async function performAct(adapter: Adapter, input: ActInput): Promise<string> {
       const direction = required(input.direction, 'direction', 'scroll');
       await adapter.scroll({ direction, amount: input.amount, within: input.target });
       return `scroll ${direction}${input.amount !== undefined ? ` ${input.amount}px` : ''}`;
+    }
+    case 'switch_tab': {
+      if (!adapter.selectTab) {
+        throw new AgentError("act 'switch_tab' is not supported on this target (web only)");
+      }
+      const index = tabIndex(required(input.target, 'target', 'switch_tab'));
+      await adapter.selectTab(index);
+      return `switch to tab ${index}`;
     }
     default: {
       const unreachable: never = input.action;
@@ -252,7 +316,13 @@ export async function runAct(
     const screenshot = await recorder.saveScreenshot(label, png);
     await recorder.appendLog('agent', `act ${label} → ${screenshot}`);
     trail?.record({ step: label, ok: true, screenshot });
-    return { action: input.action, label, ok: true, screenshot };
+    return {
+      action: input.action,
+      label,
+      ok: true,
+      screenshot,
+      ...(await extraTabs(adapter)),
+    };
   } catch (error) {
     trail?.record({ step: label, ok: false, note: failureNote(error) });
     throw error;
@@ -264,15 +334,55 @@ export async function runAct(
 }
 
 /**
+ * The open tabs, but only when there is more than one to report — see
+ * {@link ActResult.tabs}. Never fails an otherwise-good act: a target that
+ * cannot list tabs, or one that throws mid-teardown, simply reports none.
+ */
+async function extraTabs(adapter: Adapter): Promise<{ tabs?: TabInfo[] }> {
+  if (!adapter.tabs) return {};
+  try {
+    const tabs = await adapter.tabs();
+    return tabs.length > 1 ? { tabs } : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Build the `act` tool bound to one adapter + recorder, for the debug agent's belt.
  * `trail` (when wired by the loop) is the run's shared step trail, so every act —
  * the ones that worked and the ones that threw — lands in the persisted findings.
  */
 export function createActTool(adapter: Adapter, recorder: StepRecorder, trail?: ActTrail) {
+  /**
+   * Acts run ONE AT A TIME, however many the driver emits in a step.
+   *
+   * A model routinely batches independent-looking actions into a single step —
+   * `type` the email and `type` the password — and the SDK executes a step's tool
+   * calls concurrently. But an act is compound (focus the target, then type into
+   * it) and keyboard input is dispatched at the PAGE, not at an element: two acts
+   * in flight interleave their keystrokes into whichever field last took focus.
+   *
+   * Observed end-to-end: a registration typed
+   * `tTeessttuPsaesrs1TestPass123!…` into the password field and the app happily
+   * created the account. Nothing errored — the run just silently tested something
+   * other than what it typed, which is the worst failure mode a debugger can have.
+   *
+   * Chaining here rather than locking the adapter: the atomic unit is the whole
+   * act, not any single contract call it makes.
+   */
+  let queue: Promise<unknown> = Promise.resolve();
+
   return tool({
     description:
-      'Drive the target with one action, chosen by action: click | type | key | scroll | navigate | wait. Resolves target via find, then routes to the adapter (click/type/open/waitFor) and records a step to agent.log plus a post-action screenshot. Use observe to read state before and after.',
+      'Drive the target with one action, chosen by action: click | type | key | scroll | navigate | wait | switch_tab. Resolves target via find, then routes to the adapter (click/type/open/waitFor) and records a step to agent.log plus a post-action screenshot. Returns tabs when more than one is open — a click may have opened one. Use observe to read state before and after.',
     inputSchema: ActInputSchema,
-    execute: (input) => runAct(adapter, recorder, input, trail),
+    execute: (input) => {
+      const next = queue.then(() => runAct(adapter, recorder, input, trail));
+      // The chain must survive a failed act: swallow the rejection on the QUEUE
+      // copy only, so a thrown act still reaches the driver via `next`.
+      queue = next.catch(() => undefined);
+      return next;
+    },
   });
 }

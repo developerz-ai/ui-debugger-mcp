@@ -64,6 +64,29 @@ bug. Only \`navigate\` to URLs given in the goal or seen in network entries. If 
 link's click target is hidden (e.g. inside a closed menu), click the parent menu
 item first, then re-observe.
 
+### Verify input from the TREE, never from vision
+
+Form controls carry their LIVE state in the tree: \`value\` (what an
+input/textarea/select currently holds) and \`checked\` (checkbox/radio). \`name\`
+stays the label, so you can still target the field by it.
+
+After typing or toggling, confirm with one \`observe\`:
+\`observe({kind:"tree", query:"input", fields:["name","value","checked"]})\`
+
+NEVER spend a \`look\` asking "did my text land?" or "is the box checked now?" —
+the tree answers exactly, instantly, and for free. Vision is for how things LOOK,
+not for reading back your own input.
+
+### Typing replaces nothing unless you say so
+
+\`act({action:"type"})\` APPENDS to whatever the field already holds. Re-typing a
+field you have used before yields \`old textnew text\` — and that doubled value is
+YOUR bug, not the app's. Pass \`clear: true\` to replace the contents instead:
+\`act({action:"type", target:"...", text:"...", clear:true})\`.
+
+Use \`clear\` whenever the field may be non-empty: a retry, a second item through
+the same form, or any field you have not just seen empty in the tree.
+
 ### Login bypass
 
 If the target has \`?debug-ai=true\` support (the app's captcha bypass gate),
@@ -95,4 +118,51 @@ API calls) — not mechanically after every single \`act\`.
 
 Record any errors as \`console\` or \`network\` bugs with the request URL / error
 message as \`detail\` and the screenshot path as \`evidence\` when relevant.
+
+### Network entries carry the WHY, not just the status
+
+Each row is a full exchange: \`method\`, \`url\`, \`status\`, \`ok\`, \`durationMs\`,
+and for API calls (\`fetch\`/\`xhr\`) the \`requestBody\`, \`responseBody\`, and
+redacted \`requestHeaders\`/\`responseHeaders\`.
+
+**A failing request is only half-reported without its \`responseBody\`.** When a
+submit fails, do NOT stop at "POST /api/x returned 400" — read the row and quote
+what the server actually said (\`{"error":"password too short"}\`); that string is
+what turns a finding into a fix. Same for the \`requestBody\`: it shows whether the
+UI even sent what you typed.
+
+Credential header values arrive as \`<redacted, N chars>\`. That is deliberate —
+presence is what you need (a missing \`cookie\` explains a 401), never the secret.
+
+Other reads that pay off:
+- \`filters:{duration_gte:1000}\` — requests slow enough to be a UX bug.
+- \`filters:{body_contains:"error"}\` — failures that still returned HTTP 200.
+
+A default \`network\` read hides successful static assets (scripts, styles,
+images) and tells you how many via \`hidden\` — on a dev server they outnumber real
+API calls ~15:1 and would crowd out everything worth seeing. Failed assets are
+always shown (a 404 image is a real bug). To inspect assets deliberately, ask:
+\`observe({kind:"network", filters:{resource_in:["script","stylesheet","image"]}})\`.
+
+### iframes — already in the tree
+
+\`observe({kind:"tree"})\` reads embedded documents too (payment fields, editors,
+consent screens). A node inside one carries \`frame\` = the iframe's URL; its
+\`bounds\` are page coordinates, so clicking it needs nothing special. If a
+selector mysteriously fails to resolve on a node you can see, check whether it
+has a \`frame\` — and prefer clicking the node object over a hand-written selector.
+
+### Tabs — a click can open one
+
+When more than one tab is open, every \`act\` result carries a \`tabs\` array
+(\`index\`, \`url\`, \`title\`, \`active\`). A click on an external link, an OAuth
+button, or \`target="_blank"\` opens a new tab and **you are still on the old one**
+— if a click seems to have done nothing, check \`tabs\` before concluding the
+button is broken.
+
+- \`observe({kind:"tabs"})\` — list them any time.
+- \`act({action:"switch_tab", target:"1"})\` — drive tab 1 from now on. Console and
+  network capture follow you; what the previous tab recorded is kept.
+
+Switch back the same way when the popup flow is done.
 `;

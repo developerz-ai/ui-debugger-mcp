@@ -8,7 +8,14 @@ import type {
   WaitOptions,
 } from '../../adapters/contract.js';
 import { AdapterError, AgentError } from '../../errors.js';
-import { ActInputSchema, createActTool, runAct, type StepRecorder } from './act.js';
+import {
+  type ActInput,
+  ActInputSchema,
+  type ActResult,
+  createActTool,
+  runAct,
+  type StepRecorder,
+} from './act.js';
 import { createActTrail } from './trail.js';
 
 /** Calls the fake adapter recorded, to assert routing + ordering. */
@@ -408,4 +415,162 @@ test('createActTool exposes a described tool with an input schema', () => {
   const act = createActTool(adapter, recorder);
   expect(typeof act.description).toBe('string');
   expect(act.inputSchema).toBeDefined();
+});
+
+// --- switch_tab + the multi-tab hint ----------------------------------------
+
+/** Adapter that knows about tabs, recording every switch. */
+function tabAdapter(count: number): { adapter: Adapter; switched: number[] } {
+  const { adapter } = fakeAdapter(button);
+  const switched: number[] = [];
+  const tabs = Array.from({ length: count }, (_, index) => ({
+    index,
+    url: `http://x/${index}`,
+    title: `Tab ${index}`,
+    active: index === 0,
+  }));
+  return {
+    adapter: {
+      ...adapter,
+      tabs: async () => tabs,
+      selectTab: async (index: number) => {
+        switched.push(index);
+      },
+    },
+    switched,
+  };
+}
+
+test('switch_tab routes the index to the adapter', async () => {
+  const { adapter, switched } = tabAdapter(2);
+  const res = await runAct(adapter, fakeRecorder().recorder, {
+    action: 'switch_tab',
+    target: '1',
+  });
+  expect(switched).toEqual([1]);
+  expect(res.label).toBe('switch to tab 1');
+});
+
+test('switch_tab rejects a target that is not a tab index', async () => {
+  const { adapter } = tabAdapter(2);
+  await expect(
+    runAct(adapter, fakeRecorder().recorder, { action: 'switch_tab', target: 'the popup' }),
+  ).rejects.toThrow(AgentError);
+});
+
+test('switch_tab fails loud on a target with no tabs', async () => {
+  const { adapter } = fakeAdapter(button);
+  await expect(
+    runAct(adapter, fakeRecorder().recorder, { action: 'switch_tab', target: '1' }),
+  ).rejects.toThrow(AgentError);
+});
+
+test('act reports the tab list once a second tab is open', async () => {
+  const { adapter } = tabAdapter(2);
+  const res = await runAct(adapter, fakeRecorder().recorder, { action: 'click', target: 'Save' });
+  expect(res.tabs?.length).toBe(2);
+});
+
+test('act stays silent about tabs when only one is open', async () => {
+  const { adapter } = tabAdapter(1);
+  const res = await runAct(adapter, fakeRecorder().recorder, { action: 'click', target: 'Save' });
+  expect(res.tabs).toBeUndefined();
+});
+
+test('a failing tabs() never fails an otherwise-good act', async () => {
+  const { adapter } = fakeAdapter(button);
+  const flaky: Adapter = {
+    ...adapter,
+    tabs: async () => {
+      throw new Error('page closed');
+    },
+  };
+  const res = await runAct(flaky, fakeRecorder().recorder, { action: 'click', target: 'Save' });
+  expect(res.ok).toBe(true);
+  expect(res.tabs).toBeUndefined();
+});
+
+// --- concurrency: a step's batched acts must not interleave -----------------
+
+test('the act tool serializes concurrent calls — batched types never interleave', async () => {
+  // Models batch "type email" + "type password" into ONE step, and the SDK runs a
+  // step's tool calls concurrently. Keyboard input goes to the PAGE, so overlapping
+  // acts type into whichever field last took focus. This reproduces that: each act
+  // records enter/exit, and any overlap shows up as interleaved markers.
+  const order: string[] = [];
+  const { adapter } = fakeAdapter(button);
+  const slow: Adapter = {
+    ...adapter,
+    type: async (_target, text) => {
+      order.push(`enter:${text}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      order.push(`exit:${text}`);
+    },
+  };
+
+  const tool = createActTool(slow, fakeRecorder().recorder);
+  const run = (text: string) =>
+    (tool as unknown as { execute: (input: ActInput) => Promise<ActResult> }).execute({
+      action: 'type',
+      target: 'Field',
+      text,
+    });
+
+  await Promise.all([run('email'), run('password')]);
+
+  // Strictly one act at a time: every enter is immediately followed by its exit.
+  expect(order).toEqual(['enter:email', 'exit:email', 'enter:password', 'exit:password']);
+});
+
+test('a failed act does not wedge the queue for the next one', async () => {
+  let first = true;
+  const { adapter } = fakeAdapter(button);
+  const flaky: Adapter = {
+    ...adapter,
+    type: async () => {
+      if (first) {
+        first = false;
+        throw new Error('element detached');
+      }
+    },
+  };
+  const tool = createActTool(flaky, fakeRecorder().recorder);
+  const run = (text: string) =>
+    (tool as unknown as { execute: (input: ActInput) => Promise<ActResult> }).execute({
+      action: 'type',
+      target: 'Field',
+      text,
+    });
+
+  const failed = run('first');
+  const after = run('second');
+  await expect(failed).rejects.toThrow();
+  // The rejection reaches the driver AND the chain keeps moving.
+  await expect(after).resolves.toMatchObject({ ok: true });
+});
+
+test('type with clear empties the field before typing, not after focusing it', async () => {
+  const { adapter, calls } = fakeAdapter(button);
+  await runAct(adapter, fakeRecorder().recorder, {
+    action: 'type',
+    target: 'Title',
+    text: 'new title',
+    clear: true,
+  });
+  // Select-all + Delete must land BEFORE the typing, and the typing must be last:
+  // a trailing click (every `type` focuses by clicking) would collapse a selection,
+  // so clearing has to actually empty the field.
+  expect(calls.pressKey).toEqual(['Control+a', 'Delete']);
+  expect(calls.type.map((c) => c.text)).toEqual(['', 'new title']);
+});
+
+test('type without clear still appends — the default is unchanged', async () => {
+  const { adapter, calls } = fakeAdapter(button);
+  await runAct(adapter, fakeRecorder().recorder, {
+    action: 'type',
+    target: 'Title',
+    text: 'more',
+  });
+  expect(calls.pressKey).toEqual([]);
+  expect(calls.type.map((c) => c.text)).toEqual(['more']);
 });

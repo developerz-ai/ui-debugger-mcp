@@ -26,15 +26,16 @@
  * already closed) and never participates in the one-run gate.
  */
 
-import type { ResolvedConfig } from '../config/load.js';
+import { CONFIG_FILENAME, type ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import {
+  ConfigError,
   SessionBusyError,
   SessionNotFoundError,
   SessionSettledError,
   TargetNotFoundError,
 } from '../errors.js';
-import type { Findings } from '../findings/schema.js';
+import { type Findings, FindingsSchema } from '../findings/schema.js';
 import type { SessionManager } from '../session/manager.js';
 import type { Session, SnapshotField } from '../session/session.js';
 import { noopStatePort, type StatePort } from '../session/state-file.js';
@@ -139,6 +140,27 @@ export interface DebugServiceDeps {
   defaultTimeoutMs?: number;
   /** Injected clock (epoch ms) for session ids + the run deadline; defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * Has `.ui-debugger-mcp.json` changed since boot? Config is resolved once and
+   * wired into long-lived objects, so a changed file means every later run would
+   * silently use the OLD settings — see `config/fingerprint.ts`. Defaults to
+   * "never changed" (unit tests hold no file).
+   */
+  configChanged?: () => boolean;
+}
+
+/**
+ * Narrow a findings object to the requested keys — the `fields` projection for a
+ * snapshot read off disk (a live {@link Session} projects its own).
+ */
+function projectFindings(findings: Findings, fields: readonly SnapshotField[]): Partial<Findings> {
+  const out: Partial<Findings> = {};
+  for (const field of fields) {
+    // Assigning key-by-key off a validated object; the index signature is what
+    // makes this need the cast, not any doubt about the value's type.
+    (out as Record<string, unknown>)[field] = findings[field];
+  }
+  return out;
 }
 
 export class DebugService implements DebugApi {
@@ -149,6 +171,7 @@ export class DebugService implements DebugApi {
   readonly #state: StatePort;
   readonly #defaultTimeoutMs: number;
   readonly #now: () => number;
+  readonly #configChanged: () => boolean;
   /** Live wall-clock timer for the active run; cleared when the run ends. */
   #timer: ReturnType<typeof setTimeout> | undefined;
   /**
@@ -174,6 +197,7 @@ export class DebugService implements DebugApi {
     this.#state = deps.state ?? noopStatePort;
     this.#defaultTimeoutMs = deps.defaultTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
     this.#now = deps.now ?? (() => Date.now());
+    this.#configChanged = deps.configChanged ?? (() => false);
   }
 
   /**
@@ -204,6 +228,9 @@ export class DebugService implements DebugApi {
           'Wait for it to open (or end it) before starting another — one run per project at a time.',
       );
     }
+    // Before anything is launched: a run built from config the caller has already
+    // replaced is worse than no run — it reproduces the very failure they just fixed.
+    this.#assertConfigFresh();
     this.#starting = true;
     const deadline = this.#now() + (timeoutMs ?? this.#defaultTimeoutMs);
     /** Budget left on the caller's cap; never negative — a blown budget is simply spent. */
@@ -253,6 +280,23 @@ export class DebugService implements DebugApi {
   }
 
   /**
+   * Refuse to start on config this server can no longer honour.
+   *
+   * The message names the one action that works. Without it the caller edits the
+   * file, sees the identical failure, and has no way to tell a bad fix from an
+   * unread one — which is exactly how a real session burned two runs.
+   */
+  #assertConfigFresh(): void {
+    if (!this.#configChanged()) return;
+    throw new ConfigError(
+      `${CONFIG_FILENAME} changed on disk after this ui-debugger-mcp server started, so a run now ` +
+        'would still use the OLD settings (models, targets, urls are read once at boot). ' +
+        'Restart the MCP server to pick the new config up — in Claude Code, /mcp → reconnect ' +
+        'ui-debugger, or restart the session.',
+    );
+  }
+
+  /**
    * The other half of the one-run gate: another *live* server process holding a
    * run on this project. The manager only sees this process's memory, so without
    * this a second MCP client on the same cwd would launch a second run onto the
@@ -265,8 +309,10 @@ export class DebugService implements DebugApi {
     if (foreign === null) return;
     throw new SessionBusyError(
       `Another ui-debugger-mcp server (pid ${foreign.pid}) already has a debug session ` +
-        `('${foreign.sessionId}') active for '${cwd}'. End it (or run 'ui-debugger-mcp stop') ` +
-        'before starting another — one run per project at a time.',
+        `('${foreign.sessionId}') active for '${cwd}'. One run per project at a time. ` +
+        `Read what it is doing with get_findings({session_id:'${foreign.sessionId}'}) — a run ` +
+        'that has already settled is just waiting to be closed by its own client. To take the ' +
+        "project over, run 'ui-debugger-mcp stop' in this directory, then start again.",
     );
   }
 
@@ -319,8 +365,31 @@ export class DebugService implements DebugApi {
     wait,
     fields,
   }: GetFindingsInput): Promise<Findings | Partial<Findings>> {
-    const session = this.#requireReadable(session_id);
+    let session: Session;
+    try {
+      session = this.#requireReadable(session_id);
+    } catch (error) {
+      // Our own memory has no such run — but another live server on this project
+      // might, and `start_debug` has already named that session to this caller.
+      // Answering "no such session" there is a contradiction that sends the
+      // caller into a retry loop; serve what that run has flushed instead.
+      const foreign = await this.#foreignSnapshot(session_id);
+      if (foreign) return fields ? projectFindings(foreign, fields) : foreign;
+      throw error;
+    }
     return fields ? session.snapshot(fields, wait) : session.snapshot(undefined, wait);
+  }
+
+  /**
+   * A foreign run's findings as last flushed to disk, or `null` if this id names
+   * no such run. Read-only and point-in-time: we do not own that run, so there is
+   * nothing to long-poll — the owning server is the one advancing it.
+   */
+  async #foreignSnapshot(session_id: string): Promise<Findings | null> {
+    const raw = await this.#state.foreignFindings(session_id);
+    if (raw === null) return null;
+    const parsed = FindingsSchema.safeParse(raw);
+    return parsed.success ? parsed.data : null;
   }
 
   /** List configured targets (the whole catalog, or one when named) plus resolved models/workspace. */

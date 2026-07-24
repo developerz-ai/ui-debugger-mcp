@@ -43,6 +43,28 @@ export interface Node {
   /** Stable test hook (`data-testid` on web); absent when the element carries none. */
   testid?: string;
   /**
+   * Live contents of a form control (`input`/`textarea`/`select`), absent elsewhere.
+   *
+   * Distinct from {@link name}, which stays the LABEL so the node remains
+   * targetable. Without this the tree cannot answer "what is in this field?" —
+   * the accessible name resolves to the label or placeholder, and the `value`
+   * attribute never changes as the user types — so a driver verifying its own
+   * input had to spend a vision call on it, every time.
+   */
+  value?: string;
+  /** Live checked state of a checkbox/radio, absent elsewhere. Same rationale as {@link value}. */
+  checked?: boolean;
+  /**
+   * The iframe this node lives in (its URL), absent for the main document.
+   *
+   * Embedded widgets — payment fields, editors, OAuth consent — are a separate
+   * document that page-level selectors cannot reach. {@link Bounds} are still
+   * page-absolute (the adapter offsets them by the frame's position), so a
+   * coordinate click works the same either way; this field is what tells the
+   * agent why a selector that "should" match doesn't.
+   */
+  frame?: string;
+  /**
    * Computed text style (web, text-bearing nodes only) — lets the blind driver
    * catch invisible/low-contrast text structurally, without spending vision.
    */
@@ -154,14 +176,50 @@ export interface NetworkEntry {
   error?: string;
   /** Capture time, ms since epoch. */
   timestamp: number;
+  /**
+   * Wall-clock ms from the request leaving the page to its response arriving.
+   * Absent when the request never produced a response, or when it was already
+   * in flight before capture started.
+   */
+  durationMs?: number;
+  /**
+   * Request payload as sent (`POST`/`PUT`/`PATCH` bodies), truncated to a cap.
+   * Captured for API traffic only ({@link BODY_RESOURCE_TYPES}) — a debugger needs
+   * to see *what was submitted*, not the bytes of every script and image.
+   */
+  requestBody?: string;
+  /**
+   * Response payload, truncated to a cap. Captured for API traffic only. This is
+   * where a `4xx` keeps its actual reason (the validation error, the message), so
+   * it is the single most valuable field on a failing exchange.
+   */
+  responseBody?: string;
+  /** Request headers, sensitive values redacted ({@link NetworkEntry.responseHeaders}). */
+  requestHeaders?: Record<string, string>;
+  /**
+   * Response headers, sensitive values redacted — credential-bearing headers
+   * (`authorization`, `cookie`, `set-cookie`, …) keep only a length marker, so the
+   * agent can tell a header was *present* without the secret entering its context
+   * (and from there, logs, findings, and the caller's transcript).
+   */
+  responseHeaders?: Record<string, string>;
+}
+
+/** One open tab/window of a multi-tab target (web). */
+export interface TabInfo {
+  /** Position in the target's tab list — what {@link Adapter.selectTab} takes. */
+  index: number;
+  /** Current URL of the tab. */
+  url: string;
+  /** Document title, empty while a fresh tab is still loading. */
+  title: string;
+  /** Whether this is the tab the adapter currently drives. */
+  active: boolean;
 }
 
 /**
  * One contract, three protocols. The agent loop calls only these methods; each
  * adapter wires them to its real backend (CDP / X11-Wayland / ADB).
- *
- * **Attach mode (web):** when connecting to an existing browser process via CDP URL,
- * the adapter controls only the first tab — multi-tab scenarios are not supported.
  */
 export interface Adapter {
   /**
@@ -202,6 +260,20 @@ export interface Adapter {
 
   /** Read captured network exchanges, newest first, narrowed by {@link LogQuery}. Reads are non-destructive. */
   network(opts?: LogQuery): Promise<NetworkEntry[]>;
+
+  /**
+   * List the target's open tabs, newest last. OPTIONAL — implemented by targets
+   * that have a tab concept (web); absent elsewhere, and the belt says so rather
+   * than pretending a single-window target has one tab.
+   */
+  tabs?(): Promise<TabInfo[]>;
+
+  /**
+   * Drive a different tab from now on: every later read and action targets it,
+   * and console/network capture follows. OPTIONAL, paired with {@link tabs}.
+   * Throws when the index names no open tab.
+   */
+  selectTab?(index: number): Promise<void>;
 
   /** Release the target: stop a **managed** process; for **attach**, disconnect only — never stop it. */
   close(): Promise<void>;

@@ -343,7 +343,7 @@ test('close is not blocked by a hung summary model (teardown wins the abort race
   expect((await store.readFindings()).summary).toBeUndefined(); // hung summary never written
 });
 
-test('summarize digests the terminal status, not a stale running record', async () => {
+test('summarize digests the reported verdict when the driver left the prose out', async () => {
   const store = makeStore();
   let digestedStatus: Findings['status'] | undefined;
   const session = new Session({
@@ -357,14 +357,53 @@ test('summarize digests the terminal status, not a stale running record', async 
     },
   });
 
-  // Driver leaves the record on `running` (no terminal verdict) — `#verdict()` settles `failed`.
+  // The driver DID report (terminal verdict on disk) but wrote no summary.
   await session.start(async (ctx) => {
-    await ctx.progress.writeFindings({ status: 'running', steps: [], bugs: [], visual: [] });
+    await ctx.progress.writeFindings({
+      status: 'failed',
+      steps: [],
+      bugs: [{ kind: 'flow', detail: 'login button dead' }],
+      visual: [],
+    });
   });
 
   expect(session.status).toBe('failed');
-  expect(digestedStatus).toBe('failed'); // summarized the terminal verdict, not the stale `running`
+  expect(digestedStatus).toBe('failed');
+  const findings = await store.readFindings();
+  expect(findings.summary).toBe('run failed before login');
+});
+
+test('a run that never reported gets the facts, never a model-invented cause', async () => {
+  const store = makeStore();
+  let summarizerCalled = false;
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    summarize: async () => {
+      summarizerCalled = true;
+      return 'the app crashed on startup'; // what a model actually did here
+    },
+  });
+
+  // Loop ended with the record still `running`: no `report` ever landed.
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({
+      status: 'running',
+      steps: [{ step: 'click Add', ok: true }],
+      bugs: [],
+      visual: [],
+    });
+  });
+
+  expect(session.status).toBe('failed');
+  // Nothing to condense — asking a model here is how a clean 30-step run came
+  // back diagnosed with a crash that never happened.
+  expect(summarizerCalled).toBe(false);
   const findings = await store.readFindings();
   expect(findings.status).toBe('failed');
-  expect(findings.summary).toBe('run failed before login');
+  expect(findings.summary).toContain('WITHOUT a verdict');
+  expect(findings.summary).toContain('1 step(s) ran');
+  expect(findings.summary).not.toContain('crashed');
 });

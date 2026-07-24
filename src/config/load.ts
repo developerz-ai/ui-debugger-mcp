@@ -30,10 +30,16 @@ export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 /** Default workspace dir (per-project sessions, profiles, logs). */
 export const DEFAULT_WORKSPACE = './tmp/ui-debugger-mcp';
 
-/** Per-role model defaults — deepseek for text, glm for image. See `idea/models.md`. */
+/**
+ * Per-role model defaults — deepseek for text (driver + summary), qwen-vl for image.
+ *
+ * Plain catalog ids, no routing suffix: the router rejects `#uptime` outright
+ * (`… is not a valid model ID`, HTTP 400), so shipping it as the default driver
+ * made a fresh install fail on its very first run. See `idea/models.md`.
+ */
 export const DEFAULT_MODELS: ResolvedModels = {
-  driver: 'deepseek/deepseek-v4-flash#uptime',
-  vision: 'z-ai/glm-5v-turbo',
+  driver: 'deepseek/deepseek-v4-flash',
+  vision: 'qwen/qwen3-vl-32b-instruct',
   summary: 'deepseek/deepseek-v4-flash',
 };
 

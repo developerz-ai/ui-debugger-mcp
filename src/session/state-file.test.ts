@@ -152,7 +152,11 @@ test('foreignRun reports a running breadcrumb owned by another live server', asy
     identity: captureIdentity(process.pid),
   });
 
-  expect(await port.foreignRun()).toEqual({ pid: process.pid, sessionId: SAMPLE.sessionId });
+  expect(await port.foreignRun()).toEqual({
+    pid: process.pid,
+    sessionId: SAMPLE.sessionId,
+    sessionDir: SAMPLE.sessionDir,
+  });
 });
 
 test('foreignRun ignores our own breadcrumb (the in-process gate owns that case)', async () => {

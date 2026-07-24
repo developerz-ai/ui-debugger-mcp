@@ -73,6 +73,16 @@ Two tool layers (see `docs/idea/mcp-tools.md`): outer = few conversational MCP t
 SQL-like, heavily parameterized (`query`/`fields`/`filters`), one `act` not six.
 `look` = the eyes: sends a screenshot to the **vision guy** for visual judgment.
 
+`observe({kind})` reads `tree | screenshot | console | network | tabs`.
+`act({action})` does `click | type | key | scroll | navigate | wait | switch_tab`,
+and returns the tab list whenever more than one is open — a click that opens a tab
+otherwise reads to a blind driver as "nothing happened".
+
+A default `network` read hides *successful* static assets and reports `hidden` +
+how to see them (measured on a Vite dev server: 45 script loads to 3 API calls, so
+an unfiltered tail of 50 returned zero API traffic). Failed requests are never
+hidden, whatever their type.
+
 ## CLI (bin: `ui-debugger-mcp`)
 - no args → run the stdio MCP server (default).
 - `init` → scaffold a project: create `./tmp/ui-debugger-mcp/`, write a starter
@@ -144,8 +154,21 @@ bun run lint:fix       # biome auto-fix
 
 ## Adapter contract (the one real seam)
 Browser and desktop behind one interface so the agent loop is adapter-blind:
-`open · find · click · type · readState · screenshot · waitFor`.
+`open · find · click · type · readState · screenshot · waitFor · console · network`,
+plus optional `tabs · selectTab` (web only — the belt says "unsupported" elsewhere).
 Web → DOM. Desktop/mobile → a11y tree, fall back to vision/screenshots.
+
+**Web reads cross document boundaries.** `readState` extracts from every frame,
+translating child-frame bounds into page coordinates and tagging nodes with
+`frame`; selector actions fall through the frames to whichever one holds the
+element. Iframe content is otherwise invisible to page-level locators.
+
+**Network entries are whole exchanges**, not just status lines: `durationMs`,
+plus `requestBody`/`responseBody`/`requestHeaders`/`responseHeaders` for
+`fetch`/`xhr`. Credential header values are redacted to `<redacted, N chars>` —
+presence is diagnostic, the secret must never enter the model's context or the
+logs. A failing request without its response body is a dead end; that is the
+whole reason this exists.
 
 ## See also
 - `docs/idea/overview.md` — the problem + the idea.

@@ -6,7 +6,7 @@ Three actors, plain terms: **the smart agent, the fast guy, the vision guy.**
 |----------|------|-------|-------|--------------|
 | **smart agent** | the boss — sets goals, reads findings, **fixes the code**, loops | outside (Claude / caller) | the host's | via screenshots in findings |
 | **fast guy** | the **driver** — controls browser/desktop/android, runs the click loop | in-server | `deepseek-v4-flash` (text) | **no — blind** |
-| **vision guy** | the **eyes** — describes screenshots, judges how it looks | in-server | `glm-5v-turbo` (image) | **yes** |
+| **vision guy** | the **eyes** — describes screenshots, judges how it looks | in-server | `qwen3-vl-32b-instruct` (image) | **yes** |
 
 The smart agent talks to the in-server agent over MCP (a conversation). Inside,
 the fast guy drives blind and asks the vision guy for eyes when needed. Three
@@ -66,8 +66,8 @@ one does the moving and asks — *"is the cup to my left?"* — and acts on the 
 `.ui-debugger-mcp.json`:
 ```jsonc
 "models": {
-  "driver":  "deepseek/deepseek-v4-flash#uptime",  // fast guy — text, controls
-  "vision":  "z-ai/glm-5v-turbo",                  // vision guy — image, describes
+  "driver":  "deepseek/deepseek-v4-flash",        // fast guy — text, controls
+  "vision":  "qwen/qwen3-vl-32b-instruct",        // vision guy — image, describes
   "summary": "deepseek/deepseek-v4-flash"          // optional — compress findings
 }
 ```

@@ -34,8 +34,18 @@ import {
 import { z } from 'zod';
 import type { Bug, Findings, Step, VisualIssue } from '../findings/schema.js';
 
-/** Safety cap on driver steps before the loop force-stops (paired with `hasToolCall('report')`). */
-export const DEFAULT_MAX_STEPS = 30;
+/**
+ * Safety cap on driver steps before the loop force-stops (paired with
+ * `hasToolCall('report')`).
+ *
+ * Raised from 30 on measurement, not taste: the tool's own headline scenario —
+ * register an account, log in, add two todos, toggle one, then exercise three
+ * filters — spent all 30 steps and died one action short of reporting, which
+ * costs the entire run (no verdict, no findings, full token spend). The observed
+ * pace is ~3s/step, so 60 still finishes well inside the default 300s wall-clock
+ * cap, which remains the real bound on what a run costs.
+ */
+export const DEFAULT_MAX_STEPS = 60;
 
 /** Kickoff turn — the story lives in `instructions`; this nudges the driver to start the loop. */
 export const KICKOFF_PROMPT =

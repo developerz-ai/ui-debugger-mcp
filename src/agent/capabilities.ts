@@ -32,10 +32,13 @@ const CatalogSchema = z.object({
 
 /**
  * Catalog id for a routing-suffixed model id. The router accepts suffixes the
- * `/models` catalog does not list as ids of their own — `#uptime` (the shipped
- * default driver, `config/load.ts`), `:nitro`, `:floor`. Some suffixed ids ARE
- * listed verbatim (`…:free`), so the probe tries the id as given first and only
- * then falls back to this base form.
+ * `/models` catalog does not list as ids of their own — `:nitro`, `:floor`. Some
+ * suffixed ids ARE listed verbatim (`…:free`), so the probe tries the id as given
+ * first and only then falls back to this base form.
+ *
+ * `#` is stripped too, but only so a user-supplied `#…` id still resolves a
+ * capability — the router itself rejects `#` suffixes outright, so no default
+ * ships one (see {@link DEFAULT_MODELS}).
  */
 function baseModelId(modelId: string): string {
   const base = modelId.replace(/[#:].*$/, '');

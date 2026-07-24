@@ -25,6 +25,10 @@ interface DomEl {
   tagName: string;
   textContent: string | null;
   readOnly?: boolean;
+  /** Live form value — the PROPERTY, which reflects typing; the attribute does not. */
+  value?: string;
+  /** Live checked state of a checkbox/radio — likewise a property, not an attribute. */
+  checked?: boolean;
   labels?: ArrayLike<DomEl> | null;
   parentElement: DomEl | null;
   ownerDocument: DomDocument;
@@ -221,6 +225,12 @@ export const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
     el.readOnly !== true &&
     el.getAttribute('aria-readonly') !== 'true';
 
+  /** Elements that carry live value/checked state worth reporting. */
+  const isFormControl = (el: DomEl): boolean => {
+    const tag = el.tagName.toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select';
+  };
+
   return elements.map((el) => {
     const r = el.getBoundingClientRect();
     const style = getComputedStyle(el);
@@ -245,6 +255,15 @@ export const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
         el.getAttribute('aria-hidden') !== 'true',
     };
     if (testid) node.testid = testid;
+    // Live form state, read off the PROPERTIES. `getAttribute('value')` returns the
+    // markup's initial value and never changes as the user types, and `name` resolves
+    // to the label/placeholder long before it would reach a value — so before this
+    // there was NO structural way to see what a field contained. Drivers fell back to
+    // `look` and burned whole runs asking vision "did my text land?".
+    if (isFormControl(el)) {
+      if (typeof el.value === 'string') node.value = el.value;
+      if (typeof el.checked === 'boolean') node.checked = el.checked;
+    }
     if (text) {
       const fg = parseColor(style.color);
       if (fg) {

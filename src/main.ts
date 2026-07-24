@@ -6,6 +6,7 @@ import { createOpenRouterProvider, resolveProviderConfig } from './agent/provide
 import { runStatus, runStop } from './cli/control.js';
 import { printUsage, runHelp, runVersion } from './cli/help.js';
 import { runInit } from './cli/init.js';
+import { makeConfigWatch } from './config/fingerprint.js';
 import { loadConfig } from './config/load.js';
 import { NAME, VERSION } from './index.js';
 import { startStdioServer } from './mcp/server.js';
@@ -101,6 +102,9 @@ async function main(): Promise<void> {
       cwd,
       build: builder,
       state: new FileStatePort(workspace),
+      // Everything above was resolved from the config file as it read a moment
+      // ago; if it changes underneath us, say so instead of running on stale wiring.
+      configChanged: makeConfigWatch(cwd),
     });
 
     // Graceful stop: a CLI `stop` (or any SIGTERM/SIGINT) tears the run down —

@@ -51,7 +51,14 @@ smart agent that will fix the code.
 You are given the run's verdict plus every functional bug and visual issue it found.
 Write ONE plain-text paragraph (no markdown, no lists, no headings, no preamble) that
 states the verdict, then what broke, where, and what to fix — concrete and ordered by
-severity. If nothing broke, say so plainly. Output only the paragraph.`;
+severity. If nothing broke, say so plainly. Output only the paragraph.
+
+Report ONLY what the findings below contain. Never infer or invent a cause that is not
+there: no crashes, exceptions, missing dependencies or build problems unless a bug or
+console error in the input actually says so. A "failed" verdict with no bugs listed
+means the run did not reach a conclusion — say exactly that, and do not diagnose it.
+Speculation here is worse than silence: it sends the smart agent chasing a bug that
+does not exist.`;
 
 /** One functional bug, rendered for the digest. */
 function bugLine(bug: Findings['bugs'][number]): string {

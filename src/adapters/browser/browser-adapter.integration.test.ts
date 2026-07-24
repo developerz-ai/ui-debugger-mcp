@@ -97,8 +97,14 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   <div id="box" style="height:100px;overflow:auto;border:1px solid #000">
     <div style="height:1200px">scrollable region</div>
   </div>
+  <!-- Embedded document: page-level locators stop at this boundary. -->
+  <iframe id="embed" src="/frame" style="width:320px;height:120px;border:0"></iframe>
+  <!-- Opens a second tab: the adapter must still be driving the first one. -->
+  <a id="popup" href="/" target="_blank">Open in new tab</a>
+  <button id="submit">Submit</button>
   <!-- enabled-state matrix: native disabled/readonly, inherited fieldset, ARIA -->
   <input id="plain" value="editable">
+  <input id="check" type="checkbox">
   <input id="ro" value="locked" readonly>
   <input id="off" value="off" disabled>
   <fieldset disabled>
@@ -121,6 +127,16 @@ const FIXTURE_HTML = `<!DOCTYPE html>
       fetch('/api/missing').catch(function() {});
     });
 
+    // A real API exchange with payloads on BOTH sides — the shape a debugger
+    // must be able to explain (why did this 400?).
+    document.getElementById('submit').addEventListener('click', function() {
+      fetch('/api/echo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer supersecret' },
+        body: JSON.stringify({ email: 'a@b.c' })
+      }).catch(function() {});
+    });
+
     // Mirror the last key chord into the DOM — exercises pressKey (incl. modifiers).
     document.addEventListener('keydown', function(e) {
       var parts = [];
@@ -140,6 +156,15 @@ const FIXTURE_HTML = `<!DOCTYPE html>
       document.getElementById('boxscroll').textContent = String(Math.round(e.target.scrollTop));
     }, { passive: true });
   </script>
+</body>
+</html>`;
+
+/** The embedded document — same-origin, so its DOM is readable through CDP. */
+const FRAME_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Embedded</title></head>
+<body style="margin:0">
+  <button id="inner" data-testid="inner-button">Inner Button</button>
 </body>
 </html>`;
 
@@ -169,6 +194,18 @@ const FIXTURE_HTML = `<!DOCTYPE html>
         if (path === '/') {
           return new Response(FIXTURE_HTML, {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          });
+        }
+        if (path === '/frame') {
+          return new Response(FRAME_HTML, {
+            headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          });
+        }
+        if (path === '/api/echo') {
+          // Answers with a reason — the string a finding needs to be actionable.
+          return new Response(JSON.stringify({ error: 'password too short' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json', 'Set-Cookie': 'session=abc123' },
           });
         }
         return new Response('Not found', { status: 404 });
@@ -432,5 +469,128 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   test('network: limit caps results', async () => {
     const one = await adapter.network({ limit: 1 });
     expect(one.length).toBeLessThanOrEqual(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // network payloads — the reason a request failed, not just that it did
+  // -------------------------------------------------------------------------
+
+  test('network: captures request + response bodies for a failing API call', async () => {
+    await adapter.click('#submit');
+    await adapter.waitFor({ networkIdle: true, timeout: 5_000 });
+    const [entry] = await adapter.network({ filters: { url_contains: '/api/echo' } });
+    expect(entry?.status).toBe(400);
+    expect(entry?.method).toBe('POST');
+    expect(entry?.requestBody).toBe('{"email":"a@b.c"}');
+    // The whole point: the server's reason survives into the finding.
+    expect(entry?.responseBody).toContain('password too short');
+    expect(entry?.durationMs).toBeGreaterThanOrEqual(0);
+  }, 15_000);
+
+  test('network: credential headers are redacted, ordinary ones are not', async () => {
+    await adapter.click('#submit');
+    await adapter.waitFor({ networkIdle: true, timeout: 5_000 });
+    const [entry] = await adapter.network({ filters: { url_contains: '/api/echo' } });
+    expect(entry?.requestHeaders?.['authorization']).toMatch(/^<redacted, \d+ chars>$/);
+    expect(entry?.requestHeaders?.['content-type']).toContain('application/json');
+    expect(entry?.responseHeaders?.['set-cookie']).toMatch(/^<redacted, \d+ chars>$/);
+  }, 15_000);
+
+  test('network: static assets are still captured for an explicit read', async () => {
+    // The asset default lives in the belt, not here — the adapter stays complete.
+    const docs = await adapter.network({ filters: { resource_in: ['document'] } });
+    expect(docs.length).toBeGreaterThan(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // iframes — a page-level locator stops at the boundary; readState must not
+  // -------------------------------------------------------------------------
+
+  test('readState: reads nodes inside an iframe and tags them with the frame', async () => {
+    const nodes = await adapter.readState({ limit: 500 });
+    const inner = nodes.find((n) => n.name.includes('Inner Button'));
+    expect(inner).toBeDefined();
+    expect(inner?.frame).toContain('/frame');
+  }, 15_000);
+
+  test('readState: iframe bounds are page coordinates, not frame-relative', async () => {
+    const nodes = await adapter.readState({ limit: 500 });
+    const inner = nodes.find((n) => n.name.includes('Inner Button'));
+    const embed = nodes.find((n) => n.role === 'iframe' || n.testid === 'inner-button');
+    expect(inner).toBeDefined();
+    // The iframe sits well down the page, so a frame-relative y (~0) would prove
+    // the offset was never applied.
+    expect(inner?.bounds.y).toBeGreaterThan(0);
+    expect(embed).toBeDefined();
+  }, 15_000);
+
+  test('find/click: a selector resolves into the iframe', async () => {
+    const node = await adapter.find({ query: 'data-testid=inner-button' });
+    expect(node?.name).toContain('Inner Button');
+    // Clicking through the selector path must not throw: it falls through to the
+    // frame that actually holds the element.
+    await adapter.click('data-testid=inner-button');
+  }, 15_000);
+
+  test('main-document nodes carry no frame tag', async () => {
+    const node = await adapter.find({ query: '#go' });
+    expect(node?.frame).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // tabs — a target="_blank" click opens one; the adapter still drives the first
+  // -------------------------------------------------------------------------
+
+  test('tabs: lists the single tab before anything opens one', async () => {
+    const tabs = await adapter.tabs();
+    expect(tabs.length).toBeGreaterThanOrEqual(1);
+    expect(tabs.filter((t) => t.active).length).toBe(1);
+  });
+
+  test('tabs: a target=_blank click opens a tab, and switching drives it', async () => {
+    const before = await adapter.tabs();
+    await adapter.click('#popup');
+    await adapter.waitFor({ networkIdle: true, timeout: 5_000 });
+    const after = await adapter.tabs();
+    expect(after.length).toBe(before.length + 1);
+    // Still driving the original tab — the new one is not stolen silently.
+    expect(after.find((t) => t.active)?.index).toBe(before.find((t) => t.active)?.index);
+
+    const opened = after[after.length - 1];
+    if (!opened) throw new Error('expected an opened tab');
+    await adapter.selectTab(opened.index);
+    const switched = await adapter.tabs();
+    expect(switched.find((t) => t.active)?.index).toBe(opened.index);
+
+    // Capture followed the switch: the new tab's own document load is recorded.
+    const entries = await adapter.network();
+    expect(entries.length).toBeGreaterThan(0);
+
+    await adapter.selectTab(0);
+  }, 20_000);
+
+  test('readState reports a field’s LIVE value, not its markup attribute', async () => {
+    await adapter.type('#plain', 'typed text');
+    const node = await adapter.find({ query: '#plain' });
+    // `getAttribute('value')` would still say "editable" — the initial markup.
+    expect(node?.value).toContain('typed text');
+  }, 15_000);
+
+  test('readState reports live checked state', async () => {
+    const before = await adapter.find({ query: '#check' });
+    expect(before?.checked).toBe(false);
+    await adapter.click('#check');
+    const after = await adapter.find({ query: '#check' });
+    expect(after?.checked).toBe(true);
+  }, 15_000);
+
+  test('a non-form node carries neither value nor checked', async () => {
+    const node = await adapter.find({ query: '#go' });
+    expect(node?.value).toBeUndefined();
+    expect(node?.checked).toBeUndefined();
+  });
+
+  test('tabs: selecting a nonexistent tab fails loud', async () => {
+    await expect(adapter.selectTab(99)).rejects.toThrow(AdapterError);
   });
 });

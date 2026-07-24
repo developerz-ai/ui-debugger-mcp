@@ -257,6 +257,29 @@ get_findings { session_id: "...", wait: 30000 }
 ```
 Check `./tmp/ui-debugger-mcp/<project>/sessions/<id>/logs/agent.log` for the agent's trace.
 
+**Run fails instantly: "… is not a valid model ID"**
+The model string in `.ui-debugger-mcp.json` is not a catalog id. OpenRouter takes
+`provider/model` with optional `:floor` / `:nitro` routing suffixes — a `#…`
+suffix is rejected outright. Use plain ids (`deepseek/deepseek-v4-flash`).
+
+**Config edits seem to have no effect**
+Config is read ONCE when the MCP server starts, so an edit cannot reach a running
+server. Since v1.3 the server refuses to start a run on a changed file and tells
+you to reconnect it (in Claude Code: `/mcp` → reconnect `ui-debugger`) rather
+than silently running the old settings.
+
+**"Another server already has a session" and you can't see it**
+That run belongs to a different MCP server process on the same project. You can
+now READ it — `get_findings { session_id: "<the id in the error>" }` serves its
+on-disk findings — so you can tell a live run from one that settled and is just
+waiting to be closed. To take the project over: `ui-debugger-mcp stop`.
+
+**Run ends `failed` with no bugs and no explanation**
+That means the driver never called `report` — it used its whole step budget.
+The summary says so explicitly; it is NOT a crash and NOT a clean pass. Narrow
+the goal, or raise `timeout`. Read `logs/agent.log` and the screenshots for what
+it actually did.
+
 **`replay.mp4` not generated**
 ffmpeg is optional. Install it and retry, or ignore — findings and screenshots
 still land without it.

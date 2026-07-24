@@ -33,6 +33,7 @@ import type {
   Node,
   NodeField,
   NodeRef,
+  TabInfo,
 } from '../../adapters/contract.js';
 import { AgentError } from '../../errors.js';
 import type { EvidenceRecorder } from './look.js';
@@ -42,7 +43,7 @@ import type { EvidenceRecorder } from './look.js';
  * Exported so the prompt-vs-schema drift guard (`prompts/schema-drift.test.ts`) can
  * assert every `kind:"…"` example the prompts teach is one the belt actually accepts.
  */
-export const OBSERVE_KINDS = ['tree', 'screenshot', 'console', 'network'] as const;
+export const OBSERVE_KINDS = ['tree', 'screenshot', 'console', 'network', 'tabs'] as const;
 
 /**
  * Selectable {@link Node} columns — the `fields` projection whitelist (contract-level).
@@ -55,6 +56,9 @@ export const NODE_FIELDS = [
   'enabled',
   'testid',
   'style',
+  'frame',
+  'value',
+  'checked',
 ] as const satisfies readonly NodeField[];
 
 /**
@@ -68,6 +72,9 @@ const DEFAULT_PROJECTION = [
   'bounds',
   'enabled',
   'testid',
+  'frame',
+  'value',
+  'checked',
 ] as const satisfies readonly NodeField[];
 
 /**
@@ -78,6 +85,30 @@ const DEFAULT_PROJECTION = [
  * entries × remaining steps of context. An explicit `limit` (including `0`) still wins.
  */
 const DEFAULT_LOG_LIMIT = 50;
+
+/**
+ * Resource types a default `network` read keeps: the app talking to its backend,
+ * plus the navigation itself.
+ *
+ * A page's traffic is overwhelmingly static assets — measured on a Vite dev
+ * server, one real API call for every fifteen `script` loads (HMR re-requests
+ * every module). Reading the newest 50 rows there returns fifty module fetches
+ * and not one API call, which makes the channel useless exactly where it matters
+ * most. Assets stay one explicit `resource_in` away (see {@link keepByDefault}).
+ */
+const API_RESOURCE_TYPES = new Set(['fetch', 'xhr', 'websocket', 'eventsource', 'document']);
+
+/**
+ * Whether a default (unfiltered) `network` read shows this entry.
+ *
+ * Anything that FAILED is kept whatever its type — a 404 stylesheet or a broken
+ * image is a real bug, and hiding it to cut noise would defeat the point. An
+ * entry with no resource type is kept too: unknown is not the same as static.
+ */
+function keepByDefault(entry: NetworkEntry): boolean {
+  if (!entry.ok) return true;
+  return entry.resourceType === undefined || API_RESOURCE_TYPES.has(entry.resourceType);
+}
 
 /** One `filters` predicate value; arrays back `_in`-style set membership (matches `FilterValue`). */
 const FilterValueSchema = z.union([z.string(), z.number(), z.boolean(), z.array(z.string())]);
@@ -111,7 +142,9 @@ type WithinNode = z.infer<typeof NodeSchema>;
 
 /** `observe` input — flat + SQL-like; `kind` picks the table, the rest compose the read. */
 export const ObserveInputSchema = z.object({
-  kind: z.enum(OBSERVE_KINDS).describe('channel to read: tree | screenshot | console | network'),
+  kind: z
+    .enum(OBSERVE_KINDS)
+    .describe('channel to read: tree | screenshot | console | network | tabs'),
   query: z
     .string()
     .optional()
@@ -150,7 +183,16 @@ export type ObserveResult =
   | { kind: 'tree'; count: number; nodes: TreeNode[] }
   | { kind: 'screenshot'; path: string; bytes: number }
   | { kind: 'console'; count: number; entries: ConsoleEntry[] }
-  | { kind: 'network'; count: number; entries: NetworkEntry[] };
+  | { kind: 'tabs'; count: number; tabs: TabInfo[] }
+  | {
+      kind: 'network';
+      count: number;
+      entries: NetworkEntry[];
+      /** Static-asset rows a default read held back (absent when none were). */
+      hidden?: number;
+      /** How to see the held-back rows — present only alongside {@link hidden}. */
+      hint?: string;
+    };
 
 /** ARIA roles Playwright's `role=` engine accepts (others fall back to a text selector). */
 const ARIA_ROLES = new Set([
@@ -321,8 +363,36 @@ export async function runObserve(
       return { kind, count: entries.length, entries };
     }
     case 'network': {
-      const entries = await adapter.network({ filters, limit: limit ?? DEFAULT_LOG_LIMIT });
-      return { kind, count: entries.length, entries };
+      // Read the caller's filters UNCAPPED, then apply the asset default and the
+      // limit here: capping first would spend the whole budget on static assets
+      // and leave nothing to hide, reporting `hidden: 0` on a page that is 90%
+      // noise. The read is an in-memory ring, so the extra rows cost nothing.
+      const matched = await adapter.network({ filters });
+      // An explicit `resource_in` is the caller naming the types they want —
+      // never second-guess it.
+      const explicitTypes = filters !== undefined && 'resource_in' in filters;
+      const kept = explicitTypes ? matched : matched.filter(keepByDefault);
+      const entries = kept.slice(0, limit ?? DEFAULT_LOG_LIMIT);
+      const hidden = matched.length - kept.length;
+      return {
+        kind,
+        count: entries.length,
+        entries,
+        // Never truncate silently: say what was held back and how to see it.
+        ...(hidden > 0 && {
+          hidden,
+          hint: `${hidden} static asset request(s) hidden; add filters:{resource_in:["script","stylesheet","image","font"]} to see them`,
+        }),
+      };
+    }
+    case 'tabs': {
+      if (!adapter.tabs) {
+        throw new AgentError(
+          "observe kind 'tabs' is not supported on this target — only web targets have tabs",
+        );
+      }
+      const tabs = await adapter.tabs();
+      return { kind, count: tabs.length, tabs };
     }
     default: {
       const unreachable: never = kind;
@@ -335,7 +405,7 @@ export async function runObserve(
 export function createObserveTool(adapter: Adapter, recorder: EvidenceRecorder) {
   return tool({
     description:
-      'Read the target without mutating it. Pick a channel with kind (tree=UI nodes, screenshot=PNG evidence saved to screenshots/ — returns its path, console=logs, network=requests); compose with query/fields/filters/limit/within. Use it to inspect state before and after acting.',
+      'Read the target without mutating it. Pick a channel with kind (tree=UI nodes incl. iframe content, screenshot=PNG evidence saved to screenshots/ — returns its path, console=logs, network=requests with status/timing/payloads, tabs=open tabs); compose with query/fields/filters/limit/within. Use it to inspect state before and after acting.',
     inputSchema: ObserveInputSchema,
     execute: (input) => runObserve(adapter, recorder, input),
   });

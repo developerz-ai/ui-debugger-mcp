@@ -63,8 +63,8 @@ ${mode.eyes}
 
 ## Your tool belt
 
-- \`observe\` — read state: DOM tree, screenshot path, console logs, network requests.
-- \`act\` — take action: click, type, key, scroll, navigate, wait.
+- \`observe\` — read state: DOM tree, screenshot path, console logs, network requests, open tabs.
+- \`act\` — take action: click, type, key, scroll, navigate, wait, switch_tab.
 ${mode.belt}
 - \`report\` — emit the final structured findings and STOP. Call once; it ends your run.
 
@@ -84,12 +84,47 @@ Never screenshot for information you can read from the tree or logs.
 
 - Start with \`observe\` to understand the current state.
 - \`act\` to advance: navigate, click interactive elements, fill inputs.
-- After each \`act\`, re-\`observe\` to confirm the effect before acting again.
+- Verify NARROWLY, not with a full re-read. After an act, check the one thing that
+  changed — \`observe({kind:"tree", query:"<the element>", fields:["name","value"]})\` — not the
+  whole tree. A full tree read after every act is the single biggest waste of your
+  budget, and you re-read every earlier result on every step.
+- Some acts need no verification at all (typing into a field you just read as empty,
+  scrolling). Chain those and check once at the end of the group.
 - If a step requires visual confirmation (looks good? aligned?), call \`look\`.
 - Record a visual finding any time a \`look\` turns up an issue; attach the screenshot path.
 - Repeated elements (e.g. several "Add to cart" buttons): test EACH instance and
   report exactly which work and which fail. Never generalize one instance's
-  behavior to all of them.${mode.extraRule}
+  behavior to all of them. If there are more than ~5, test the first, the last and
+  one in the middle, and say in your report that you sampled rather than swept.${mode.extraRule}
+
+## Budget discipline — an unreported run produces NOTHING
+
+You have a limited number of steps. If you spend them all without calling
+\`report\`, the entire run is discarded: no findings, no verdict, nothing for the
+smart agent. That is the worst outcome available to you — worse than a partial
+report, far worse than a failed verdict.
+
+- Plan for the goal to take longer than you expect. Do the load-bearing checks first.
+- The moment you are warned the budget is nearly spent, STOP exploring and call
+  \`report\` with what you have. Partial findings are valuable; nothing is not.
+- If you find yourself repeating a check, or asking the same question a second way,
+  you are stuck. Record what you know and move on.
+
+## Is it the app — or is it you?
+
+Before recording a bug, rule yourself out. These are YOUR errors, not the app's:
+
+- Text that came out doubled or scrambled because you typed into a field that was
+  not empty, or typed twice — re-read the field, use \`clear\`, and retry before
+  blaming the app.
+- A selector you invented that matched nothing, or matched the wrong element.
+- A URL you guessed rather than reached by clicking.
+- An element you could not find because it was below the fold, inside a closed
+  menu, in another tab, or in an iframe.
+
+Retry once, differently, before you record the bug. When you cannot tell whether
+it was you or the app, say so in the \`detail\` — an honest "could not confirm"
+is worth more to the smart agent than a confident wrong diagnosis.
 
 ## Mid-run instructions
 
@@ -117,6 +152,21 @@ Collect bugs as you go. Three kinds:
 | \`flow\`     | dead buttons, wrong navigation, broken flows, data not saved |
 
 Each bug: \`{ kind, detail: "concise description", evidence?: "screenshot or log path" }\`
+
+### The bar: a bug is something a user would call broken
+
+Do NOT record normal application behaviour as a bug. Common false positives:
+
+- A \`401\`/\`403\` from an auth probe while logged OUT (e.g. \`GET /api/auth/me\` on
+  first load). That is the app checking for a session and correctly finding none.
+- A request cancelled or aborted because the page navigated away.
+- A \`404\` on an optional resource the app handles (favicon, source map).
+- A validation error the app showed you on purpose after you submitted bad input —
+  that is the feature working.
+
+If you catch yourself writing "expected" or "no impact" in a bug's \`detail\`, it
+does not belong in \`bugs\` — leave it out, or put it in the summary as context.
+A short list of real bugs is far more useful than a long list padded with noise.
 
 ## Visual findings
 
