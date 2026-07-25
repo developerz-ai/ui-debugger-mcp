@@ -34,6 +34,28 @@ function isAlive(pid: number): boolean {
   }
 }
 
+/**
+ * Spawn the SIGTERM-ignoring stand-in, retrying a transient runtime failure.
+ *
+ * Under CI's 2-vCPU runner, with bun running test files in parallel, this spawn
+ * has come back `EBADF: bad file descriptor, epoll_ctl` — a failure inside the
+ * harness's own process plumbing, before `/bin/sh` runs at all, which has
+ * nothing to do with the teardown path under test. Retry rather than let it red
+ * a branch; a spawn that is genuinely broken still fails after the last attempt.
+ */
+function spawnStubborn(readyFile: string, attempts = 3): ReturnType<typeof spawn> {
+  const script = `trap '' TERM; : > ${JSON.stringify(readyFile)}; while :; do sleep 0.1; done`;
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return spawn('/bin/sh', ['-c', script], { detached: true, stdio: 'ignore' });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 describe('AndroidAdapter.create', () => {
   test('with adbSerial → attach mode (close is no-op)', async () => {
     const { adapter, adb } = makeAttachAdapter();
@@ -63,11 +85,7 @@ describe('AndroidAdapter managed teardown', () => {
     // its console port) outlived the server.
     const dir = await mkdtemp(join(tmpdir(), 'uidbg-android-'));
     const ready = join(dir, 'ready');
-    const child = spawn(
-      '/bin/sh',
-      ['-c', `trap '' TERM; : > ${JSON.stringify(ready)}; while :; do sleep 0.1; done`],
-      { detached: true, stdio: 'ignore' },
-    );
+    const child = spawnStubborn(ready);
     const pid = child.pid;
     expect(pid).toBeDefined();
     const armed = Date.now() + 5000;
