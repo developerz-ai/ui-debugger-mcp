@@ -129,27 +129,46 @@ test('buildSession writes story.md with goal, criteria, and target', async () =>
   expect(content).toContain('settings dialog is visible');
 });
 
+/**
+ * Budget for the two `story.md` address tests.
+ *
+ * They assert on file CONTENT, not on speed, but building a web target
+ * constructs the real adapter — and CI runs the whole suite in parallel on a
+ * 2-vCPU runner alongside a real-browser e2e file. Locally these take ~0.4s;
+ * starved, one crossed Bun's 5s default and failed a green branch. The cap only
+ * exists to bound a hang, so give it room rather than let load decide.
+ */
+const STORY_TIMEOUT_MS = 30_000;
+
 // A run's own record has to say WHICH app it drove: findings from a run that
 // wandered off-target are otherwise indistinguishable, after the fact, from
 // findings about the app that was actually asked for.
-test('buildSession records the app address in story.md for a web run', async () => {
-  const d = deps();
-  await buildSession(d, { id: 'story-addr', target: 'web', goal: 'check the home page' });
-  const content = await readFile(sessionPaths(d.workspace, 'story-addr').storyMd, 'utf8');
-  expect(content).toContain('**Address:** http://localhost:3000');
-});
+test(
+  'buildSession records the app address in story.md for a web run',
+  async () => {
+    const d = deps();
+    await buildSession(d, { id: 'story-addr', target: 'web', goal: 'check the home page' });
+    const content = await readFile(sessionPaths(d.workspace, 'story-addr').storyMd, 'utf8');
+    expect(content).toContain('**Address:** http://localhost:3000');
+  },
+  STORY_TIMEOUT_MS,
+);
 
-test('buildSession honors a per-run url override in story.md', async () => {
-  const d = deps();
-  await buildSession(d, {
-    id: 'story-addr2',
-    target: 'web',
-    goal: 'check staging',
-    url: 'https://staging.example.com/app',
-  });
-  const content = await readFile(sessionPaths(d.workspace, 'story-addr2').storyMd, 'utf8');
-  expect(content).toContain('**Address:** https://staging.example.com/app');
-});
+test(
+  'buildSession honors a per-run url override in story.md',
+  async () => {
+    const d = deps();
+    await buildSession(d, {
+      id: 'story-addr2',
+      target: 'web',
+      goal: 'check staging',
+      url: 'https://staging.example.com/app',
+    });
+    const content = await readFile(sessionPaths(d.workspace, 'story-addr2').storyMd, 'utf8');
+    expect(content).toContain('**Address:** https://staging.example.com/app');
+  },
+  STORY_TIMEOUT_MS,
+);
 
 test('buildSession writes story.md without a criteria section when none given', async () => {
   const d = deps();
