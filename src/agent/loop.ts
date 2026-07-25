@@ -23,20 +23,13 @@
  * aborted run rejects loud (wired to `end_session`), never a silent half-finish.
  */
 
-import {
-  hasToolCall,
-  type LanguageModel,
-  type ModelMessage,
-  stepCountIs,
-  type Tool,
-  ToolLoopAgent,
-} from 'ai';
+import { type LanguageModel, type ModelMessage, stepCountIs, type Tool, ToolLoopAgent } from 'ai';
 import { z } from 'zod';
 import type { Bug, Findings, Step, VisualIssue } from '../findings/schema.js';
 
 /**
- * Safety cap on driver steps before the loop force-stops (paired with
- * `hasToolCall('report')`).
+ * Safety cap on driver steps before the loop force-stops (paired with the
+ * report-RESULT stop condition in {@link createDebugAgent}).
  *
  * Raised from 30 on measurement, not taste: the tool's own headline scenario —
  * register an account, log in, add two todos, toggle one, then exercise three
@@ -314,7 +307,12 @@ export interface RunTrail {
  * already streamed.
  */
 export function progressForStep(step: FinishedStep, running: RunTrail): Findings | null {
-  if (step.toolCalls.some((call) => call.toolName === 'report')) return null;
+  // Gated on the report RESULT, not the report CALL. A `report` whose arguments
+  // fail the Zod schema is never executed (AI SDK 6 marks it `invalid` and feeds
+  // the driver a tool-error), yet it still appears in `toolCalls` — so a call-gated
+  // early return dropped that step's acts, console errors and look issues in favour
+  // of a verdict that was never written.
+  if (step.toolResults.some((result) => result.toolName === 'report')) return null;
   // Checked against `toolCalls`, NOT `toolResults`: a FAILED act still lands on
   // `running.steps` (`act` records `ok: false` at act time, then rethrows — see
   // `belt/act.ts`), but AI SDK 6 routes a rejected tool call to a `tool-error`
@@ -394,6 +392,41 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Lead-in for the verdict note that carries mid-run messages the run never acted on. */
+export const UNDELIVERED_NOTE =
+  'Undelivered mid-run instruction(s) — they arrived after the driver’s last turn and were NOT acted on:';
+
+/**
+ * Fold still-pending inbox messages into the verdict's `summary`, so a caller
+ * whose `send_message` landed after the final `prepareStep` learns it was never
+ * folded into a turn. Non-object inputs (an invalid `report` call) pass through
+ * untouched — the schema, not this, decides what a valid verdict is.
+ */
+export function appendUndelivered(input: unknown, pending: readonly string[]): unknown {
+  if (pending.length === 0) return input;
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
+  const record = input as Record<string, unknown>;
+  const summary = typeof record.summary === 'string' ? record.summary : '';
+  const note = `${UNDELIVERED_NOTE} ${pending.map((message) => `"${message}"`).join('; ')}`;
+  return { ...record, summary: summary === '' ? note : `${summary}\n\n${note}` };
+}
+
+/**
+ * Wrap the terminal `report` so the LAST inbox drain happens at verdict time.
+ * `prepareStep` drains between steps only, so a message injected while the model
+ * was producing the step that calls `report` is accepted by the session (the run
+ * has not settled) and then folded into no turn at all — silently lost, with the
+ * caller believing it was delivered. Draining here surfaces it in the verdict.
+ */
+function withUndeliveredInbox(report: Tool, inbox: LoopInbox): Tool {
+  const original = report.execute;
+  if (!original) return report;
+  return {
+    ...report,
+    execute: (input, options) => original(appendUndelivered(input, inbox.drain()), options),
+  };
+}
+
 /**
  * Build the debug agent loop. The driver runs `observe`→`act`→`look` until it
  * calls `report` (terminal) or hits the step cap. Between steps `prepareStep`
@@ -422,9 +455,19 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
   const running: RunTrail = { steps: trail, bugs: [], visual: [] };
   return new ToolLoopAgent<never, BeltTools>({
     model,
-    tools,
+    tools: { ...tools, report: withUndeliveredInbox(tools.report, inbox) },
     instructions,
-    stopWhen: [stepCountIs(maxSteps), hasToolCall('report')],
+    // Stop on the report RESULT, never on the report CALL. In AI SDK 6 a tool call
+    // whose arguments fail Zod validation is NOT executed but IS pushed into
+    // `toolCalls` as `{ invalid: true }` — so `hasToolCall('report')` ended the run
+    // on a `report({status:"pass"})` that wrote nothing: full token spend, findings
+    // stuck on the last `running` snapshot, no verdict. A result only exists when
+    // `report` actually ran and wrote the verdict; anything else keeps the loop
+    // going, and the driver gets the tool-error and retries.
+    stopWhen: [
+      stepCountIs(maxSteps),
+      ({ steps }) => steps.at(-1)?.toolResults.some((r) => r.toolName === 'report') ?? false,
+    ],
     prepareStep: ({ messages, stepNumber }) => {
       // Self-look frame hygiene first: only the newest screenshot stays live.
       const pruned = pruneStaleFrames(messages);

@@ -270,7 +270,10 @@ test('describe lists every configured target with mode + operational flags', () 
   const result = svc.describe({});
 
   expect(result.models).toEqual(CONFIG.models);
-  expect(result.workspace).toBe(CONFIG.workspace);
+  // The RESOLVED per-project root, not the raw './tmp/ui-debugger-mcp' config
+  // string — a caller joining evidence paths to that would look one dir short.
+  expect(result.workspace).toBe(workspacePaths(CWD, CONFIG.workspace).root);
+  expect(result.workspace).toBe('/project/app/tmp/ui-debugger-mcp/app');
   expect(result.targets.find((t) => t.name === 'web')).toEqual({
     name: 'web',
     adapter: 'browser',

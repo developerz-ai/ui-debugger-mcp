@@ -203,6 +203,56 @@ test('an act emitted in the SAME step as report still reaches the verdict', asyn
   expect(written.at(-1)?.status).toBe('passed');
 });
 
+test('an INVALID report call does not end the run — the driver retries and the verdict lands', async () => {
+  const { written, writer } = findingsTracker();
+  const trail = createActTrail();
+  const belt = realBelt(writer, trail);
+
+  let callCount = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      callCount++;
+      if (callCount === 1) {
+        return toolCallsResponse(
+          { id: 'c1', toolName: 'act', args: { action: 'click', target: 'Save' } },
+          // `pass` is not a terminal status, so Zod rejects the input and `report`
+          // NEVER executes — but AI SDK 6 still lists the call in `step.toolCalls`
+          // as `{invalid: true}`. Stopping on the call ended the run right here:
+          // full token spend, findings frozen on the last `running` snapshot, no
+          // verdict at all, and `runDebugLoop` resolving as if all were well.
+          { id: 'c2', toolName: 'report', args: { status: 'pass' } },
+        );
+      }
+      return toolCallResponse('c3', 'report', { status: 'passed', summary: 'Save works.' });
+    },
+  });
+
+  const agent = createDebugAgent({
+    model,
+    tools: belt,
+    instructions: 'debug this app',
+    inbox: fakeInbox(),
+    progress: writer,
+    trail: trail.steps,
+    maxSteps: 10,
+  });
+
+  await runDebugLoop({ agent });
+
+  // The run continued past the rejected call and reported for real.
+  expect(callCount).toBe(2);
+  const verdict = written.filter((f) => f.status !== 'running').at(-1);
+  if (!verdict) throw new Error('expected a terminal findings write');
+  expect(verdict.status).toBe('passed');
+  expect(verdict.summary).toBe('Save works.');
+
+  // …and the step carrying the invalid call still flushed its progress: gating the
+  // running flush on the CALL threw away that step's act, console errors and look
+  // issues in favour of a verdict that was never written.
+  const running = written.filter((f) => f.status === 'running');
+  expect(running.at(-1)?.steps.map((step) => step.step)).toEqual(['did click on Save']);
+});
+
 test('scripted loop streams look issues + console errors before any verdict', async () => {
   const { written, writer } = findingsTracker();
   const belt = realBelt(writer);

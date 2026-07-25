@@ -103,6 +103,29 @@ test('one malformed row does not blind the probe for the rest of the catalog', a
   );
 });
 
+test('the probe is capped by an abort signal — a blackholing proxy cannot hang boot', async () => {
+  // Awaited during startup BEFORE the stdio transport connects, and neither Bun's
+  // nor Node's fetch times out on its own: a proxy that accepts the connection and
+  // never answers left the MCP client with a process that booted and said nothing.
+  let seenSignal: AbortSignal | undefined;
+  const spy: FetchLike = async (_url, init) => {
+    seenSignal = init?.signal;
+    return { ok: true, json: async () => CATALOG };
+  };
+  await supportsImageInput('https://x/api/v1', 'k', 'multi/model', spy);
+  expect(seenSignal).toBeInstanceOf(AbortSignal);
+  expect(seenSignal?.aborted).toBe(false);
+
+  // …and when that signal fires, the probe degrades to `null` like every other
+  // failure mode here — never a throw out of startup.
+  const aborting: FetchLike = async (_url, init) => {
+    throw Object.assign(new Error('The operation was aborted'), {
+      name: init?.signal ? 'TimeoutError' : 'Error',
+    });
+  };
+  expect(await supportsImageInput('https://x/api/v1', 'k', 'multi/model', aborting)).toBeNull();
+});
+
 test('sends the API key and hits <base>/models (trailing slash tolerated)', async () => {
   let seenUrl = '';
   let seenAuth = '';

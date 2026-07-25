@@ -33,14 +33,40 @@ const webTarget = (over: Partial<WebTarget> = {}): WebTarget => ({
 interface FakePageOpts {
   viewport?: { width: number; height: number } | null;
   waitForError?: Error;
+  /** What `page.evaluate` answers — the in-page viewport probe, for attach targets. */
+  evaluate?: () => unknown;
+  /** Extra frames beyond the main one, for the cross-frame selector paths. */
+  extraFrames?: Array<ReturnType<typeof fakeFrame>>;
+}
+
+/** Minimal stand-in for a Playwright `Frame` — `#collect`/`#locate`/`waitFor` fan out over these. */
+function fakeFrame(opts: { waitForError?: Error; count?: number } = {}) {
+  return {
+    parentFrame: () => null,
+    isDetached: () => false,
+    locator: () => ({
+      first: () => ({
+        click: async () => undefined,
+        count: async () => opts.count ?? 0,
+        waitFor: async () => {
+          if (opts.waitForError) throw opts.waitForError;
+        },
+        boundingBox: async () => ({ x: 0, y: 0, width: 10, height: 10 }),
+      }),
+      evaluateAll: async () => [],
+    }),
+  };
 }
 
 /** Minimal stand-in for a Playwright `Page` — only the members the adapter calls. */
 function fakePage(opts: FakePageOpts = {}) {
+  const main = fakeFrame({ ...(opts.waitForError ? { waitForError: opts.waitForError } : {}) });
   return {
     on: () => undefined,
     off: () => undefined,
     viewportSize: () => opts.viewport ?? { width: 1280, height: 720 },
+    evaluate: async () => opts.evaluate?.() ?? { width: 1280, height: 720 },
+    frames: () => [main, ...(opts.extraFrames ?? [])],
     mouse: {
       move: async () => undefined,
       wheel: async () => undefined,
@@ -50,16 +76,7 @@ function fakePage(opts: FakePageOpts = {}) {
     goto: async () => undefined,
     screenshot: async () => new Uint8Array(),
     waitForLoadState: async () => undefined,
-    locator: () => ({
-      first: () => ({
-        click: async () => undefined,
-        waitFor: async () => {
-          if (opts.waitForError) throw opts.waitForError;
-        },
-        boundingBox: async () => ({ x: 0, y: 0, width: 10, height: 10 }),
-      }),
-      evaluateAll: async () => [],
-    }),
+    locator: main.locator,
   };
 }
 
@@ -286,7 +303,58 @@ test('waitFor surfaces a Playwright timeout as AdapterError, not a raw error', a
   );
 });
 
+test('waitFor resolves off a CHILD frame — the wait falls through iframes like every other selector', async () => {
+  // `page.locator()` stops at the iframe boundary, so a driver that read a node
+  // tagged `frame=…` and then waited for it burned the whole timeout.
+  const embedded = fakeFrame({ count: 1 });
+  const page = fakePage({
+    // The MAIN frame never has it — Playwright brands a wait that ran out as this.
+    waitForError: Object.assign(new Error('Timeout 500ms exceeded.'), { name: 'TimeoutError' }),
+    extraFrames: [embedded],
+  });
+  const fakeContext = { pages: () => [page], close: async () => undefined };
+  const chromium = fakeLauncher({ launchPersistentContext: async () => fakeContext });
+
+  const adapter = await BrowserAdapter.create({
+    config: webTarget(),
+    profileDir: '/tmp/unused-profile',
+    chromium,
+  });
+
+  await expect(
+    adapter.waitFor({ query: 'data-testid=card-number', timeout: 500 }),
+  ).resolves.toBeUndefined();
+});
+
 // --- scroll (off-viewport guard) ---------------------------------------------
+
+test('the off-viewport guard still works when Playwright reports no viewport (attach)', async () => {
+  // `connectOverCDP` hard-codes `noDefaultViewport: true`, so EVERY attach target
+  // reports null — treating that as "inside" disabled the guard exactly there.
+  const context = {
+    pages: () => [fakePage({ viewport: null, evaluate: () => ({ width: 1280, height: 720 }) })],
+  };
+  const browser = {
+    contexts: () => [context],
+    newContext: async () => context,
+    close: async () => undefined,
+  };
+  const chromium = fakeLauncher({ connectOverCDP: async () => browser });
+
+  const adapter = await BrowserAdapter.create({
+    config: webTarget({ cdpUrl: 'http://127.0.0.1:9222' }),
+    profileDir: '/tmp/unused-profile',
+    chromium,
+  });
+
+  const belowTheFold: Node = {
+    role: 'button',
+    name: 'Pay now',
+    bounds: { x: 100, y: 4_200, width: 80, height: 30 },
+    enabled: true,
+  };
+  await expect(adapter.click(belowTheFold)).rejects.toThrow(/outside the viewport/);
+});
 
 test('scroll: an off-viewport `within` Node fails loud instead of scrolling blind', async () => {
   const fakeContext = {

@@ -25,11 +25,11 @@ test('resolveProject extracts basename from cwd', () => {
 // --- workspacePaths ---------------------------------------------------------
 
 test('workspacePaths builds correct paths', () => {
-  const paths = workspacePaths('/home/user/my-app', '/tmp/ws');
-  expect(paths.root).toBe('/tmp/ws/my-app');
-  expect(paths.chromeUserData).toBe('/tmp/ws/my-app/chrome-user-data');
-  expect(paths.sessions).toBe('/tmp/ws/my-app/sessions');
-  expect(paths.stateJson).toBe('/tmp/ws/my-app/state.json');
+  const paths = workspacePaths('/home/user/my-app', './tmp/ws');
+  expect(paths.root).toBe('/home/user/my-app/tmp/ws/my-app');
+  expect(paths.chromeUserData).toBe('/home/user/my-app/tmp/ws/my-app/chrome-user-data');
+  expect(paths.sessions).toBe('/home/user/my-app/tmp/ws/my-app/sessions');
+  expect(paths.stateJson).toBe('/home/user/my-app/tmp/ws/my-app/state.json');
 });
 
 test('workspacePaths default base is cwd/tmp/ui-debugger-mcp/<project>', () => {
@@ -37,35 +37,69 @@ test('workspacePaths default base is cwd/tmp/ui-debugger-mcp/<project>', () => {
   expect(paths.root).toBe('/projects/my-app/tmp/ui-debugger-mcp/my-app');
 });
 
+test('a relative workspace keeps the bare project dir (installs keep their profile)', () => {
+  // Resolving against cwd already makes it unique — renaming it here would orphan
+  // every existing chrome-user-data/ and sessions/ dir on upgrade.
+  expect(workspacePaths('/home/user/api', './tmp/ui-debugger-mcp').root).toBe(
+    '/home/user/api/tmp/ui-debugger-mcp/api',
+  );
+  // An absolute base that happens to live under the project root is unique too.
+  expect(workspacePaths('/home/user/api', '/home/user/api/build/ws').root).toBe(
+    '/home/user/api/build/ws/api',
+  );
+});
+
+test('two projects sharing one absolute workspace never collide on basename', () => {
+  const work = workspacePaths('/home/user/work/api', '/var/ui-debugger');
+  const oss = workspacePaths('/home/user/oss/api', '/var/ui-debugger');
+
+  // Same basename, same shared base — but a run in one must never look like a run
+  // in the other: state.json, chrome-user-data/ and sessions/ have to stay apart.
+  expect(work.root).not.toBe(oss.root);
+  expect(work.root).toMatch(/^\/var\/ui-debugger\/api-[0-9a-f]{8}$/);
+  expect(oss.root).toMatch(/^\/var\/ui-debugger\/api-[0-9a-f]{8}$/);
+  expect(work.stateJson).not.toBe(oss.stateJson);
+  expect(work.chromeUserData).not.toBe(oss.chromeUserData);
+});
+
+test('the disambiguating suffix is stable across calls (one cwd, one workspace)', () => {
+  // The CLI resolves this in a separate process — a per-run suffix would leave
+  // `status`/`stop` reading a state.json the server never writes.
+  expect(workspacePaths('/home/user/work/api', '/var/ui-debugger').root).toBe(
+    workspacePaths('/home/user/work/api', '/var/ui-debugger').root,
+  );
+});
+
 // --- resolveProfileDir ------------------------------------------------------
 
 test('resolveProfileDir falls back to the workspace chrome-user-data dir', () => {
-  const ws = workspacePaths('/home/user/my-app', '/tmp/ws');
-  expect(resolveProfileDir(ws)).toBe('/tmp/ws/my-app/chrome-user-data');
+  const ws = workspacePaths('/home/user/my-app', './tmp/ws');
+  expect(resolveProfileDir(ws)).toBe('/home/user/my-app/tmp/ws/my-app/chrome-user-data');
 });
 
 test('resolveProfileDir anchors a relative profile at the workspace root', () => {
-  const ws = workspacePaths('/home/user/my-app', '/tmp/ws');
-  expect(resolveProfileDir(ws, 'chrome-user-data')).toBe('/tmp/ws/my-app/chrome-user-data');
-  expect(resolveProfileDir(ws, 'profiles/logged-in')).toBe('/tmp/ws/my-app/profiles/logged-in');
+  const ws = workspacePaths('/home/user/my-app', './tmp/ws');
+  expect(resolveProfileDir(ws, 'chrome-user-data')).toBe(join(ws.root, 'chrome-user-data'));
+  expect(resolveProfileDir(ws, 'profiles/logged-in')).toBe(join(ws.root, 'profiles/logged-in'));
 });
 
 test('resolveProfileDir honors an absolute profile path as-is', () => {
-  const ws = workspacePaths('/home/user/my-app', '/tmp/ws');
+  const ws = workspacePaths('/home/user/my-app', './tmp/ws');
   expect(resolveProfileDir(ws, '/var/chrome/shared')).toBe('/var/chrome/shared');
 });
 
 // --- sessionPaths -----------------------------------------------------------
 
 test('sessionPaths builds correct paths', () => {
-  const ws = workspacePaths('/home/user/my-app', '/tmp/ws');
+  const ws = workspacePaths('/home/user/my-app', './tmp/ws');
   const sp = sessionPaths(ws, '12345-0001');
-  expect(sp.root).toBe('/tmp/ws/my-app/sessions/12345-0001');
-  expect(sp.storyMd).toBe('/tmp/ws/my-app/sessions/12345-0001/story.md');
-  expect(sp.screenshots).toBe('/tmp/ws/my-app/sessions/12345-0001/screenshots');
-  expect(sp.replayMp4).toBe('/tmp/ws/my-app/sessions/12345-0001/replay.mp4');
-  expect(sp.findingsJson).toBe('/tmp/ws/my-app/sessions/12345-0001/findings.json');
-  expect(sp.logs).toBe('/tmp/ws/my-app/sessions/12345-0001/logs');
+  const root = '/home/user/my-app/tmp/ws/my-app/sessions/12345-0001';
+  expect(sp.root).toBe(root);
+  expect(sp.storyMd).toBe(`${root}/story.md`);
+  expect(sp.screenshots).toBe(`${root}/screenshots`);
+  expect(sp.replayMp4).toBe(`${root}/replay.mp4`);
+  expect(sp.findingsJson).toBe(`${root}/findings.json`);
+  expect(sp.logs).toBe(`${root}/logs`);
 });
 
 // --- generateSessionId ------------------------------------------------------

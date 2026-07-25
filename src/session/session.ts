@@ -64,9 +64,11 @@ export type ReplayOutcome = { kind: 'rendered'; path: string } | { kind: 'skippe
  * captioned `replay.mp4` for PR evidence, reporting its {@link ReplayOutcome}. Bound
  * to ffmpeg + the session paths OUTSIDE the session, so the session stays tool- and
  * path-blind (the same shape as {@link SummarizeStep}). It probes for ffmpeg and
- * skips gracefully when absent — never crashing teardown.
+ * skips gracefully when absent — never crashing teardown. Receives the session's
+ * abort signal so teardown KILLS the encoder instead of orphaning it: the process
+ * can exit moments later, and a detached ffmpeg would outlive the run.
  */
-export type ReplayStep = () => Promise<ReplayOutcome>;
+export type ReplayStep = (signal?: AbortSignal) => Promise<ReplayOutcome>;
 
 /** Everything needed to construct a session. The loop is handed to `start()`, not the constructor. */
 export interface SessionOptions<A extends SessionAdapter> {
@@ -312,11 +314,16 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
    * verdict. A `skipped` outcome with a `note` (e.g. ffmpeg absent) is recorded as a
    * step so the missing video is explained, not silent. Writes back under the settled
    * terminal `status`, never a stale `running`.
+   *
+   * Skipped outright once the session has aborted: `#raceAbort` only stops the
+   * *waiting*, and the step is evaluated before it — so without this check a
+   * teardown would still spawn ffmpeg, `close()` would resolve, the process would
+   * exit and orphan the encoder (whose write-back would land after the run ended).
    */
   async #ensureReplay(): Promise<void> {
-    if (this.#replay === undefined) return;
+    if (this.#replay === undefined || this.#abort.signal.aborted) return;
     try {
-      const outcome = await this.#replay();
+      const outcome = await this.#replay(this.#abort.signal);
       if (outcome.kind === 'skipped') {
         if (outcome.note !== undefined) await this.#noteReplaySkipped(outcome.note);
         return;

@@ -6,6 +6,7 @@ import {
   appendDebugLogin,
   applyNodeFilters,
   BrowserAdapter,
+  isFrameGone,
   isOutsideViewport,
   type RawNode,
   remainingTimeout,
@@ -148,6 +149,33 @@ test('isOutsideViewport flags a below-the-fold or off-screen center', () => {
 
 test('isOutsideViewport never flags when the viewport is unknown (null)', () => {
   expect(isOutsideViewport({ x: 9_999, y: 9_999 }, null)).toBe(false);
+});
+
+// --- isFrameGone --------------------------------------------------------------
+
+test('isFrameGone accepts a frame that vanished mid-read', () => {
+  // One document out of many going away (navigation, an ad slot recycling) is not
+  // an error — the remaining frames still answer.
+  expect(isFrameGone(new Error('Frame was detached'), false)).toBe(true);
+  expect(isFrameGone(new Error('Execution context was destroyed'), false)).toBe(true);
+  expect(isFrameGone(new Error('Target closed'), false)).toBe(true);
+  // The frame's own live state counts even when the message says nothing.
+  expect(isFrameGone(new Error('something else'), true)).toBe(true);
+});
+
+test('isFrameGone rejects a bad selector — that must fail loud, not read as empty', () => {
+  // The jQuery-ism an LLM emits constantly. Swallowed per-frame, it turned into
+  // `{count: 0}` = "the element does not exist", while `click()` with the same
+  // selector reported the real reason.
+  expect(
+    isFrameGone(
+      new Error('Unknown engine "contains" while parsing selector div:contains("Total")'),
+      false,
+    ),
+  ).toBe(false);
+  expect(isFrameGone(new Error('Unexpected token "!" while parsing css selector'), false)).toBe(
+    false,
+  );
 });
 
 // --- applyNodeFilters -------------------------------------------------------

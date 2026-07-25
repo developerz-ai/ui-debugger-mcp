@@ -51,8 +51,17 @@ function baseModelId(modelId: string): string {
  */
 export type FetchLike = (
   url: string,
-  init?: { headers?: Record<string, string> },
+  init?: { headers?: Record<string, string>; signal?: AbortSignal },
 ) => Promise<{ ok: boolean; json(): Promise<unknown> }>;
+
+/**
+ * Hard cap on the catalog probe. Neither Bun's nor Node's `fetch` times out on its
+ * own, and this call is awaited during server startup BEFORE the stdio transport
+ * connects — so a proxy that accepts the connection and then blackholes the request
+ * left the MCP client staring at a process that booted and answered nothing, forever.
+ * Every other failure here is already three-valued; the hang was the one unhandled case.
+ */
+export const PROBE_TIMEOUT_MS = 5000;
 
 /**
  * Look the model up in the provider's `/models` catalog and report whether its
@@ -68,9 +77,10 @@ export async function supportsImageInput(
   try {
     res = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/models`, {
       headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
   } catch {
-    return null; // catalog unreachable — not a run-blocking condition
+    return null; // catalog unreachable (or too slow) — not a run-blocking condition
   }
   if (!res.ok) return null;
   let body: unknown;

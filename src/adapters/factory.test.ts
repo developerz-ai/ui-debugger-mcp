@@ -40,6 +40,16 @@ test('createAdapter names only the requested target, not the ones that DO exist'
   await expect(createAdapter('web', config, '/tmp/profile')).rejects.toThrow(TargetNotFoundError);
 });
 
+// A plain index read answers truthy for these, so the guard used to pass and the
+// run died deeper as "unknown adapter type: undefined" — while `describe`, which
+// enumerates with Object.entries, correctly called the same name not found.
+test('an inherited Object.prototype key is not a target (constructor, toString, __proto__)', async () => {
+  const config = baseConfig({ web: { adapter: 'browser', url: 'http://x.test', headless: true } });
+  for (const name of ['constructor', 'toString', 'valueOf', '__proto__']) {
+    await expect(createAdapter(name, config, '/tmp/profile')).rejects.toThrow(TargetNotFoundError);
+  }
+});
+
 // --- per-kind dispatch ---------------------------------------------------------
 
 test('createAdapter dispatches a `browser` target to BrowserAdapter', async () => {

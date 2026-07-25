@@ -46,8 +46,14 @@ interface FakeReturns {
   screenshot?: Uint8Array;
 }
 
-/** A fake {@link Adapter} that records the opts it receives and returns canned data. */
-function fakeAdapter(returns: FakeReturns): { adapter: Adapter; rec: Recorder } {
+/**
+ * A fake {@link Adapter} that records the opts it receives and returns canned data.
+ *
+ * `tabs` is what tells the belt which selector dialect the target speaks (the
+ * contract marks `tabs`/`selectTab` web-only), so it is present by default —
+ * pass `false` for a desktop/android-shaped adapter.
+ */
+function fakeAdapter(returns: FakeReturns, web = true): { adapter: Adapter; rec: Recorder } {
   const rec: Recorder = { screenshots: 0 };
   const adapter: Adapter = {
     open: async () => {},
@@ -75,6 +81,7 @@ function fakeAdapter(returns: FakeReturns): { adapter: Adapter; rec: Recorder } 
     },
     close: async () => {},
   };
+  if (web) adapter.tabs = async () => [{ index: 0, url: 'http://x/', title: 'Home', active: true }];
   return { adapter, rec };
 }
 
@@ -176,7 +183,7 @@ test('screenshot → saves the frame as evidence, returns its path + byte count 
   expect(JSON.stringify(res)).not.toContain(Buffer.from(png).toString('base64'));
 });
 
-test('console → returns entries + count, forwards filters/limit', async () => {
+test('console → returns entries + count, forwards filters (the cap is applied here)', async () => {
   const entry: ConsoleEntry = { level: 'error', text: 'boom', timestamp: 1 };
   const { adapter, rec } = fakeAdapter({ console: [entry] });
   const res = await runObserve(adapter, recorder(), {
@@ -185,19 +192,42 @@ test('console → returns entries + count, forwards filters/limit', async () => 
     limit: 10,
   });
   expect(res).toEqual({ kind: 'console', count: 1, entries: [entry] });
-  expect(rec.console).toEqual({ filters: { level_eq: 'error' }, limit: 10 });
+  // Read uncapped so the rows the cap drops can be counted and reported.
+  expect(rec.console).toEqual({ filters: { level_eq: 'error' } });
 });
 
+/** `n` console rows, newest first — the shape of a chatty page's log buffer. */
+const logRows = (n: number): ConsoleEntry[] =>
+  Array.from({ length: n }, (_, i) => ({ level: 'error', text: `boom ${i}`, timestamp: i }));
+
 test('console defaults to a bounded tail — chatty pages never flood context', async () => {
-  const { adapter, rec } = fakeAdapter({});
-  await runObserve(adapter, recorder(), { kind: 'console' });
-  expect(rec.console).toEqual({ filters: undefined, limit: 50 });
+  const { adapter } = fakeAdapter({ console: logRows(60) });
+  const res = await runObserve(adapter, recorder(), { kind: 'console' });
+  if (res.kind !== 'console') throw new Error('expected console result');
+  expect(res.count).toBe(50);
+});
+
+test('console says how many rows the limit cut off — never truncate silently', async () => {
+  const { adapter } = fakeAdapter({ console: logRows(60) });
+  const res = await runObserve(adapter, recorder(), { kind: 'console' });
+  if (res.kind !== 'console') throw new Error('expected console result');
+  // Without this, "50 errors" is what the blind driver reports — the truncated
+  // picture, indistinguishable from a page that really had exactly 50.
+  expect(res.truncated).toBe(10);
+  expect(res.hint).toContain('limit');
 });
 
 test('an explicit console limit wins over the default', async () => {
-  const { adapter, rec } = fakeAdapter({});
-  await runObserve(adapter, recorder(), { kind: 'console', limit: 200 });
-  expect(rec.console?.limit).toBe(200);
+  const { adapter } = fakeAdapter({ console: logRows(3) });
+  const all = await runObserve(adapter, recorder(), { kind: 'console', limit: 200 });
+  if (all.kind !== 'console') throw new Error('expected console result');
+  expect(all.count).toBe(3);
+  expect(all.truncated).toBeUndefined();
+
+  const one = await runObserve(adapter, recorder(), { kind: 'console', limit: 1 });
+  if (one.kind !== 'console') throw new Error('expected console result');
+  expect(one.count).toBe(1);
+  expect(one.truncated).toBe(2);
 });
 
 // --- network: the asset default + its own cap -------------------------------
@@ -263,6 +293,35 @@ test('an explicit network limit wins over the default — including 0', async ()
   const zero = await runObserve(adapter, recorder(), { kind: 'network', limit: 0 });
   if (zero.kind !== 'network') throw new Error('expected network result');
   expect(zero.count).toBe(0);
+});
+
+test('network says how many rows the limit cut off — a 120-failure flow is not "50 failures"', async () => {
+  // 120 failing API calls: none are hidden (failures are always kept), so before
+  // this the result was a bare `{count: 50}` — a blind driver reads that as "there
+  // were 50 failures" and reports the truncated picture.
+  const failures = Array.from({ length: 120 }, (_, i) =>
+    net({ url: `http://x/api/${i}`, resourceType: 'fetch', status: 500, ok: false }),
+  );
+  const { adapter } = fakeAdapter({ network: failures });
+  const res = await runObserve(adapter, recorder(), {
+    kind: 'network',
+    filters: { status_gte: 400 },
+  });
+  if (res.kind !== 'network') throw new Error('expected network result');
+  expect(res.count).toBe(50);
+  expect(res.hidden).toBeUndefined();
+  expect(res.truncated).toBe(70);
+  expect(res.hint).toContain('limit');
+});
+
+test('network reports the hidden assets AND the limit cut in one hint', async () => {
+  const { adapter } = fakeAdapter({ network: noisy(30) });
+  const res = await runObserve(adapter, recorder(), { kind: 'network', limit: 0 });
+  if (res.kind !== 'network') throw new Error('expected network result');
+  expect(res.hidden).toBe(30);
+  expect(res.truncated).toBe(1);
+  expect(res.hint).toContain('static asset');
+  expect(res.hint).toContain('limit');
 });
 
 test('network reports no hidden count when nothing was held back', async () => {
@@ -340,18 +399,18 @@ test('tree scoped → keeps a data-testid target (document-unique, survives scop
 
 test('coerceWithin parses a JSON-stringified node back into a node object', () => {
   const asString = JSON.stringify(sampleNode);
-  expect(coerceWithin(asString)).toEqual(sampleNode);
+  expect(coerceWithin(asString, 'web')).toEqual(sampleNode);
 });
 
 test('coerceWithin passes selector strings and complete nodes through untouched', () => {
-  expect(coerceWithin('main')).toBe('main');
-  expect(coerceWithin(sampleNode)).toEqual(sampleNode);
-  expect(coerceWithin(undefined)).toBeUndefined();
+  expect(coerceWithin('main', 'web')).toBe('main');
+  expect(coerceWithin(sampleNode, 'web')).toEqual(sampleNode);
+  expect(coerceWithin(undefined, 'web')).toBeUndefined();
 });
 
 test('coerceWithin fails loud on JSON-looking garbage (never a silent empty read)', () => {
-  expect(() => coerceWithin('{not json')).toThrow(AgentError);
-  expect(() => coerceWithin('{"foo": 1}')).toThrow(AgentError);
+  expect(() => coerceWithin('{not json', 'web')).toThrow(AgentError);
+  expect(() => coerceWithin('{"foo": 1}', 'web')).toThrow(AgentError);
 });
 
 test('schema accepts a fields-projected node as within (role + name is enough)', () => {
@@ -365,8 +424,10 @@ test('schema accepts a fields-projected node as within (role + name is enough)',
 test('a within node without bounds scopes by its selector — adapters scope by region only', async () => {
   const { adapter, rec } = fakeAdapter({ nodes: [sampleNode] });
   const projected = { role: 'navigation', name: 'Main' };
-  expect(coerceWithin(projected)).toBe('role=navigation[name="Main" i]');
-  expect(coerceWithin({ role: 'span', name: '0', testid: 'cart' })).toBe('data-testid="cart"');
+  expect(coerceWithin(projected, 'web')).toBe('role=navigation[name="Main" i]');
+  expect(coerceWithin({ role: 'span', name: '0', testid: 'cart' }, 'web')).toBe(
+    'data-testid="cart"',
+  );
   // …and the derived selector is what reaches the adapter.
   await runObserve(adapter, recorder(), { kind: 'tree', within: projected });
   expect(rec.readState?.within).toBe('role=navigation[name="Main" i]');
@@ -374,7 +435,7 @@ test('a within node without bounds scopes by its selector — adapters scope by 
 
 test('a within node with bounds but no enabled still scopes by its region', () => {
   const { bounds } = sampleNode;
-  expect(coerceWithin({ role: 'button', name: 'Save', bounds })).toEqual({
+  expect(coerceWithin({ role: 'button', name: 'Save', bounds }, 'web')).toEqual({
     role: 'button',
     name: 'Save',
     bounds,
@@ -383,14 +444,66 @@ test('a within node with bounds but no enabled still scopes by its region', () =
 });
 
 test('a within node with neither bounds nor a name fails loud, never a whole-page read', () => {
-  expect(() => coerceWithin({ role: 'generic', name: '  ' })).toThrow(AgentError);
-  expect(() => coerceWithin(JSON.stringify({ role: 'generic', name: '' }))).toThrow(AgentError);
+  expect(() => coerceWithin({ role: 'generic', name: '  ' }, 'web')).toThrow(AgentError);
+  expect(() => coerceWithin(JSON.stringify({ role: 'generic', name: '' }), 'web')).toThrow(
+    AgentError,
+  );
 });
 
 test('tree with a JSON-string within scopes the adapter read by the parsed node', async () => {
   const { adapter, rec } = fakeAdapter({ nodes: [sampleNode] });
   await runObserve(adapter, recorder(), { kind: 'tree', within: JSON.stringify(sampleNode) });
   expect(rec.readState?.within).toEqual(sampleNode);
+});
+
+// --- selector dialect: desktop/android take no Playwright syntax -------------
+
+/** The `target`s a tree read attaches, in document order. */
+async function targetsOf(adapter: Adapter, input: Parameters<typeof runObserve>[2]) {
+  const res = await runObserve(adapter, recorder(), input);
+  if (res.kind !== 'tree') throw new Error('expected tree result');
+  return res.nodes.map((node) => node.target);
+}
+
+test('native tree → role "name", the only structured form desktop/android parse', async () => {
+  // `role=button[name="Save" i]` fails their `^([a-zA-Z][\w-]*)\s+["'](.+)["']$`
+  // parser, degrades to a literal name substring, matches nothing — and every
+  // click and type on the target fails with `act: no element matched`.
+  const { adapter } = fakeAdapter({ nodes: [sampleNode] }, false);
+  expect(await targetsOf(adapter, { kind: 'tree' })).toEqual(['button "Save"']);
+});
+
+test('native tree → an android resource-id target is the bare id, not data-testid=', async () => {
+  const node: Node = { ...sampleNode, testid: 'com.example.app:id/submit' };
+  const { adapter } = fakeAdapter({ nodes: [node] }, false);
+  expect(await targetsOf(adapter, { kind: 'tree' })).toEqual(['com.example.app:id/submit']);
+  // …and a scoped read keeps it, exactly as web keeps its data-testid.
+  const { adapter: scoped } = fakeAdapter({ nodes: [node] }, false);
+  expect(await targetsOf(scoped, { kind: 'tree', query: 'Submit' })).toEqual([
+    'com.example.app:id/submit',
+  ]);
+});
+
+test('native tree → no `>> nth=` (Playwright chaining): repeats past the first get no target', async () => {
+  const dup: Node = { ...sampleNode, name: 'Add' };
+  const { adapter } = fakeAdapter({ nodes: [dup, dup] }, false);
+  expect(await targetsOf(adapter, { kind: 'tree' })).toEqual(['button "Add"', undefined]);
+});
+
+test('native tree → an unquotable name falls back to the bare name substring', async () => {
+  const odd: Node = { ...sampleNode, role: 'push button', name: 'Say "hi"' };
+  const { adapter } = fakeAdapter({ nodes: [odd] }, false);
+  expect(await targetsOf(adapter, { kind: 'tree' })).toEqual(['Say "hi"']);
+});
+
+test('native within → scopes by role "name" too, never a web engine selector', async () => {
+  const { adapter, rec } = fakeAdapter({ nodes: [sampleNode] }, false);
+  await runObserve(adapter, recorder(), {
+    kind: 'tree',
+    within: { role: 'navigation', name: 'Main' },
+  });
+  expect(rec.readState?.within).toBe('navigation "Main"');
+  expect(coerceWithin({ role: 'navigation', name: 'Main' }, 'native')).toBe('navigation "Main"');
 });
 
 // --- tabs channel -----------------------------------------------------------
@@ -411,7 +524,7 @@ test('observe kind:"tabs" lists the target’s tabs', async () => {
 });
 
 test('observe kind:"tabs" fails loud on a target with no tab concept', async () => {
-  const { adapter } = fakeAdapter({});
+  const { adapter } = fakeAdapter({}, false);
   // Desktop/android expose no `tabs` — say so rather than inventing one.
   await expect(runObserve(adapter, recorder(), { kind: 'tabs' })).rejects.toThrow(AgentError);
 });

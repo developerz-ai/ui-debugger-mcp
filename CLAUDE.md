@@ -108,7 +108,8 @@ models:  { driver, vision, summary? }   per-role; defaults: deepseek (text), glm
 targets:
   web:     { adapter: "browser", url, headless, debugLogin, executablePath, profile, cdpUrl }
   desktop: { adapter: "desktop", launch }
-  mobile:  { adapter: "android", avd, emulatorPath, adbSerial }
+  mobile:  { adapter: "android", adbSerial }            attach — a real device
+  mobile:  { adapter: "android", avd, emulatorPath? }   managed — `avd` only here
 workspace: "./tmp/ui-debugger-mcp"
 ```
 managed vs attach: `cdpUrl` (web) / `adbSerial` (android) → attach, never start/stop.

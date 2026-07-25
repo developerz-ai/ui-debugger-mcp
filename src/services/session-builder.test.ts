@@ -88,6 +88,20 @@ test('buildSession rejects an unknown target before touching disk or the browser
   );
 });
 
+test('an inherited Object.prototype key is not a target (constructor, toString, __proto__)', async () => {
+  // A plain index read answers truthy for these, so the guard used to pass: the
+  // run wrote `sessions/<id>/story.md`, then died as "unknown adapter type:
+  // undefined" — while `describe` (Object.entries) correctly called it not found.
+  const d = deps();
+  for (const name of ['constructor', 'toString', 'valueOf', '__proto__']) {
+    await expect(buildSession(d, { id: `proto-${name}`, target: name, goal: 'x' })).rejects.toThrow(
+      TargetNotFoundError,
+    );
+    // ...and nothing was littered on disk for a target that does not exist.
+    expect(existsSync(sessionPaths(d.workspace, `proto-${name}`).root)).toBe(false);
+  }
+});
+
 test('buildSession wires a desktop target (addendum + adapter) without launching', async () => {
   const built = await buildSession(deps(), {
     id: 'd1',
@@ -113,6 +127,28 @@ test('buildSession writes story.md with goal, criteria, and target', async () =>
   expect(content).toContain('open the settings dialog');
   expect(content).toContain('no console errors');
   expect(content).toContain('settings dialog is visible');
+});
+
+// A run's own record has to say WHICH app it drove: findings from a run that
+// wandered off-target are otherwise indistinguishable, after the fact, from
+// findings about the app that was actually asked for.
+test('buildSession records the app address in story.md for a web run', async () => {
+  const d = deps();
+  await buildSession(d, { id: 'story-addr', target: 'web', goal: 'check the home page' });
+  const content = await readFile(sessionPaths(d.workspace, 'story-addr').storyMd, 'utf8');
+  expect(content).toContain('**Address:** http://localhost:3000');
+});
+
+test('buildSession honors a per-run url override in story.md', async () => {
+  const d = deps();
+  await buildSession(d, {
+    id: 'story-addr2',
+    target: 'web',
+    goal: 'check staging',
+    url: 'https://staging.example.com/app',
+  });
+  const content = await readFile(sessionPaths(d.workspace, 'story-addr2').storyMd, 'utf8');
+  expect(content).toContain('**Address:** https://staging.example.com/app');
 });
 
 test('buildSession writes story.md without a criteria section when none given', async () => {
@@ -161,7 +197,8 @@ test('buildSession creates the target-configured profile dir under the workspace
   const base = await mkdtemp(join(tmpdir(), 'ui-dbg-profile-'));
   try {
     await buildWebRun('profiles/logged-in', base);
-    const dir = await stat(join(base, 'app', 'profiles', 'logged-in'));
+    const root = workspacePaths('/project/app', base).root;
+    const dir = await stat(join(root, 'profiles', 'logged-in'));
     expect(dir.isDirectory()).toBe(true);
   } finally {
     await rm(base, { recursive: true, force: true });
@@ -173,7 +210,8 @@ test('buildSession leaves the default profile dir alone when `profile` is unset'
   try {
     await buildWebRun(undefined, base);
     // No stray dir: the fallback is `chrome-user-data/`, made by `ensureWorkspace`.
-    expect(await stat(join(base, 'app', 'profiles', 'logged-in')).catch(() => null)).toBeNull();
+    const root = workspacePaths('/project/app', base).root;
+    expect(await stat(join(root, 'profiles', 'logged-in')).catch(() => null)).toBeNull();
   } finally {
     await rm(base, { recursive: true, force: true });
   }

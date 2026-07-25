@@ -316,6 +316,28 @@ test('BusctlAtspi.readTree stops early once maxNodes matches are found', async (
   expect(describedButtons).toBe(1); // btn2 never fully described once btn1 matched
 });
 
+test('BusctlAtspi.readTree abandons the walk once the deadline has passed', async () => {
+  // Every visited node costs ~2 busctl spawns and `maxNodes` only bounds *matches*, so a
+  // fruitless walk must be able to give up on the clock — `waitFor` passes its deadline.
+  const bus = fakeBus();
+  const visited: string[] = [];
+  const exec = async (args: string[]): Promise<string> => {
+    if (args.includes('GetRoleName')) visited.push(args[4] ?? '');
+    return bus.exec(args);
+  };
+  const nodes = await new BusctlAtspi({ exec }).readTree({ deadline: Date.now() - 1 });
+  expect(nodes).toEqual([]);
+  expect(visited).toEqual([]); // stopped before spending a single describe call
+});
+
+test('BusctlAtspi.readTree walks normally while the deadline is in the future', async () => {
+  const bus = fakeBus();
+  const nodes = await new BusctlAtspi({ exec: bus.exec }).readTree({
+    deadline: Date.now() + 60_000,
+  });
+  expect(nodes.map((n) => n.name)).toEqual(['My App', 'OK']);
+});
+
 test('BusctlAtspi.readTree fails loud when GetExtents blows its per-call cap', async () => {
   // A wedged bus is NOT "this node has no Component": swallowing the timeout would
   // spend the whole cap again on every remaining node of the walk.

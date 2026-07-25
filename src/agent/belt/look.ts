@@ -85,8 +85,8 @@ export type VisionGenerate = (req: VisionRequest) => Promise<{ text: string }>;
  * {@link FindingsStore} satisfies it structurally; tests pass a fake.
  */
 export interface EvidenceRecorder {
-  /** Save a PNG frame as `screenshots/NNN-<label>.png`; returns its path. */
-  saveScreenshot(label: string, data: Uint8Array): Promise<string>;
+  /** Save a frame as `screenshots/NNN-<label>.<extension>` (default `png`); returns its path. */
+  saveScreenshot(label: string, data: Uint8Array, extension?: string): Promise<string>;
 }
 
 /**
@@ -229,6 +229,48 @@ function parseVisionReply(text: string): VisionReply {
  * {@link Adapter}, {@link VisionGenerate} and {@link EvidenceRecorder} seams, so
  * it unit-tests against fakes with no network.
  */
+/**
+ * Above this, a PNG is no longer describing flat UI.
+ *
+ * Measured on `dummy/web` at 1280x720: a normal UI frame is ~43KB as PNG, and
+ * every JPEG quality that keeps text sharp came out the same size or LARGER
+ * (q85 42KB, q90 49KB, q95 62KB). So for the overwhelmingly common case PNG is
+ * already the right answer and re-encoding would trade text legibility for
+ * nothing. A frame several times that size is photographic — a gallery, a map,
+ * a video wall — which is the one content class where PNG is pathological and
+ * JPEG is many times smaller with no visible loss.
+ */
+const PNG_PATHOLOGICAL_BYTES = 400_000;
+
+/** Quality for the photo-heavy fallback. High on purpose: any UI chrome in frame must stay readable. */
+const PHOTO_JPEG_QUALITY = 92;
+
+/** A captured frame plus how to label it on the wire and on disk. */
+interface VisionFrame {
+  bytes: Uint8Array;
+  mediaType: 'image/png' | 'image/jpeg';
+  extension: 'png' | 'jpg';
+}
+
+/**
+ * Capture the frame to send to the vision model: PNG, unless PNG has clearly lost
+ * (see {@link PNG_PATHOLOGICAL_BYTES}), in which case re-capture as high-quality
+ * JPEG. The second capture costs one extra round-trip on exactly the pages where
+ * it saves multiple megabytes, and never happens on ordinary UI.
+ */
+async function captureForVision(adapter: Adapter): Promise<VisionFrame> {
+  const png = await adapter.screenshot();
+  if (png.byteLength <= PNG_PATHOLOGICAL_BYTES) {
+    return { bytes: png, mediaType: 'image/png', extension: 'png' };
+  }
+  const jpeg = await adapter.screenshot({ format: 'jpeg', quality: PHOTO_JPEG_QUALITY });
+  // An adapter that cannot honour the format hands back PNG; keep whichever is
+  // actually smaller rather than trusting that the re-capture helped.
+  return jpeg.byteLength < png.byteLength
+    ? { bytes: jpeg, mediaType: 'image/jpeg', extension: 'jpg' }
+    : { bytes: png, mediaType: 'image/png', extension: 'png' };
+}
+
 export async function runLook(
   adapter: Adapter,
   generate: VisionGenerate,
@@ -236,7 +278,7 @@ export async function runLook(
   input: LookInput,
   abortSignal?: AbortSignal,
 ): Promise<LookResult> {
-  const png = await adapter.screenshot();
+  const frame = await captureForVision(adapter);
   const { text } = await generate({
     system: VISION_SYSTEM_PROMPT,
     messages: [
@@ -244,14 +286,16 @@ export async function runLook(
         role: 'user',
         content: [
           { type: 'text', text: buildPrompt(input) },
-          { type: 'image', image: png, mediaType: 'image/png' },
+          { type: 'image', image: frame.bytes, mediaType: frame.mediaType },
         ],
       },
     ],
     abortSignal,
   });
   const reply = parseVisionReply(text);
-  const screenshot = await recorder.saveScreenshot(lookLabel(input), png);
+  // The saved evidence is the SAME frame the model judged — a finding whose
+  // screenshot shows something other than what was described is not evidence.
+  const screenshot = await recorder.saveScreenshot(lookLabel(input), frame.bytes, frame.extension);
   return { ...reply, screenshot };
 }
 
@@ -284,9 +328,11 @@ export interface SelfLookResult {
   screenshot: string;
   /** Raw frame size in bytes (before base64). */
   bytes: number;
+  /** Wire type of `frame` — `image/png` for UI, `image/jpeg` for a photo-heavy frame. */
+  mediaType: 'image/png' | 'image/jpeg';
   /** The question/expectation echoed back so the driver judges against it. */
   prompt: string;
-  /** Base64 PNG of the frame — mapped to a `file-data` part via `toModelOutput`. */
+  /** Base64 frame — mapped to a `file-data` part via `toModelOutput`. */
   frame: string;
 }
 
@@ -307,13 +353,22 @@ export function createSelfLookTool(adapter: Adapter, recorder: EvidenceRecorder)
       'Capture the current screen and LOOK at it yourself — the screenshot is attached to this tool result and you are multimodal. Judge layout, alignment, colour, overlap, cut-off text against your question/expect. Only the newest frame stays in context (older ones are pruned), so call again after the screen changes.',
     inputSchema: LookInputSchema,
     execute: async (input): Promise<SelfLookResult> => {
-      const png = await adapter.screenshot();
-      const screenshot = await recorder.saveScreenshot(lookLabel(input), png);
+      // Same encoding rule as the vision-guy path: PNG for UI, JPEG only when PNG
+      // has clearly lost on a photographic frame. Here it matters twice over — the
+      // frame goes into the DRIVER's own transcript as base64, which is 4/3 the
+      // byte size again.
+      const frame = await captureForVision(adapter);
+      const screenshot = await recorder.saveScreenshot(
+        lookLabel(input),
+        frame.bytes,
+        frame.extension,
+      );
       return {
         screenshot,
-        bytes: png.byteLength,
+        bytes: frame.bytes.byteLength,
+        mediaType: frame.mediaType,
         prompt: buildPrompt(input),
-        frame: Buffer.from(png).toString('base64'),
+        frame: Buffer.from(frame.bytes).toString('base64'),
       };
     },
     toModelOutput: ({ output }) => ({
@@ -326,7 +381,7 @@ export function createSelfLookTool(adapter: Adapter, recorder: EvidenceRecorder)
             'The frame is attached — judge it yourself and record any visual findings ' +
             `(cite ${output.screenshot} as the evidence path).`,
         },
-        { type: 'file-data', data: output.frame, mediaType: 'image/png' },
+        { type: 'file-data', data: output.frame, mediaType: output.mediaType },
       ],
     }),
   });

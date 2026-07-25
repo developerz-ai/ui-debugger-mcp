@@ -21,11 +21,16 @@ There is no DOM, no JavaScript context, and **no console or network channel**.
 | Channel       | What it gives you | Use via |
 |---------------|-------------------|---------|
 | a11y tree     | element roles, names, on-screen bounds, enabled state | \`observe({kind:"tree"})\` |
-| screenshot    | the current frame as PNG (evidence + vision) | \`observe({kind:"screenshot"})\`, \`look\` |
+| screenshot    | the frame SAVED as evidence — you get a file path back, not pixels | \`observe({kind:"screenshot"})\` |
+| eyes          | an actual visual judgment of the current frame | \`look\` |
 
 \`observe({kind:"console"})\` and \`observe({kind:"network"})\` are **unsupported** on
 desktop and error out — native apps expose no such streams. Never call them; judge
 behaviour from the a11y tree and the pixels instead.
+
+\`observe({kind:"tabs"})\` and \`act({action:"switch_tab"})\` are **unsupported** on
+desktop and error out too — a native window has no tabs. Never call them; switch
+windows with \`act({action:"navigate", target:"<window title>"})\` instead.
 
 ### The app is already up — don't navigate to a URL
 
@@ -52,10 +57,18 @@ visible element instead, e.g. a button or a heading you expect to render.
 ### Selectors — use the node's \`target\`, don't invent one
 
 Actionable nodes from \`observe({kind:"tree"})\` carry a ready-to-use \`target\` string
-built from their a11y role + name (e.g. \`role=button[name="Save" i]\`). When a node
-has a \`target\`, COPY it verbatim into \`act({action, target})\`. Do NOT hand-craft a
-selector. If a node is unnamed, pass its visible text as \`target\`, or scope the read
-with \`within\`/\`filters\` and act on what comes back.
+built from their a11y role + name — \`button "Save"\`. When a node has a \`target\`,
+COPY it verbatim into \`act({action, target})\`.
+
+Desktop targets take exactly two forms, and NOTHING else:
+- \`role "name"\` — e.g. \`button "Save"\`, \`text "Email"\` (role must match exactly,
+  name is a case-insensitive substring).
+- a plain name substring — e.g. \`Save\`.
+
+Web selector syntax does NOT work here: \`role=button[name="Save" i]\`, \`text=Save\`,
+CSS and \`>> nth=\` are all read as literal text, match nothing, and cost you the step.
+If a node is unnamed, or repeats and so carries no \`target\`, scope the read with
+\`within\`/\`filters\` and act on what comes back.
 
 ### Findings — functional + visual
 

@@ -131,13 +131,17 @@ export class FindingsStore {
     return file;
   }
 
-  /** Save a PNG as `screenshots/NNN-<label>.png` (auto-numbered). Returns its path. */
-  async saveScreenshot(label: string, data: Uint8Array): Promise<string> {
+  /**
+   * Save a frame as `screenshots/NNN-<label>.<ext>` (auto-numbered). Returns its path.
+   * `extension` defaults to `png`; `look` passes `jpg` when it fell back to JPEG for a
+   * photo-heavy frame, so the file on disk matches the bytes the model actually saw.
+   */
+  async saveScreenshot(label: string, data: Uint8Array, extension = 'png'): Promise<string> {
     await this.#ensureDirs();
     const seq = await this.#nextSeq();
     const file = join(
       this.#paths.screenshots,
-      `${String(seq).padStart(3, '0')}-${slug(label)}.png`,
+      `${String(seq).padStart(3, '0')}-${slug(label)}.${extension}`,
     );
     await writeFile(file, data);
     return file;
@@ -171,27 +175,55 @@ export class FindingsStore {
     return frames.sort((a, b) => a.seq - b.seq);
   }
 
-  /** Create `screenshots/` + `logs/` (and the session root) once; idempotent. */
+  /**
+   * Create `screenshots/` + `logs/` (and the session root) once; idempotent.
+   *
+   * A FAILED attempt is not cached: one transient `EMFILE`/`ENOSPC` would
+   * otherwise poison every later `writeFindings`/`appendLog`/`saveScreenshot` on
+   * this store — including the driver's terminal `report` — long after the
+   * condition cleared, ending the run with no `findings.json` at all.
+   */
   #ensureDirs(): Promise<void> {
     if (this.#dirsReady === null) {
-      this.#dirsReady = Promise.all([
+      const attempt = Promise.all([
         mkdir(this.#paths.screenshots, { recursive: true }),
         mkdir(this.#paths.logs, { recursive: true }),
       ]).then(() => undefined);
+      this.#dirsReady = attempt;
+      this.#forgetOnFailure(attempt, 'dirs');
     }
     return this.#dirsReady;
+  }
+
+  /**
+   * Drop a rejected cached attempt so the next call retries it. Guarded by
+   * identity: a newer attempt already in the field is never cleared. The `catch`
+   * here handles this branch only — the attempt itself is still returned to (and
+   * awaited by) the caller, so the failure is never swallowed.
+   */
+  #forgetOnFailure(attempt: Promise<void>, field: 'dirs' | 'seq'): void {
+    attempt.catch(() => {
+      if (field === 'dirs') {
+        if (this.#dirsReady === attempt) this.#dirsReady = null;
+      } else if (this.#seqReady === attempt) {
+        this.#seqReady = null;
+      }
+    });
   }
 
   /**
    * Next screenshot index, seeding from existing files so resume never overwrites.
    * The seed scan is cached as a promise (like `#ensureDirs`) so concurrent first
    * saves share one scan and still get distinct numbers — never a duplicate `001`.
+   * A failed scan is dropped from the cache (same reason as `#ensureDirs`).
    */
   async #nextSeq(): Promise<number> {
     if (this.#seqReady === null) {
-      this.#seqReady = this.#scanMaxSeq().then((max) => {
+      const attempt = this.#scanMaxSeq().then((max) => {
         this.#screenshotSeq = max;
       });
+      this.#seqReady = attempt;
+      this.#forgetOnFailure(attempt, 'seq');
     }
     await this.#seqReady;
     this.#screenshotSeq += 1;

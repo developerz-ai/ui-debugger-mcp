@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { DesktopTarget } from '../../config/schema.js';
 import { AdapterError } from '../../errors.js';
 import type { Node, ScrollDirection } from '../contract.js';
-import type { AtspiNode, AtspiReadOptions, AtspiSource } from './atspi.js';
+import { type AtspiNode, type AtspiReadOptions, type AtspiSource, matchesQuery } from './atspi.js';
 import type { ScreenCapture } from './capture.js';
 import { DesktopAdapter, scrollRepeat } from './desktop-adapter.js';
 import type { PointerInput, WindowMatch } from './input.js';
@@ -30,6 +30,22 @@ class FakeAtspi implements AtspiSource {
   constructor(readonly nodes: AtspiNode[]) {}
   async readTree(_opts?: AtspiReadOptions): Promise<AtspiNode[]> {
     return this.nodes;
+  }
+}
+
+/**
+ * An AT-SPI source that behaves like the real walk: it collects **query matches** and
+ * stops at `maxNodes` — so a `maxNodes` tighter than the caller's post-walk narrowing
+ * (region/filters) hides matches that sit deeper. Records the options it was given.
+ */
+class WalkingAtspi implements AtspiSource {
+  lastOpts: AtspiReadOptions | undefined;
+  constructor(readonly nodes: AtspiNode[]) {}
+  async readTree(opts: AtspiReadOptions = {}): Promise<AtspiNode[]> {
+    this.lastOpts = opts;
+    const query = opts.query;
+    const matched = query ? this.nodes.filter((n) => matchesQuery(n, query)) : this.nodes;
+    return matched.slice(0, opts.maxNodes ?? matched.length);
   }
 }
 
@@ -101,6 +117,39 @@ test('find returns the first matching node, or null', async () => {
   const { adapter } = build([atspiNode({ name: 'OK' })]);
   expect((await adapter.find({ query: 'OK' }))?.name).toBe('OK');
   expect(await adapter.find({ query: 'Nope' })).toBeNull();
+});
+
+/** Build an adapter over the match-counting {@link WalkingAtspi} walk. */
+function walking(nodes: AtspiNode[]): { adapter: DesktopAdapter; atspi: WalkingAtspi } {
+  const atspi = new WalkingAtspi(nodes);
+  return {
+    adapter: DesktopAdapter.create({
+      config,
+      atspi,
+      input: new FakePointer(),
+      capture: new FakeCapture(),
+    }),
+    atspi,
+  };
+}
+
+test('find with filters does not let `limit` stop the walk at a filtered-out match', async () => {
+  // The first breadth-first "Save" is disabled; the enabled one sits deeper. `limit: 1`
+  // used to cap the *walk*, so the filter then dropped the only node it was given and
+  // click reported `no element matched query "Save"` for a button that is right there.
+  const { adapter, atspi } = walking([
+    atspiNode({ name: 'Save', enabled: false }),
+    atspiNode({ name: 'Save', enabled: true }),
+  ]);
+  const found = await adapter.find({ query: 'Save', filters: { enabled_eq: true } });
+  expect(found?.enabled).toBe(true);
+  expect(atspi.lastOpts?.maxNodes).toBe(200); // not 1 — filters are applied after the walk
+});
+
+test('find without filters still stops the walk at the first match', async () => {
+  const { adapter, atspi } = walking([atspiNode({ name: 'Save' })]);
+  expect((await adapter.find({ query: 'Save' }))?.name).toBe('Save');
+  expect(atspi.lastOpts?.maxNodes).toBe(1); // the walk-pruning optimization is intact
 });
 
 // --- click / type -----------------------------------------------------------
@@ -222,6 +271,18 @@ test('waitFor resolves once the query is present', async () => {
 test('waitFor times out loud when the query never appears', async () => {
   const { adapter } = build([]);
   await expect(adapter.waitFor({ query: 'Ghost', timeout: 0 })).rejects.toThrow(AdapterError);
+});
+
+test('waitFor hands its deadline to the walk so one poll cannot outlive the timeout', async () => {
+  // `maxNodes` bounds matches, not visited nodes: on a big tree (Electron with a11y on)
+  // a fruitless walk runs for minutes, and waitFor — which only checks the clock between
+  // polls — overshot its own timeout by a whole walk.
+  const { adapter, atspi } = walking([]);
+  const started = Date.now();
+  await expect(adapter.waitFor({ query: 'Ghost', timeout: 50 })).rejects.toThrow(AdapterError);
+  const deadline = atspi.lastOpts?.deadline;
+  expect(deadline).toBeGreaterThanOrEqual(started + 50);
+  expect(deadline).toBeLessThan(started + 5_000);
 });
 
 test('waitFor rejects networkIdle and an empty wait (unsupported on desktop)', async () => {

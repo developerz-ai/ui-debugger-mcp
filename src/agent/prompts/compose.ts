@@ -36,6 +36,14 @@ export interface ComposeOptions {
   /** Optional pass/fail criteria. When omitted, agent uses built-in judgment. */
   criteria?: string[];
   /**
+   * Where the app under test lives — the run's URL (web). Observed: with no
+   * address in its context, a driver given the goal "debug the Nimbus Store home
+   * page" opened `https://nimbus-store.vercel.app` as its FIRST action and spent
+   * the whole run reporting bugs in a stranger's production site. Stating the
+   * address is half the fix; `act` enforcing it is the other half.
+   */
+  address?: string;
+  /**
    * Which `look` the belt is wired to — self-look (the driver is multimodal and
    * judges the frame itself) or the separate vision guy. Required, not defaulted:
    * a wrong prompt here tells the driver it cannot see what it can, or to ask a
@@ -51,9 +59,23 @@ export interface ComposeOptions {
  * model can orient itself without relying on positional context.
  */
 export function composeSystemPrompt(options: ComposeOptions): string {
-  const { target, story, criteria, selfLook } = options;
+  const { target, story, criteria, selfLook, address } = options;
 
   const addendum = TARGET_ADDENDA[target];
+
+  const addressSection = address
+    ? `\
+## The app under test
+
+${address}
+
+You are ALREADY on it — the run opened it before your first step. This is the only
+app you are debugging. Never navigate to any other host, however plausible its name
+looks next to the goal: a bug you find somewhere else is worthless, because the
+smart agent cannot fix code it does not own. Links and paths within this app are
+fine; a different host is not, and \`act\` will refuse it.
+`
+    : '';
 
   const storySection = `\
 ## Your goal for this session
@@ -73,7 +95,7 @@ ${criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}
 `
       : '';
 
-  return [debugAgentPrompt(selfLook), addendum, storySection, criteriaSection]
+  return [debugAgentPrompt(selfLook), addendum, addressSection, storySection, criteriaSection]
     .filter((section) => section.length > 0)
     .join('\n---\n\n');
 }

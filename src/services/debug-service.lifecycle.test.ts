@@ -11,7 +11,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ResolvedConfig } from '../config/load.js';
-import { AdapterError, ConfigError, SessionBusyError, SessionNotFoundError } from '../errors.js';
+import {
+  AdapterError,
+  ConfigError,
+  SessionBusyError,
+  SessionNotFoundError,
+  SessionSettledError,
+} from '../errors.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { SessionManager } from '../session/manager.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
@@ -298,18 +304,136 @@ function spyState(opts: { recordFails?: boolean; foreign?: () => ForeignRun | nu
   return { state, clears: () => clears, foreignReads: () => foreignReads };
 }
 
-test('a failing state.json write tears the run down instead of leaving it uncapped', async () => {
+test('a failing state.json write fails the start loud, before anything is launched', async () => {
   const { build, log } = fakeBuilder();
-  const { state, clears } = spyState({ recordFails: true });
+  const { state } = spyState({ recordFails: true });
   const svc = makeService(build, { state, defaultTimeoutMs: 20 });
 
+  // A run the CLI cannot see is a run nobody can stop: refuse it rather than
+  // leave a browser holding the profile lock with no breadcrumb to reach it by.
   await expect(svc.start({ target: 'web', goal: 'x' })).rejects.toThrow(AdapterError);
-  expect(manager.has(CWD)).toBe(false); // no live run nobody holds an id for
-  expect(log.adapters[0]?.closeCalls).toBe(1);
-  expect(clears()).toBe(1); // no half-written `running` breadcrumb for the CLI
+  expect(log.builds).toBe(0); // the breadcrumb precedes the launch — nothing came up
+  expect(manager.has(CWD)).toBe(false);
 
-  await tick(60); // the armed timer was cancelled with the teardown
-  expect(log.adapters[0]?.closeCalls).toBe(1);
+  await tick(60); // no run, so no timer to fire
+  expect(manager.has(CWD)).toBe(false);
+});
+
+test('the breadcrumb is written BEFORE the launch (a starting run is visible + stoppable)', async () => {
+  // Chrome takes seconds to come up; recording only afterwards leaves that whole
+  // window invisible out-of-band — `status` says "no debug run recorded" and
+  // `stop` never signals, while a real browser already holds the profile lock.
+  const { build } = fakeBuilder();
+  const events: string[] = [];
+  const state: StatePort = {
+    async record(run) {
+      events.push(`record:${run.sessionId}`);
+    },
+    async clear() {
+      events.push('clear');
+    },
+    async foreignRun() {
+      return null;
+    },
+    async foreignFindings() {
+      return null;
+    },
+  };
+  const tracedBuild: SessionBuilder = async (params) => {
+    events.push('build');
+    return build(params);
+  };
+  const svc = makeService(tracedBuild, { state });
+
+  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
+
+  expect(events).toEqual([`record:${session_id}`, 'build']);
+});
+
+test('a launch that fails clears the breadcrumb it wrote (no phantom running run)', async () => {
+  const { build } = fakeBuilder();
+  const { state, clears } = spyState();
+  const failingOpen: SessionBuilder = async (params) => {
+    const built = await build(params);
+    return {
+      ...built,
+      open: async () => {
+        throw new AdapterError('chrome failed to launch');
+      },
+    };
+  };
+  const svc = makeService(failingOpen, { state });
+
+  await expect(svc.start({ target: 'web', goal: 'x' })).rejects.toThrow(AdapterError);
+  expect(clears()).toBe(1); // the early `running` breadcrumb is not left behind
+  expect(manager.has(CWD)).toBe(false);
+});
+
+// --- shutdown during an in-flight start -------------------------------------
+
+test('a signal mid-launch aborts the start and closes what already came up', async () => {
+  // `endActive()` used to return instantly here (the session is not in the manager
+  // until after the build), so `process.exit` fired mid-launch and left Chrome
+  // holding the profile lock — every later run then failed "profile is locked".
+  const { build, log } = fakeBuilder();
+  let launching: () => void = () => undefined;
+  const inFlight = new Promise<void>((resolve) => {
+    launching = resolve;
+  });
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const slowBuild: SessionBuilder = async (params) => {
+    launching(); // Chromium is coming up...
+    await held;
+    return build(params); // ...and now it exists, holding the profile lock
+  };
+  const svc = makeService(slowBuild);
+
+  const starting = svc.start({ target: 'web', goal: 'x' });
+  await inFlight; // the signal lands mid-launch, before any manager slot exists
+  let ended = false;
+  const ending = svc.endActive().then(() => {
+    ended = true;
+  });
+
+  await tick(20);
+  expect(ended).toBe(false); // endActive WAITS for the launch it just cancelled
+
+  release();
+  await expect(starting).rejects.toThrow(SessionSettledError);
+  await ending;
+
+  expect(ended).toBe(true);
+  expect(log.adapters[0]?.closeCalls).toBe(1); // the half-launched target was closed
+  expect(manager.has(CWD)).toBe(false);
+});
+
+test('a cancelled start leaves no breadcrumb and does not wedge the next start', async () => {
+  const { build } = fakeBuilder();
+  const { state, clears } = spyState();
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let slow = true;
+  const maybeSlowBuild: SessionBuilder = async (params) => {
+    if (slow) await held;
+    return build(params);
+  };
+  const svc = makeService(maybeSlowBuild, { state });
+
+  const starting = svc.start({ target: 'web', goal: 'x' });
+  const ending = svc.endActive();
+  release();
+  await expect(starting).rejects.toThrow(SessionSettledError);
+  await ending;
+  expect(clears()).toBeGreaterThanOrEqual(1); // nothing left pointing the CLI at a dead run
+
+  slow = false; // the in-flight guard released with the cancelled start
+  const { session_id } = await svc.start({ target: 'web', goal: 'y' });
+  expect(manager.get(CWD).id).toBe(session_id);
 });
 
 test('end clears state.json even when the session close throws (error still propagates)', async () => {

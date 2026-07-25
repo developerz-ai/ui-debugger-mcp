@@ -125,6 +125,14 @@ export interface LogQuery {
   limit?: number;
 }
 
+/** Encoding for {@link Adapter.screenshot}. `jpeg` is for photo-heavy frames only — see the method doc. */
+export interface ScreenshotOptions {
+  /** Wire format. Defaults to `png`. */
+  format?: 'png' | 'jpeg';
+  /** JPEG quality 1-100; ignored for `png`. High by default — UI text must stay readable. */
+  quality?: number;
+}
+
 /** What {@link Adapter.waitFor} should block on; combine fields (all that are set must hold). */
 export interface WaitOptions {
   /** Wait until a node matching this selector exists/becomes visible. */
@@ -249,8 +257,21 @@ export interface Adapter {
   /** Read the structured UI tree as normalized {@link Node}s (DOM · a11y tree · view hierarchy). */
   readState(opts?: Query): Promise<Node[]>;
 
-  /** Capture the current frame as PNG bytes (for evidence + the vision guy). */
-  screenshot(): Promise<Uint8Array>;
+  /**
+   * Capture the current frame (for evidence + the vision guy).
+   *
+   * PNG by default and for every evidence frame — UI is flat colour and sharp
+   * text, which is exactly what PNG is good at. Measured on the `dummy/web`
+   * fixture at 1280x720: PNG 43KB, JPEG q85 42KB, JPEG q90 49KB, JPEG q95 62KB —
+   * so encoding UI as JPEG costs text quality and saves nothing.
+   *
+   * {@link ScreenshotOptions.format} exists for the inverse case: a photo-heavy
+   * page, where PNG is pathological and a high-quality JPEG is many times
+   * smaller with no visible loss on photographic content. `look` uses it only
+   * above a size threshold that flat UI never reaches. Adapters that cannot
+   * honour a format return PNG — the caller reads the real type off the result.
+   */
+  screenshot(opts?: ScreenshotOptions): Promise<Uint8Array>;
 
   /** Block until {@link WaitOptions} hold (node appears, network idle, …) or time out. */
   waitFor(opts: WaitOptions): Promise<void>;

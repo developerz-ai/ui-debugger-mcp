@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { isAbsolute, join } from 'node:path';
 import { supportsImageInput } from './agent/capabilities.js';
 import { resolveModels } from './agent/models.js';
 import { createOpenRouterProvider, resolveProviderConfig } from './agent/provider.js';
@@ -13,6 +12,7 @@ import { startStdioServer } from './mcp/server.js';
 import { outerTools } from './mcp/tools/index.js';
 import { DebugService } from './services/debug-service.js';
 import { makeSessionBuilder } from './services/session-builder.js';
+import { createShutdown } from './services/shutdown.js';
 import { SessionManager } from './session/manager.js';
 import type { Session } from './session/session.js';
 import { FileStatePort } from './session/state-file.js';
@@ -57,12 +57,10 @@ async function main(): Promise<void> {
     const config = loadConfig();
     const cwd = process.cwd();
 
-    // Bootstrap workspace directories (chrome-user-data/, sessions/)
-    // Anchor relative workspace paths to the project root.
-    const workspaceBase = isAbsolute(config.workspace)
-      ? config.workspace
-      : join(cwd, config.workspace);
-    const workspace = workspacePaths(cwd, workspaceBase);
+    // Bootstrap workspace directories (chrome-user-data/, sessions/).
+    // A relative workspace anchors at the project root; an absolute (shared) one
+    // gets a cwd-derived project dir — see `workspacePaths`.
+    const workspace = workspacePaths(cwd, config.workspace);
     await ensureWorkspace(workspace);
 
     // Resolve provider + per-role models (driver, vision, summary)
@@ -109,12 +107,12 @@ async function main(): Promise<void> {
 
     // Graceful stop: a CLI `stop` (or any SIGTERM/SIGINT) tears the run down —
     // abort the loop, close the browser, free the profile — then exits cleanly.
-    const shutdown = (exitCode: number) => {
-      service
-        .endActive()
-        .catch(() => undefined)
-        .finally(() => process.exit(exitCode));
-    };
+    // Bounded: a teardown that wedges (a tool call that never observes its abort)
+    // must not leave the process alive forever, because `stop` only signals once.
+    const shutdown = createShutdown({
+      endActive: () => service.endActive(),
+      exit: (exitCode) => process.exit(exitCode),
+    });
     process.once('SIGTERM', () => shutdown(0));
     process.once('SIGINT', () => shutdown(130));
 

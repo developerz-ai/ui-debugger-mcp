@@ -178,6 +178,42 @@ describe('AndroidAdapter.scroll', () => {
     const swipe = adb.calls.find((c) => c.method === 'shell' && c.args[1] === 'swipe');
     expect(swipe).toBeDefined();
   });
+
+  test('zero-size within region → throws, never swipes at the screen origin', async () => {
+    // uiautomator reports a not-yet-laid-out list as [0,0][0,0]: the swipe would be a
+    // 2px drag at the top-left with a negative Y (a notification-shade pull), reported
+    // to the blind driver as a successful scroll.
+    const node = makeNode({ name: 'Items', bounds: { x: 0, y: 0, width: 0, height: 0 } });
+    const { adapter, adb } = makeAdapter({ nodes: [node] });
+    await expect(adapter.scroll({ direction: 'down', within: 'Items' })).rejects.toThrow(
+      /has zero size \(0x0\)/,
+    );
+    expect(adb.calls.filter((c) => c.args[1] === 'swipe')).toHaveLength(0);
+  });
+
+  test('a zero-size within Node ref is rejected too (not just resolved selectors)', async () => {
+    const region: Node = {
+      role: 'list',
+      name: 'Items',
+      bounds: { x: 10, y: 10, width: 300, height: 0 },
+      enabled: true,
+    };
+    const { adapter, adb } = makeAdapter();
+    await expect(adapter.scroll({ direction: 'down', within: region })).rejects.toThrow(
+      AdapterError,
+    );
+    expect(adb.calls.filter((c) => c.args[1] === 'swipe')).toHaveLength(0);
+  });
+});
+
+describe('AndroidAdapter.readState within', () => {
+  test('zero-size region throws instead of reporting an empty region', async () => {
+    // Silently returning [] tells the blind driver the region holds nothing, when in
+    // truth the region itself was never on screen.
+    const node = makeNode({ name: 'Items', bounds: { x: 0, y: 0, width: 0, height: 0 } });
+    const { adapter } = makeAdapter({ nodes: [node] });
+    await expect(adapter.readState({ within: 'Items' })).rejects.toThrow(AdapterError);
+  });
 });
 
 describe('AndroidAdapter.screenshot', () => {

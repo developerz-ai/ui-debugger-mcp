@@ -26,6 +26,10 @@
       "avd": "my-avd",
       "emulatorPath": null,
       "adbSerial": null
+    },
+    "phone": {
+      "adapter": "android",
+      "adbSerial": "R58M12ABCDE"
     }
   }
 }

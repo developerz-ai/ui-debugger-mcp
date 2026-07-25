@@ -14,8 +14,9 @@
  */
 
 import { expect, test } from 'bun:test';
+import type { Adapter, Node } from '../../adapters/contract.js';
 import { ACT_ACTIONS } from '../belt/act.js';
-import { NODE_FIELDS, OBSERVE_KINDS } from '../belt/observe.js';
+import { NODE_FIELDS, OBSERVE_KINDS, runObserve } from '../belt/observe.js';
 import { ANDROID_ADDENDUM_PROMPT } from './android-addendum.js';
 import { debugAgentPrompt } from './debug-agent.js';
 import { DESKTOP_ADDENDUM_PROMPT } from './desktop-addendum.js';
@@ -67,6 +68,80 @@ test('every fields:[…] example lists only real NODE_FIELDS columns', () => {
         }
       }
     }
+  }
+});
+
+// --- the native addenda vs what the belt really does ------------------------
+
+/** The two addenda whose target has no DOM, no tabs, and no Playwright selectors. */
+const NATIVE_PROMPTS: Record<string, string> = {
+  'desktop addendum': DESKTOP_ADDENDUM_PROMPT,
+  'android addendum': ANDROID_ADDENDUM_PROMPT,
+};
+
+/** A minimal NATIVE-shaped adapter — no `tabs`, which is what marks a web target. */
+function nativeAdapter(nodes: Node[]): Adapter {
+  return {
+    open: async () => {},
+    find: async () => null,
+    click: async () => {},
+    type: async () => {},
+    pressKey: async () => {},
+    scroll: async () => {},
+    readState: async () => nodes,
+    screenshot: async () => new Uint8Array(),
+    waitFor: async () => {},
+    console: async () => [],
+    network: async () => [],
+    close: async () => {},
+  };
+}
+
+test('the native addenda teach the exact `target` form the belt emits for them', async () => {
+  // Both addenda order the driver to COPY a node's `target` verbatim, so a target
+  // in web syntax (`role=button[name="Save" i]`) means every click and type on
+  // desktop/android dies in `find` — the addendum example and the emitted string
+  // must be the same string.
+  const node: Node = {
+    role: 'button',
+    name: 'Save',
+    bounds: { x: 0, y: 0, width: 1, height: 1 },
+    enabled: true,
+  };
+  const res = await runObserve(
+    nativeAdapter([node]),
+    { saveScreenshot: async () => 'screenshots/001.png' },
+    { kind: 'tree' },
+  );
+  if (res.kind !== 'tree') throw new Error('expected tree result');
+  const target = res.nodes[0]?.target;
+  expect(target).toBe('button "Save"');
+  for (const [name, prompt] of Object.entries(NATIVE_PROMPTS)) {
+    if (!prompt.includes(`\`${target}\``)) {
+      throw new Error(`${name}: does not teach the emitted target \`${target}\``);
+    }
+  }
+});
+
+test('the native addenda declare tabs + switch_tab unsupported (the belt throws on both)', () => {
+  for (const [name, prompt] of Object.entries(NATIVE_PROMPTS)) {
+    const block = prompt.split('\n\n').find((part) => part.includes('kind:"tabs"'));
+    if (block === undefined) throw new Error(`${name}: never mentions observe({kind:"tabs"})`);
+    expect(block).toContain('switch_tab');
+    expect(block).toContain('unsupported');
+  }
+});
+
+test('the native addenda do not sell `observe({kind:"screenshot"})` as vision', () => {
+  // `runObserve`'s screenshot branch returns `{path, bytes}` and never image bytes;
+  // `look` is the only thing that judges pixels.
+  for (const [name, prompt] of Object.entries(NATIVE_PROMPTS)) {
+    const row = prompt.split('\n').find((line) => line.includes('kind:"screenshot"'));
+    if (row === undefined) throw new Error(`${name}: never mentions the screenshot channel`);
+    expect(row).toContain('path');
+    expect(row).not.toContain('look');
+    // …and `look` still has a row of its own.
+    expect(prompt.split('\n').some((line) => line.includes('| `look` |'))).toBe(true);
   }
 });
 

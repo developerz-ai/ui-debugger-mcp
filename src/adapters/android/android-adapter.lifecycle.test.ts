@@ -8,6 +8,11 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { AdapterError, AdbError } from '../../errors.js';
 import type { Adb } from './adb.js';
 import { AndroidAdapter, type AndroidAdapterInit } from './android-adapter.js';
@@ -18,6 +23,16 @@ import {
   makeAttachAdapter,
   makeFakeEmulator,
 } from './android-adapter.test-helpers.js';
+
+/** True while `pid` is alive (`kill -0`); false once it's gone (ESRCH). */
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 describe('AndroidAdapter.create', () => {
   test('with adbSerial → attach mode (close is no-op)', async () => {
@@ -41,7 +56,74 @@ describe('AndroidAdapter.create', () => {
   });
 });
 
+describe('AndroidAdapter managed teardown', () => {
+  test('close kills an emulator that ignores SIGTERM instead of orphaning it', async () => {
+    // The old close nulled the handle *before* signalling and never verified death: a
+    // process that traps SIGTERM survived, with nothing left able to kill it — it (and
+    // its console port) outlived the server.
+    const dir = await mkdtemp(join(tmpdir(), 'uidbg-android-'));
+    const ready = join(dir, 'ready');
+    const child = spawn(
+      '/bin/sh',
+      ['-c', `trap '' TERM; : > ${JSON.stringify(ready)}; while :; do sleep 0.1; done`],
+      { detached: true, stdio: 'ignore' },
+    );
+    const pid = child.pid;
+    expect(pid).toBeDefined();
+    const armed = Date.now() + 5000;
+    while (!existsSync(ready)) {
+      expect(Date.now()).toBeLessThan(armed); // the trap was never installed
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', avd: 'test_avd' },
+      adb: new FakeAdb(),
+      ui: new FakeUi([]),
+      spawn: () => child,
+      pickPort: async () => 5554,
+      bootWaitMs: 2000,
+    });
+    try {
+      await adapter.open('com.example');
+      await adapter.close();
+      const deadline = Date.now() + 3000;
+      while (isAlive(pid as number)) {
+        expect(Date.now()).toBeLessThan(deadline); // survived close(), orphaned for good
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } finally {
+      try {
+        process.kill(-(pid as number), 'SIGKILL');
+      } catch {
+        // already gone
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('AndroidAdapter managed boot', () => {
+  test('managed boot without an `avd` fails loud (attach-only config)', async () => {
+    // `avd` is optional in config because attach never reads it — managed must say so
+    // itself rather than spawning `emulator @undefined`.
+    let spawns = 0;
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android' },
+      adb: new FakeAdb(),
+      ui: new FakeUi([]),
+      spawn: () => {
+        spawns++;
+        return makeFakeEmulator(undefined);
+      },
+      pickPort: async () => 5554,
+      bootWaitMs: 2000,
+    });
+    const err = await adapter.open('com.example').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as AdapterError).message).toContain('managed boot needs `avd`');
+    expect(spawns).toBe(0);
+  });
+
   test('open boots the emulator via the spawn seam and starts the activity', async () => {
     const adb = new FakeAdb();
     const ui = new FakeUi([]);

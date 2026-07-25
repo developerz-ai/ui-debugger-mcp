@@ -12,6 +12,10 @@ pnpm-lock.yaml
 # launch config holds the model API key — never commit
 .mcp.json
 
+# editor
+.vscode/
+.idea/
+
 # Claude Code runtime
 .claude/scheduled_tasks.lock
 

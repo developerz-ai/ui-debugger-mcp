@@ -97,13 +97,25 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   <div id="box" style="height:100px;overflow:auto;border:1px solid #000">
     <div style="height:1200px">scrollable region</div>
   </div>
-  <!-- Embedded document: page-level locators stop at this boundary. -->
-  <iframe id="embed" src="/frame" style="width:320px;height:120px;border:0"></iframe>
+  <!-- Embedded document: page-level locators stop at this boundary. The wrapper
+       exists only in THIS document, so a string scope must be resolved once and
+       applied geometrically, or everything under it disappears. -->
+  <div id="checkout">
+    <input id="checkout-field" value="own document">
+    <iframe id="embed" src="/frame" style="width:320px;height:120px;border:0"></iframe>
+  </div>
+  <!-- Same content, but with the border+padding an iframe usually carries: the
+       element's bounding box is the BORDER box while in-frame rects are relative
+       to the CONTENT origin, so the offset must add the 5px border + 3px padding. -->
+  <iframe id="bordered" data-testid="bordered-frame" src="/frame2"
+          style="width:320px;height:120px;border:5px solid #000;padding:3px"></iframe>
   <!-- Opens a second tab: the adapter must still be driving the first one. -->
   <a id="popup" href="/" target="_blank">Open in new tab</a>
   <button id="submit">Submit</button>
   <!-- enabled-state matrix: native disabled/readonly, inherited fieldset, ARIA -->
   <input id="plain" value="editable">
+  <!-- Pre-filled PAST the element's center, so a click parks the caret mid-string. -->
+  <input id="prefilled" size="60" value="0123456789012345678901234567890123456789">
   <input id="check" type="checkbox">
   <input id="ro" value="locked" readonly>
   <input id="off" value="off" disabled>
@@ -165,6 +177,25 @@ const FRAME_HTML = `<!DOCTYPE html>
 <head><meta charset="utf-8"><title>Embedded</title></head>
 <body style="margin:0">
   <button id="inner" data-testid="inner-button">Inner Button</button>
+  <p id="innerscroll">0</p>
+  <!-- A scrollable region INSIDE the frame: a page-level locator cannot reach it. -->
+  <div id="innerbox" style="height:60px;overflow:auto">
+    <div style="height:900px">inner scrollable region</div>
+  </div>
+  <script>
+    document.getElementById('innerbox').addEventListener('scroll', function(e) {
+      document.getElementById('innerscroll').textContent = String(Math.round(e.target.scrollTop));
+    }, { passive: true });
+  </script>
+</body>
+</html>`;
+
+/** A second embedded document, behind a bordered+padded iframe (offset fixture). */
+const FRAME2_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Embedded Two</title></head>
+<body style="margin:0">
+  <button id="inner2" data-testid="inner-two">Inner Two</button>
 </body>
 </html>`;
 
@@ -198,6 +229,11 @@ const FRAME_HTML = `<!DOCTYPE html>
         }
         if (path === '/frame') {
           return new Response(FRAME_HTML, {
+            headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          });
+        }
+        if (path === '/frame2') {
+          return new Response(FRAME2_HTML, {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
           });
         }
@@ -491,7 +527,7 @@ const FRAME_HTML = `<!DOCTYPE html>
     await adapter.click('#submit');
     await adapter.waitFor({ networkIdle: true, timeout: 5_000 });
     const [entry] = await adapter.network({ filters: { url_contains: '/api/echo' } });
-    expect(entry?.requestHeaders?.['authorization']).toMatch(/^<redacted, \d+ chars>$/);
+    expect(entry?.requestHeaders?.authorization).toMatch(/^<redacted, \d+ chars>$/);
     expect(entry?.requestHeaders?.['content-type']).toContain('application/json');
     expect(entry?.responseHeaders?.['set-cookie']).toMatch(/^<redacted, \d+ chars>$/);
   }, 15_000);
@@ -530,6 +566,68 @@ const FRAME_HTML = `<!DOCTYPE html>
     // Clicking through the selector path must not throw: it falls through to the
     // frame that actually holds the element.
     await adapter.click('data-testid=inner-button');
+  }, 15_000);
+
+  test('readState: an invalid selector fails loud instead of reading back as “nothing there”', async () => {
+    // The jQuery-ism LLMs emit constantly. Swallowed per-frame it returned
+    // `{count: 0}` — which the driver reads as "the element does not exist" —
+    // while `click()` with the same selector reported the real error.
+    const read = adapter.readState({ query: 'div:contains("Total")' });
+    await expect(read).rejects.toThrow(AdapterError);
+    await expect(read).rejects.toThrow(/contains/);
+  }, 15_000);
+
+  test('waitFor: a query resolves inside an iframe, not just the main document', async () => {
+    // Before: `page.locator()` never crossed the boundary, so waiting for a node
+    // the tree had just shown (tagged `frame=…`) burned the whole timeout.
+    await expect(
+      adapter.waitFor({ query: 'data-testid=inner-two', timeout: 5_000 }),
+    ).resolves.toBeUndefined();
+  }, 15_000);
+
+  test('scroll: a `within` region inside an iframe scrolls, instead of “not found”', async () => {
+    await adapter.scroll({ direction: 'down', within: '#innerbox', amount: 200 });
+    await pollText('#innerscroll', (t) => Number(t) > 0);
+    expect(Number((await adapter.find({ query: '#innerscroll' }))?.name)).toBeGreaterThan(0);
+    // The page itself stayed put — the wheel landed on the region, not the viewport.
+    expect(Number((await adapter.find({ query: '#scrolly' }))?.name)).toBe(0);
+  }, 15_000);
+
+  test('readState: a string `within` keeps the child-frame content under it', async () => {
+    // `#checkout` exists ONLY in the main document; re-resolving it per frame
+    // matched nothing inside the iframe and silently dropped everything embedded
+    // there — exactly how a Stripe card field goes missing from a checkout read.
+    const scoped = await adapter.readState({ within: '#checkout', limit: 500 });
+    expect(scoped.some((n) => n.name.includes('own document'))).toBe(true);
+    const inner = scoped.find((n) => n.name.includes('Inner Button'));
+    expect(inner).toBeDefined();
+    expect(inner?.frame).toContain('/frame');
+    // Still a scope: what sits outside it stays out.
+    expect(scoped.some((n) => n.name === 'Click me')).toBe(false);
+  }, 15_000);
+
+  test('readState: an iframe’s border+padding shifts its content origin', async () => {
+    const nodes = await adapter.readState({ limit: 500 });
+    const frameEl = nodes.find((n) => n.testid === 'bordered-frame');
+    const inner = nodes.find((n) => n.name.includes('Inner Two'));
+    expect(frameEl).toBeDefined();
+    expect(inner).toBeDefined();
+    // The button sits at (0,0) of a `margin:0` frame document, so its page
+    // coordinates are the iframe's border box plus the 5px border + 3px padding.
+    // Using the border box alone put every click 8px off — silently.
+    // (sub-pixel layout rounding, hence the 0-digit tolerance — 0 vs 8 is the point)
+    expect((inner?.bounds.x ?? 0) - (frameEl?.bounds.x ?? 0)).toBeCloseTo(8, 0);
+    expect((inner?.bounds.y ?? 0) - (frameEl?.bounds.y ?? 0)).toBeCloseTo(8, 0);
+  }, 15_000);
+
+  test('type: text lands at the END of a pre-filled field, never spliced into it', async () => {
+    // A click parks the caret at the element's CENTER, so typing into a field
+    // whose value runs past that point spliced text into the middle — and the
+    // driver's own read-back then showed garbage it could not explain.
+    await adapter.type('#prefilled', 'ZZZ');
+    expect((await adapter.find({ query: '#prefilled' }))?.value).toBe(
+      '0123456789012345678901234567890123456789ZZZ',
+    );
   }, 15_000);
 
   test('main-document nodes carry no frame tag', async () => {

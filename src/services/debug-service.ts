@@ -39,7 +39,7 @@ import { type Findings, FindingsSchema } from '../findings/schema.js';
 import type { SessionManager } from '../session/manager.js';
 import type { Session, SnapshotField } from '../session/session.js';
 import { noopStatePort, type StatePort } from '../session/state-file.js';
-import { generateSessionId } from '../session/workspace.js';
+import { generateSessionId, workspacePaths } from '../session/workspace.js';
 import type { SessionBuilder } from './session-builder.js';
 
 /** Default wall-clock cap on a debug run before it auto-ends (overridable per run). */
@@ -107,6 +107,7 @@ export interface TargetInfo {
 export interface DescribeResult {
   targets: TargetInfo[];
   models: { driver: string; vision: string; summary: string };
+  /** Resolved per-project workspace root (`<base>/<project>`) — where evidence lands. */
   workspace: string;
 }
 
@@ -182,12 +183,17 @@ export class DebugService implements DebugApi {
    */
   #retained: Session | undefined;
   /**
-   * A `start()` is in flight (building/launching, slot not yet in the manager).
-   * Set synchronously before the first await so a concurrent `start_debug` fails
-   * loud with {@link SessionBusyError} instead of racing a second browser onto
-   * the same profile.
+   * The `start()` currently in flight (building/launching, slot not yet in the
+   * manager), or `undefined`. Set synchronously before the first await so a
+   * concurrent `start_debug` fails loud with {@link SessionBusyError} instead of
+   * racing a second browser onto the same profile.
+   *
+   * `controller` cancels it at the next checkpoint and `settled` resolves once it
+   * has finished tearing down (it never rejects) — so {@link endActive} can abort a
+   * launch *and wait for it*, instead of finding an empty manager and letting the
+   * process exit with a half-launched Chrome still holding the profile lock.
    */
-  #starting = false;
+  #starting: { controller: AbortController; settled: Promise<void> } | undefined;
 
   constructor(deps: DebugServiceDeps) {
     this.#manager = deps.manager;
@@ -212,7 +218,7 @@ export class DebugService implements DebugApi {
    * remaining budget is threaded into the build and the first navigation, so a slow
    * Chrome launch spends the caller's cap instead of sitting outside it.
    */
-  async start({ target, goal, criteria, url, timeoutMs }: StartInput): Promise<StartResult> {
+  async start(input: StartInput): Promise<StartResult> {
     const cwd = this.#cwd;
     if (this.#manager.has(cwd)) {
       throw new SessionBusyError(
@@ -222,7 +228,7 @@ export class DebugService implements DebugApi {
     }
     // Taken synchronously (no await since the has() check) — a concurrent start
     // must fail here, not launch a second browser on the same profile.
-    if (this.#starting) {
+    if (this.#starting !== undefined) {
       throw new SessionBusyError(
         `A debug session is already starting for '${cwd}'. ` +
           'Wait for it to open (or end it) before starting another — one run per project at a time.',
@@ -231,17 +237,57 @@ export class DebugService implements DebugApi {
     // Before anything is launched: a run built from config the caller has already
     // replaced is worse than no run — it reproduces the very failure they just fixed.
     this.#assertConfigFresh();
-    this.#starting = true;
-    const deadline = this.#now() + (timeoutMs ?? this.#defaultTimeoutMs);
+    const deadline = this.#now() + (input.timeoutMs ?? this.#defaultTimeoutMs);
+    const controller = new AbortController();
+    const attempt = this.#launch(input, deadline, controller.signal);
+    // Registered before anyone awaits `attempt`, and swallowing its outcome: this
+    // handle is a teardown *barrier* for `endActive`, never a second failure path.
+    this.#starting = {
+      controller,
+      settled: attempt.then(
+        () => undefined,
+        () => undefined,
+      ),
+    };
+    try {
+      return await attempt;
+    } finally {
+      this.#starting = undefined;
+    }
+  }
+
+  /**
+   * The launch itself: breadcrumb, build, lock, open, arm. Every await is a
+   * cancellation checkpoint — `signal` is the shutdown path asking this start to
+   * stop — and every failure (including a cancellation) tears down whatever
+   * already came up and drops the breadcrumb, so nothing is left holding the
+   * project's profile lock.
+   */
+  async #launch(
+    { target, goal, criteria, url }: StartInput,
+    deadline: number,
+    signal: AbortSignal,
+  ): Promise<StartResult> {
+    const cwd = this.#cwd;
     /** Budget left on the caller's cap; never negative — a blown budget is simply spent. */
     const remaining = (): number => Math.max(0, deadline - this.#now());
 
+    await this.#assertNoForeignRun(cwd);
+    const id = generateSessionId(this.#now());
+    // The breadcrumb goes down BEFORE the launch, not after it: a cold Chrome start
+    // takes 5-20s, and until `state.json` exists the run is invisible out-of-band —
+    // `status` prints "no debug run recorded" and `stop` never signals, while a real
+    // browser already holds the profile lock. It fails loud (a run the CLI cannot
+    // see is a run nobody can stop) — and here that costs nothing, since not one
+    // process has been launched yet.
+    await this.#state.record({ sessionId: id, target, goal });
+
     try {
-      await this.#assertNoForeignRun(cwd);
-      const id = generateSessionId(this.#now());
+      this.#assertStartNotAborted(signal, id);
       const built = await this.#build({ id, target, goal, criteria, url, timeoutMs: remaining() });
 
       try {
+        this.#assertStartNotAborted(signal, id);
         this.#manager.start(cwd, built.session);
       } catch (err) {
         await built.session.close().catch(() => undefined);
@@ -253,30 +299,37 @@ export class DebugService implements DebugApi {
 
       try {
         await built.open(remaining());
+        this.#assertStartNotAborted(signal, id);
         built.session.start(built.run);
       } catch (err) {
         await this.#manager.end(cwd).catch(() => undefined);
         throw err;
       }
 
-      // Armed BEFORE the breadcrumb write, on what is LEFT of the cap: a throwing
-      // StatePort must never leave a live run with no timer on it, and the launch
-      // already spent part of the budget.
+      // Armed last, on what is LEFT of the cap: the launch already spent part of
+      // the budget, and nothing past this point can fail and strand the timer.
       this.#armTimeout(remaining());
-      try {
-        await this.#state.record({ sessionId: id, target, goal });
-      } catch (err) {
-        // The caller gets no session_id back, so nothing could ever end this run —
-        // tear it down here (and drop any half-written breadcrumb) and fail loud.
-        this.#clearTimeout();
-        await this.#manager.end(cwd).catch(() => undefined);
-        await this.#state.clear().catch(() => undefined);
-        throw err;
-      }
       return { session_id: id };
-    } finally {
-      this.#starting = false;
+    } catch (err) {
+      // Nobody holds this id, so nothing could ever end the run — leave no
+      // `running` breadcrumb pointing the CLI at a run that is already gone.
+      await this.#state.clear().catch(() => undefined);
+      throw err;
     }
+  }
+
+  /**
+   * Stop a start that the shutdown path has cancelled (SIGTERM, a CLI `stop`, the
+   * MCP client dying). The caller tears down whatever it had already built —
+   * teardown is exactly what the abort is for.
+   */
+  #assertStartNotAborted(signal: AbortSignal, id: string): void {
+    if (!signal.aborted) return;
+    throw new SessionSettledError(
+      `Debug run '${id}' was torn down while it was still starting — this ui-debugger-mcp server ` +
+        'is shutting down (SIGTERM, `ui-debugger-mcp stop`, or the MCP client disconnected). ' +
+        'Nothing was left running; start again once the server is back.',
+    );
   }
 
   /**
@@ -402,7 +455,10 @@ export class DebugService implements DebugApi {
     return {
       targets: selected.map(([name, config]) => describeTarget(name, config)),
       models: this.#config.models,
-      workspace: this.#config.workspace,
+      // The RESOLVED per-project root, not the raw config string: the caller joins
+      // this to the relative evidence paths it gets back, and `./tmp/ui-debugger-mcp`
+      // would send it looking one directory short of where anything lands.
+      workspace: workspacePaths(this.#cwd, this.#config.workspace).root,
     };
   }
 
@@ -434,6 +490,15 @@ export class DebugService implements DebugApi {
    */
   async endActive(): Promise<void> {
     this.#clearTimeout();
+    // A start still in flight owns no manager slot yet, so the check below would
+    // sail straight past a Chrome that is mid-launch: cancel it and WAIT for its
+    // teardown, or the process exits with a browser still holding the profile lock
+    // and every later run fails with "Chrome profile ... is locked".
+    const starting = this.#starting;
+    if (starting !== undefined) {
+      starting.controller.abort();
+      await starting.settled;
+    }
     if (!this.#manager.has(this.#cwd)) return;
     // Nobody asked for this end, so nobody has read the results yet: retain the
     // session (settled + closed) so `get_findings` still serves them. Captured

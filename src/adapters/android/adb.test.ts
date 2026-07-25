@@ -99,6 +99,23 @@ test('execOut honours the timeout too', async () => {
   expect((err as AdbError).message).toContain('timed out after 100ms');
 });
 
+test('a maxBuffer overflow is reported as itself, never as a timeout/wedge', async () => {
+  // `screencap -p` on a hi-dpi panel can outgrow the 64 MiB cap. Calling that a wedged
+  // emulator would have the agent retry a wedge that isn't one; the real cause (the
+  // buffer) must survive into the message. Node kills the child here too, so `killed`
+  // alone can never be the expiry test.
+  const exec: AdbExec = async () => {
+    throw Object.assign(new Error('stdout maxBuffer length exceeded'), {
+      killed: true,
+      code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+    });
+  };
+  const err = await new AdbCli([], { exec }).execOut(['screencap', '-p']).catch((e: unknown) => e);
+  expect(err).toBeInstanceOf(AdbError);
+  expect((err as AdbError).message).not.toContain('timed out');
+  expect((err as AdbError).message).toContain('maxBuffer');
+});
+
 // ---------------------------------------------------------------------------
 // pendingStateOrThrow — only "not up yet" keeps a boot poll waiting
 // ---------------------------------------------------------------------------

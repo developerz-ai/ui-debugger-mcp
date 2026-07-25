@@ -106,6 +106,17 @@ Install like any local MCP server — one entry in your `.mcp.json`:
 }
 ```
 
+Wiring more than one repo? `.mcp.json` is usually committed, so don't paste the key
+into each one — export it once in your shell and reference it, which keeps every
+repo's entry identical and secret-free:
+
+```jsonc
+"env": {
+  "OPENAI_API_KEY": "${UI_DEBUGGER_API_KEY}",
+  "OPENAI_BASE_URL": "${UI_DEBUGGER_BASE_URL:-https://openrouter.ai/api/v1}"
+}
+```
+
 It's also published in the official [MCP Registry](https://modelcontextprotocol.io/registry) as
 `io.github.developerz-ai/ui-debugger-mcp` — any client that browses the registry (instead of a
 hand-written `.mcp.json` entry) can find and install it by that name.

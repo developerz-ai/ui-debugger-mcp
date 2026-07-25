@@ -41,7 +41,7 @@ import {
   type WindowMatch,
   Xdotool,
 } from './input.js';
-import { desktopEnv } from './proc.js';
+import { desktopEnv, terminateGroup } from './proc.js';
 
 /** Default cap on `readState` so the tree stays small (overridable via `limit`). */
 const DEFAULT_LIMIT = 200;
@@ -204,12 +204,14 @@ export class DesktopAdapter implements Adapter {
       // (and stop once it has found) more than the caller could ever use — `find`
       // (and thus `waitFor`'s poll loop) asks for `limit: 1`, so a match on the first
       // matching node ends the walk instead of describing the whole tree. Region
-      // scoping (`within`) is applied downstream in `shapeNodes`, not visible to the
-      // walk itself, so an early match-count stop could wrongly skip a same-query
-      // match that would have landed inside the region — only tighten `maxNodes`
-      // when there's no region to reconcile against.
+      // scoping (`within`) and `filters` are applied downstream in `shapeNodes`, not
+      // visible to the walk itself, so an early match-count stop could wrongly skip a
+      // same-query match that would have survived them (the first `Save` found is
+      // disabled, the enabled one sits deeper) — only tighten `maxNodes` when there is
+      // no post-walk narrowing to reconcile against.
       const query = opts.query ? parseRoleNameQuery(opts.query) : undefined;
-      const maxNodes = region === undefined ? (opts.limit ?? DEFAULT_LIMIT) : DEFAULT_LIMIT;
+      const narrowed = region !== undefined || opts.filters !== undefined;
+      const maxNodes = narrowed ? DEFAULT_LIMIT : (opts.limit ?? DEFAULT_LIMIT);
       const nodes = await this.#atspi.readTree({ query, maxNodes });
       return shapeNodes(nodes, opts, DEFAULT_LIMIT, region);
     });
@@ -263,15 +265,30 @@ export class DesktopAdapter implements Adapter {
     }
     const timeout = opts.timeout ?? DEFAULT_WAIT_MS;
     await this.#run('waitFor', async () => {
-      const start = Date.now();
+      const deadline = Date.now() + timeout;
       for (;;) {
-        if (await this.find({ query })) return;
-        if (Date.now() - start >= timeout) {
+        if (await this.#present(query, deadline)) return;
+        if (Date.now() >= deadline) {
           throw new AdapterError(`desktop: waitFor timed out after ${timeout}ms (${query})`);
         }
         await delay(POLL_MS);
       }
     });
+  }
+
+  /**
+   * One deadline-bounded poll for `query`. The wait's deadline goes **into** the walk:
+   * every visited node costs a couple of busctl spawns, so on a big tree (Electron with
+   * accessibility on) a single poll can run for minutes and `waitFor` — which only
+   * checks the clock between polls — would overshoot its timeout by a whole walk.
+   */
+  async #present(query: string, deadline: number): Promise<boolean> {
+    const nodes = await this.#atspi.readTree({
+      query: parseRoleNameQuery(query),
+      maxNodes: 1,
+      deadline,
+    });
+    return shapeNodes(nodes, { query, limit: 1 }, DEFAULT_LIMIT).length > 0;
   }
 
   /** Desktop apps expose no console channel — unsupported, surfaced loud. */
@@ -284,18 +301,23 @@ export class DesktopAdapter implements Adapter {
     throw new AdapterError('desktop target has no network channel (unsupported)');
   }
 
-  /** Managed teardown: SIGTERM the launched process group; an already-dead process is a no-op. */
+  /**
+   * Managed teardown: SIGTERM the launched process group, then SIGKILL it if it is still
+   * alive after the grace period; an already-dead process is a no-op.
+   *
+   * The handle is dropped only once the group is confirmed gone — an app that traps
+   * SIGTERM (prompting "save changes?") would otherwise survive `close`, with nothing
+   * left to kill it and its X/profile locks held until the user does it by hand.
+   */
   async close(): Promise<void> {
     const pid = this.#child?.proc.pid;
-    this.#child = null;
-    if (pid === undefined) return;
+    if (pid === undefined) {
+      this.#child = null;
+      return;
+    }
     await this.#run('close', async () => {
-      try {
-        // Negative pid → the whole detached group (the shell + the app it spawned).
-        process.kill(-pid, 'SIGTERM');
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-      }
+      await terminateGroup(pid);
+      this.#child = null;
     });
   }
 
