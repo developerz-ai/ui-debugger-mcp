@@ -3,8 +3,9 @@
  * Derives project name from cwd basename; builds and creates all required paths.
  */
 
+import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
-import { basename, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 
 // --- ID generator -----------------------------------------------------------
 // Counter+injected-time avoids both Date.now-only collisions and non-determinism in tests.
@@ -62,12 +63,37 @@ export function resolveProject(cwd: string): string {
 }
 
 /**
+ * The project's own directory inside the workspace base.
+ *
+ * A base that lives *under* the project root is already unique to this cwd — the
+ * default `./tmp/ui-debugger-mcp` and any relative `workspace` resolve there — so
+ * the plain project name stands and existing installs keep their chrome profile
+ * and session history. A base pointed somewhere shared (an absolute `workspace`)
+ * is NOT unique: `~/work/api` and `~/oss/api` would otherwise share one
+ * `state.json`, one `chrome-user-data/` and one profile lock, so a live run in
+ * either would falsely report the other busy. Those get a short, stable hash of
+ * the full cwd appended.
+ */
+function projectDir(cwd: string, base: string): string {
+  const name = resolveProject(cwd);
+  const rel = relative(cwd, base);
+  const nested = rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  if (nested) return name;
+  return `${name}-${createHash('sha256').update(cwd).digest('hex').slice(0, 8)}`;
+}
+
+/**
  * Build workspace paths for a project.
  * @param cwd  - absolute path to the project root (session key)
- * @param base - override the workspace root (default: `<cwd>/tmp/ui-debugger-mcp`)
+ * @param base - override the workspace root, absolute or relative to `cwd`
+ *               (default: `<cwd>/tmp/ui-debugger-mcp`)
  */
 export function workspacePaths(cwd: string, base?: string): WorkspacePaths {
-  const root = join(base ?? join(cwd, 'tmp', 'ui-debugger-mcp'), resolveProject(cwd));
+  // A relative base is anchored at the project root — the same resolution the CLI
+  // does before it reads `state.json`, so both processes land on one workspace.
+  const resolvedBase =
+    base === undefined ? join(cwd, 'tmp', 'ui-debugger-mcp') : resolve(cwd, base);
+  const root = join(resolvedBase, projectDir(cwd, resolvedBase));
   return {
     root,
     chromeUserData: join(root, 'chrome-user-data'),

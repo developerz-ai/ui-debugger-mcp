@@ -53,14 +53,14 @@ function fakeVision(
 /** A fake {@link EvidenceRecorder} that records what it saved. */
 function fakeRecorder(order?: string[]): {
   recorder: EvidenceRecorder;
-  saved: Array<{ label: string; data: Uint8Array }>;
+  saved: Array<{ label: string; data: Uint8Array; extension?: string }>;
 } {
-  const saved: Array<{ label: string; data: Uint8Array }> = [];
+  const saved: Array<{ label: string; data: Uint8Array; extension?: string }> = [];
   const recorder: EvidenceRecorder = {
-    saveScreenshot: async (label, data) => {
+    saveScreenshot: async (label, data, extension) => {
       order?.push('save');
-      saved.push({ label, data });
-      return `screenshots/001-${label}.png`;
+      saved.push({ label, data, extension });
+      return `screenshots/001-${label}.${extension ?? 'png'}`;
     },
   };
   return { recorder, saved };
@@ -112,7 +112,7 @@ test('attaches the screenshot as evidence (saves the exact captured png)', async
   const { generate } = fakeVision(cleanReply);
   const { recorder, saved } = fakeRecorder();
   const res = await runLook(adapter, generate, recorder, { question: 'centred?' });
-  expect(saved).toEqual([{ label: 'centred?', data: PNG }]);
+  expect(saved).toEqual([{ label: 'centred?', data: PNG, extension: 'png' }]);
   expect(res.screenshot).toBe('screenshots/001-centred?.png');
 });
 
@@ -309,6 +309,76 @@ test('createLookExecute does NOT latch transient errors — the next call retrie
   expect(order).toEqual(['screenshot', 'generate', 'screenshot', 'generate', 'save']);
 });
 
+// --- vision frame encoding ---------------------------------------------------
+//
+// Measured on the dummy/web fixture at 1280x720: a UI frame is ~43KB as PNG and
+// every text-safe JPEG quality came out the same size or larger (q85 42KB, q90
+// 49KB, q95 62KB). So UI must stay PNG — re-encoding costs text sharpness and
+// saves nothing. JPEG is only for the inverse case: a photographic frame, where
+// PNG is pathological.
+
+/** The image part of the single vision request a test made. */
+function imagePartOf(seen: VisionRequest[]): unknown {
+  const content = seen[0]?.messages[0]?.content;
+  return Array.isArray(content) ? content[1] : undefined;
+}
+
+/** An adapter whose PNG is `png` and whose JPEG (when asked) is `jpeg`. */
+function encodingAdapter(png: Uint8Array, jpeg: Uint8Array, asked: string[]): Adapter {
+  const base = fakeAdapter(png);
+  return {
+    ...base,
+    screenshot: async (opts) => {
+      asked.push(opts?.format ?? 'png');
+      return opts?.format === 'jpeg' ? jpeg : png;
+    },
+  };
+}
+
+test('a normal UI frame stays PNG — never re-encoded, never a second capture', async () => {
+  const asked: string[] = [];
+  const png = new Uint8Array(43_000);
+  const adapter = encodingAdapter(png, new Uint8Array(1_000), asked);
+  const { recorder, saved } = fakeRecorder();
+
+  const { generate, seen } = fakeVision(cleanReply);
+  await runLook(adapter, generate, recorder, { question: 'centred?' });
+
+  expect(asked).toEqual(['png']); // one capture, no JPEG round-trip
+  expect(imagePartOf(seen)).toEqual({ type: 'image', image: png, mediaType: 'image/png' });
+  expect(saved[0]?.data).toBe(png);
+});
+
+test('a photo-heavy frame falls back to high-quality JPEG, and the evidence matches it', async () => {
+  const asked: string[] = [];
+  const png = new Uint8Array(3_000_000); // a gallery/map page — PNG is pathological here
+  const jpeg = new Uint8Array(220_000);
+  const adapter = encodingAdapter(png, jpeg, asked);
+  const { recorder, saved } = fakeRecorder();
+
+  const { generate, seen } = fakeVision(cleanReply);
+  await runLook(adapter, generate, recorder, { question: 'centred?' });
+
+  expect(asked).toEqual(['png', 'jpeg']);
+  expect(imagePartOf(seen)).toEqual({ type: 'image', image: jpeg, mediaType: 'image/jpeg' });
+  // The saved evidence is the frame the model judged, not the discarded PNG.
+  expect(saved[0]?.data).toBe(jpeg);
+  expect(saved[0]?.extension).toBe('jpg');
+});
+
+test('a JPEG that did not actually help is discarded — we keep whichever is smaller', async () => {
+  const asked: string[] = [];
+  const png = new Uint8Array(500_000);
+  const adapter = encodingAdapter(png, new Uint8Array(900_000), asked); // re-encode made it worse
+  const { recorder, saved } = fakeRecorder();
+
+  const { generate, seen } = fakeVision(cleanReply);
+  await runLook(adapter, generate, recorder, { question: 'centred?' });
+
+  expect(imagePartOf(seen)).toEqual({ type: 'image', image: png, mediaType: 'image/png' });
+  expect(saved[0]?.data).toBe(png);
+});
+
 test('createSelfLookTool returns the frame itself and maps it to multimodal tool output', async () => {
   const adapter = fakeAdapter(PNG);
   const { recorder, saved } = fakeRecorder();
@@ -316,7 +386,13 @@ test('createSelfLookTool returns the frame itself and maps it to multimodal tool
   const output = (await selfLook.execute?.(
     { question: 'is the button centred?' },
     { toolCallId: 't1', messages: [] },
-  )) as { screenshot: string; bytes: number; prompt: string; frame: string };
+  )) as {
+    screenshot: string;
+    bytes: number;
+    prompt: string;
+    frame: string;
+    mediaType: 'image/png' | 'image/jpeg';
+  };
 
   expect(saved).toHaveLength(1);
   expect(output.bytes).toBe(PNG.byteLength);

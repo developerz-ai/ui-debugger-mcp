@@ -8,6 +8,7 @@ import type {
   WaitOptions,
 } from '../../adapters/contract.js';
 import { AdapterError, AgentError } from '../../errors.js';
+import type { Findings } from '../../findings/schema.js';
 import {
   type ActInput,
   ActInputSchema,
@@ -16,6 +17,7 @@ import {
   runAct,
   type StepRecorder,
 } from './act.js';
+import { createReportTool } from './report.js';
 import { createActTrail } from './trail.js';
 
 /** Calls the fake adapter recorded, to assert routing + ordering. */
@@ -152,6 +154,61 @@ test('navigate → open(target), no find', async () => {
   expect(calls.open).toEqual(['https://x.test']);
   expect(calls.find).toEqual([]);
   expect(res.label).toBe('navigate to https://x.test');
+});
+
+// Observed end-to-end: given the goal "debug the Nimbus Store home page", the driver's
+// FIRST act was navigate → https://nimbus-store.vercel.app, a public site it inferred
+// from the goal text. The run then reported six confident bugs about a stranger's app.
+test('navigate off the app under test is refused, naming where the run belongs', async () => {
+  const { adapter, calls } = fakeAdapter(null);
+  const { recorder } = fakeRecorder();
+
+  const attempt = runAct(
+    adapter,
+    recorder,
+    { action: 'navigate', target: 'https://nimbus-store.vercel.app' },
+    undefined,
+    undefined,
+    'http://127.0.0.1:5179',
+  );
+
+  await expect(attempt).rejects.toThrow(AgentError);
+  await expect(attempt).rejects.toThrow(/leaves the app under test \(http:\/\/127\.0\.0\.1:5179\)/);
+  expect(calls.open).toEqual([]); // never reached the adapter
+});
+
+test('navigate within the app under test passes — paths and same-origin URLs', async () => {
+  const { adapter, calls } = fakeAdapter(null);
+  const { recorder } = fakeRecorder();
+  const origin = 'http://127.0.0.1:5179';
+
+  await runAct(
+    adapter,
+    recorder,
+    { action: 'navigate', target: '/checkout' },
+    undefined,
+    undefined,
+    origin,
+  );
+  await runAct(
+    adapter,
+    recorder,
+    { action: 'navigate', target: 'http://127.0.0.1:5179/cart?x=1' },
+    undefined,
+    undefined,
+    origin,
+  );
+
+  expect(calls.open).toEqual(['/checkout', 'http://127.0.0.1:5179/cart?x=1']);
+});
+
+// Desktop/android `navigate` means a window title or an app package, never a URL —
+// pinning an origin there would break every non-web run.
+test('with no origin (desktop/android) navigate is unrestricted', async () => {
+  const { adapter, calls } = fakeAdapter(null);
+  const { recorder } = fakeRecorder();
+  await runAct(adapter, recorder, { action: 'navigate', target: 'com.example.app/.MainActivity' });
+  expect(calls.open).toEqual(['com.example.app/.MainActivity']);
 });
 
 test('wait → waitFor with all conditions, label lists them', async () => {
@@ -520,6 +577,52 @@ test('the act tool serializes concurrent calls — batched types never interleav
 
   // Strictly one act at a time: every enter is immediately followed by its exit.
   expect(order).toEqual(['enter:email', 'exit:email', 'enter:password', 'exit:password']);
+});
+
+test('two acts queued in ONE step: a report racing them still sees BOTH', async () => {
+  // The driver batches `act` + `act` + `report` into one step and the SDK runs them
+  // concurrently. Act #2 waits its turn on the serialization queue, so it used to
+  // enter the trail's gate only AFTER act #1 released it — and `settled()`'s waiter
+  // is scheduled before the queue continuation, so the terminal read saw an idle
+  // gate and wrote a verdict missing act #2. The loop then stops on that report, so
+  // act #2 — which really ran against the live UI — reached no persisted file at all.
+  const trail = createActTrail();
+  const { adapter } = fakeAdapter(button);
+  // Label each act after its own target so the two are distinguishable, and let a
+  // click take a real tick — a live act spans event-loop turns, which is exactly
+  // when the barrier used to be checked between the two queued acts.
+  const named: Adapter = {
+    ...adapter,
+    find: async (opts) => ({ ...button, name: `${opts.query}` }),
+    click: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    },
+  };
+  const act = createActTool(named, fakeRecorder().recorder, trail);
+
+  const written: Findings[] = [];
+  const report = createReportTool(
+    {
+      writeFindings: async (findings) => {
+        written.push(findings);
+        return 'findings.json';
+      },
+    },
+    () => trail.settled(),
+  );
+  const call = (t: unknown, input: unknown): Promise<unknown> =>
+    (t as { execute: (i: unknown) => Promise<unknown> }).execute(input);
+
+  await Promise.all([
+    call(act, { action: 'click', target: 'A' }),
+    call(act, { action: 'click', target: 'B' }),
+    call(report, { status: 'passed', steps: [], bugs: [], visual: [] }),
+  ]);
+
+  expect(written.at(-1)?.steps.map((step) => step.step)).toEqual([
+    'click button "A"',
+    'click button "B"',
+  ]);
 });
 
 test('a failed act does not wedge the queue for the next one', async () => {

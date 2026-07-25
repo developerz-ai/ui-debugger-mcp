@@ -55,6 +55,28 @@ test('two concurrent first saves get distinct sequence numbers (001 and 002)', a
   expect(frames.map((f) => f.seq)).toEqual([1, 2]); // never a duplicate 001 overwrite
 });
 
+// --- transient mkdir failure -------------------------------------------------
+
+test('a failed dir setup is retried, not cached — one transient error never poisons the run', async () => {
+  // The failure this guards: the first evidence write hits a transient
+  // EMFILE/ENOSPC, and every later writeFindings/appendLog/saveScreenshot in that
+  // session rejects with the SAME cached error — including the driver's terminal
+  // `report` — so the run ends with no findings.json at all.
+  const ws = workspacePaths('/project/my-app', tmpDir);
+  const sp = sessionPaths(ws, 'blocked-session');
+  const blocked = new FindingsStore(sp);
+  const fs = await import('node:fs/promises');
+  await fs.mkdir(ws.sessions, { recursive: true });
+  await fs.writeFile(sp.root, 'a file where the session dir belongs', 'utf8'); // mkdir → ENOTDIR
+
+  await expect(blocked.appendLog('agent', 'first line')).rejects.toThrow();
+
+  await fs.rm(sp.root); // the condition clears
+  await expect(blocked.writeFindings(VALID_FINDINGS)).resolves.toEndWith('findings.json');
+  await expect(blocked.appendLog('agent', 'second line')).resolves.toEndWith('agent.log');
+  expect((await blocked.readFindings()).status).toBe('passed');
+});
+
 // --- listScreenshots --------------------------------------------------------
 
 test('listScreenshots returns [] when no frames were saved', async () => {

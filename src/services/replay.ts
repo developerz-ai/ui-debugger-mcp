@@ -24,6 +24,7 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import { ReplayError } from '../errors.js';
 import type { ScreenshotFrame } from '../session/findings-store.js';
@@ -47,6 +48,8 @@ export interface RenderConfig {
   height: number;
   /** Output frame rate. */
   fps: number;
+  /** x264 quality (lower = better/bigger). 23 keeps burned-in captions sharp. */
+  crf: number;
   /** TrueType font for burned-in captions; omit to stitch without captions. */
   fontFile?: string;
 }
@@ -54,12 +57,22 @@ export interface RenderConfig {
 /**
  * The exec seam {@link renderReplay} drives — runs ffmpeg with the built args,
  * resolving on success and throwing on failure. {@link createReplayStep} binds it to
- * a real `spawn`; tests pass a fake that records the args.
+ * a real `spawn`; tests pass a fake that records the args. The optional `signal` is
+ * the session's teardown: aborting it must kill the encoder, never leave it running
+ * after the server exits.
  */
-export type ReplayEncoder = (args: readonly string[]) => Promise<void>;
+export type ReplayEncoder = (args: readonly string[], signal?: AbortSignal) => Promise<void>;
 
 /** Stitch defaults — 2s/frame at 720p30 makes a calm, scannable clip. */
-const DEFAULTS = { secondsPerFrame: 2, width: 1280, height: 720, fps: 30 } as const;
+const DEFAULTS = { secondsPerFrame: 2, width: 1280, height: 720, fps: 30, crf: 23 } as const;
+
+/**
+ * GitHub rejects video attachments over 10 MB on issues and PRs. The boss agent
+ * is expected to attach `replay.mp4` as evidence when it opens one, so a clip
+ * past this size is a dead end it cannot use — we say so in `agent.log` rather
+ * than let the upload fail on the other side.
+ */
+export const GITHUB_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
 
 /** Common installed font paths probed for burned-in captions (Linux + macOS). */
 const FONT_CANDIDATES = [
@@ -111,7 +124,7 @@ export function buildFfmpegArgs(
   output: string,
   cfg: RenderConfig,
 ): string[] {
-  const { secondsPerFrame, width, height, fps, fontFile } = cfg;
+  const { secondsPerFrame, width, height, fps, crf, fontFile } = cfg;
   const inputs: string[] = [];
   const chains: string[] = [];
   frames.forEach((frame, i) => {
@@ -135,8 +148,27 @@ export function buildFfmpegArgs(
     '[out]',
     '-r',
     String(fps),
+    // Named explicitly rather than left to ffmpeg's container default: the boss
+    // agent may attach this clip to a GitHub PR, and GitHub only plays back
+    // H.264/yuv420p MP4 inline.
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    // A run replay is a slideshow of static UI frames, and the whole point is
+    // reading the text in them. `stillimage` is x264's tune for exactly that —
+    // it spends bits on sharp edges instead of smoothing them like the default
+    // psychovisual tuning does, so captions and labels stay legible.
+    '-tune',
+    'stillimage',
+    '-crf',
+    String(crf),
     '-pix_fmt',
     'yuv420p',
+    // moov atom up front, so the clip starts playing before it has fully
+    // downloaded. Without it GitHub's player stalls on the whole file first.
+    '-movflags',
+    '+faststart',
     output,
   ];
 }
@@ -152,10 +184,20 @@ export async function renderReplay(
   frames: readonly ReplayFrame[],
   output: string,
   cfg: RenderConfig,
+  signal?: AbortSignal,
 ): Promise<string | null> {
   if (frames.length === 0) return null;
-  await encode(buildFfmpegArgs(frames, output, cfg));
+  await encode(buildFfmpegArgs(frames, output, cfg), signal);
   return output;
+}
+
+/** Size of a rendered clip, or `null` when it cannot be stat'd (never fatal — this is a warning path). */
+async function sizeOf(path: string): Promise<number | null> {
+  try {
+    return (await stat(path)).size;
+  } catch {
+    return null;
+  }
 }
 
 /** First installed caption font, or `undefined` when none is found (→ stitch without captions). */
@@ -175,11 +217,15 @@ export function ffmpegOnPath(bin: string): boolean {
   return dirs.some((dir) => existsSync(join(dir, bin)));
 }
 
-/** The real encoder: spawn ffmpeg, resolve on exit 0, throw {@link ReplayError} otherwise. */
+/**
+ * The real encoder: spawn ffmpeg, resolve on exit 0, throw {@link ReplayError}
+ * otherwise. `signal` is handed to `spawn` so a session teardown kills the child
+ * (surfacing here as a launch/exit failure) instead of orphaning it past exit.
+ */
 function spawnFfmpeg(bin: string): ReplayEncoder {
-  return (args) =>
+  return (args, signal) =>
     new Promise<void>((resolve, reject) => {
-      const child = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      const child = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'], signal });
       let stderr = '';
       child.stderr?.on('data', (chunk: Buffer) => {
         stderr += chunk.toString();
@@ -231,9 +277,10 @@ export function createReplayStep(deps: ReplayStepDeps): ReplayStep {
     width: deps.render?.width ?? DEFAULTS.width,
     height: deps.render?.height ?? DEFAULTS.height,
     fps: deps.render?.fps ?? DEFAULTS.fps,
+    crf: deps.render?.crf ?? DEFAULTS.crf,
     fontFile: resolveFontFile(),
   };
-  return async (): Promise<ReplayOutcome> => {
+  return async (signal?: AbortSignal): Promise<ReplayOutcome> => {
     const frames = await deps.screenshots.listScreenshots();
     if (frames.length === 0) return { kind: 'skipped' }; // nothing to stitch
     if (!hasFfmpeg(bin)) {
@@ -242,7 +289,14 @@ export function createReplayStep(deps: ReplayStepDeps): ReplayStep {
       return { kind: 'skipped', note };
     }
     const replayFrames = frames.map((f) => ({ path: f.path, caption: f.label }));
-    const path = await renderReplay(encode, replayFrames, deps.output, cfg);
-    return path === null ? { kind: 'skipped' } : { kind: 'rendered', path };
+    const path = await renderReplay(encode, replayFrames, deps.output, cfg, signal);
+    if (path === null) return { kind: 'skipped' };
+    const bytes = await sizeOf(path);
+    if (bytes !== null && bytes > GITHUB_UPLOAD_LIMIT_BYTES) {
+      log(
+        `replay: ${path} is ${Math.round(bytes / 1024 / 1024)}MB — over GitHub's ${GITHUB_UPLOAD_LIMIT_BYTES / 1024 / 1024}MB attachment limit, so it cannot be uploaded to a PR as-is`,
+      );
+    }
+    return { kind: 'rendered', path };
   };
 }

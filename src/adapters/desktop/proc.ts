@@ -1,6 +1,7 @@
 /**
- * Subprocess + environment plumbing shared by the desktop adapter's CLI tools
- * (`xdotool`, `scrot`/`grim`, `busctl`).
+ * Subprocess + environment plumbing for the desktop adapter's CLI tools
+ * (`xdotool`, `scrot`/`grim`, `busctl`), plus the managed-process teardown
+ * ({@link terminateGroup}) the android adapter shares.
  *
  * The desktop adapter drives the target by shelling out — there is no in-process
  * SDK like CDP. Every tool runs on a chosen X11 `DISPLAY` (e.g. `:99` for an Xvfb
@@ -90,6 +91,45 @@ export function makeExec(env: NodeJS.ProcessEnv, timeoutMs = DEFAULT_EXEC_TIMEOU
 function killedByTimeout(error: unknown): boolean {
   if (!(error instanceof Error) || (error as { killed?: boolean }).killed !== true) return false;
   return (error as NodeJS.ErrnoException).code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+}
+
+/** Grace a SIGTERMed process group gets to exit on its own before the SIGKILL escalation. */
+const TERM_GRACE_MS = 2000;
+const TERM_POLL_MS = 100;
+
+/**
+ * Signal a whole **detached process group** (`-pid`, so the shell *and* the app it
+ * spawned). Returns false once the group is gone (`ESRCH`); any other errno is loud.
+ */
+function signalGroup(pid: number, signal: NodeJS.Signals | 0): boolean {
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+/**
+ * Tear a managed target down: SIGTERM its group, wait for it to actually die, escalate
+ * to SIGKILL after `graceMs`.
+ *
+ * A polite signal is not a guarantee: an app with a SIGTERM handler (prompting "save
+ * changes?") survives it, and once the caller drops the pid nothing can ever kill it —
+ * the app is reparented to init, still holding its X/profile locks. So the caller must
+ * keep the handle until this resolves.
+ */
+export async function terminateGroup(pid: number, graceMs = TERM_GRACE_MS): Promise<void> {
+  if (!signalGroup(pid, 'SIGTERM')) return;
+  const deadline = Date.now() + graceMs;
+  while (signalGroup(pid, 0)) {
+    if (Date.now() >= deadline) {
+      signalGroup(pid, 'SIGKILL');
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, TERM_POLL_MS));
+  }
 }
 
 /** True when an error is a "binary not found on PATH" (`ENOENT`) — for a clear, loud message. */

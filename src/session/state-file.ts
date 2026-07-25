@@ -7,7 +7,13 @@
  * which run is active, the server `pid` (so `stop` can signal it and `status` can
  * tell live from stale), and where the session's `findings.json` lives (so
  * `status` can read the authoritative verdict + counts). Written on start, marked
- * `ended` on a clean end. Best-effort: a failed write never breaks a debug run.
+ * `ended` on a clean end.
+ *
+ * `record()` fails LOUD: a run nobody can see is a run nobody can stop — the
+ * profile would stay locked with no way to reach the owner short of killing the
+ * server by hand — so the service tears the start down instead. `clear()` stays
+ * best-effort: the run is already down, and the stale breadcrumb it leaves names
+ * a pid whose liveness the CLI checks anyway.
  *
  * The {@link StatePort} seam keeps {@link DebugService} fs-free in unit tests — a
  * no-op port by default, the real {@link FileStatePort} wired at boot.
@@ -86,7 +92,7 @@ export interface ForeignRun {
 
 /** The seam {@link DebugService} writes run lifecycle through (no-op in tests). */
 export interface StatePort {
-  /** Record a freshly-opened run as `running`. */
+  /** Record the run as `running`. Throws when the breadcrumb cannot be written. */
   record(run: RunState): Promise<void>;
   /** Mark the active run `ended` (clean end). */
   clear(): Promise<void>;
@@ -143,7 +149,7 @@ export class FileStatePort implements StatePort {
       updatedAt: iso,
       sessionDir: sessionPaths(this.#workspace, run.sessionId).root,
       identity: captureIdentity(this.#pid),
-    }).catch(() => undefined);
+    });
   }
 
   async clear(): Promise<void> {

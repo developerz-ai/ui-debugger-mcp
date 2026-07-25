@@ -18,8 +18,15 @@ const CFG: RenderConfig = {
   width: 1280,
   height: 720,
   fps: 30,
+  crf: 23,
   fontFile: '/fonts/DejaVuSans.ttf',
 };
+
+/** Read the value that follows a flag in an arg list. */
+function argValue(args: string[], flag: string): string {
+  const i = args.indexOf(flag);
+  return i === -1 ? '' : (args[i + 1] ?? '');
+}
 
 /** Pull the single `-filter_complex` value out of an arg list. */
 function filterOf(args: string[]): string {
@@ -40,6 +47,34 @@ test('buildFfmpegArgs loops each frame as a timed input, in order', () => {
   expect(args.join(' ')).toContain('-loop 1 -t 2 -i /s/002-click.png');
   // input order preserved
   expect(args.indexOf('/s/001-open.png')).toBeLessThan(args.indexOf('/s/002-click.png'));
+});
+
+// The boss agent is expected to attach replay.mp4 to the PR it opens. GitHub only
+// plays H.264/yuv420p MP4 inline, and only starts before full download when the
+// moov atom leads — so these flags are the difference between usable evidence and
+// a file nobody can watch. Leaving the codec to ffmpeg's container default made
+// that silently dependent on the host build.
+test('buildFfmpegArgs encodes H.264/yuv420p with faststart — playable inline on a GitHub PR', () => {
+  const args = buildFfmpegArgs([{ path: '/a.png', caption: 'open' }], '/out.mp4', CFG);
+
+  expect(argValue(args, '-c:v')).toBe('libx264');
+  expect(argValue(args, '-pix_fmt')).toBe('yuv420p');
+  expect(argValue(args, '-movflags')).toBe('+faststart');
+});
+
+// A replay is a slideshow of static UI frames whose entire value is the readable
+// text burned into them; x264's default psychovisual tuning smooths exactly the
+// sharp edges that text is made of.
+test('buildFfmpegArgs tunes for still images at the configured crf, so captions stay legible', () => {
+  const args = buildFfmpegArgs([{ path: '/a.png', caption: 'open' }], '/out.mp4', CFG);
+  expect(argValue(args, '-tune')).toBe('stillimage');
+  expect(argValue(args, '-crf')).toBe('23');
+
+  const sharper = buildFfmpegArgs([{ path: '/a.png', caption: 'open' }], '/out.mp4', {
+    ...CFG,
+    crf: 18,
+  });
+  expect(argValue(sharper, '-crf')).toBe('18');
 });
 
 test('buildFfmpegArgs concats all frames and maps the output stream last', () => {
@@ -109,6 +144,23 @@ test('renderReplay encodes the built args and returns the output path', async ()
   );
   expect(out).toBe('/out.mp4');
   expect(received).toEqual(buildFfmpegArgs(frames, '/out.mp4', CFG));
+});
+
+test('renderReplay threads the abort signal to the encoder (teardown kills ffmpeg)', async () => {
+  const controller = new AbortController();
+  let received: AbortSignal | undefined;
+  await renderReplay(
+    async (_args, signal) => {
+      received = signal;
+    },
+    [{ path: '/a.png', caption: 'open' }],
+    '/out.mp4',
+    CFG,
+    controller.signal,
+  );
+  // Without this the encoder outlives the server: the session exits right after
+  // teardown and a detached ffmpeg keeps running against a dead run's frames.
+  expect(received).toBe(controller.signal);
 });
 
 test('renderReplay propagates an encoder failure (loud — the session decides to swallow it)', async () => {

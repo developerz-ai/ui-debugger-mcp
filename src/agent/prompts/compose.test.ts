@@ -52,6 +52,30 @@ test('composeSystemPrompt: includes the story', () => {
   expect(prompt).toContain(story);
 });
 
+// A driver with no address in its context invented one from the goal text and
+// debugged a stranger's production site for a whole run. Telling it where it is
+// is half the fix (the other half is `act` refusing to leave).
+test('composeSystemPrompt: states the app under test and forbids leaving it', () => {
+  const prompt = composeSystemPrompt({
+    target: 'web',
+    story: 'Debug the Nimbus Store home page.',
+    selfLook: false,
+    address: 'http://127.0.0.1:5179',
+  });
+  expect(prompt).toContain('## The app under test');
+  expect(prompt).toContain('http://127.0.0.1:5179');
+  expect(prompt).toMatch(/never navigate to any other host/i);
+});
+
+test('composeSystemPrompt: omits the address section for targets without one', () => {
+  const prompt = composeSystemPrompt({
+    target: 'android',
+    story: 'Open the app.',
+    selfLook: false,
+  });
+  expect(prompt).not.toContain('## The app under test');
+});
+
 test('composeSystemPrompt: includes criteria when provided', () => {
   const criteria = ['No JS errors in the console', 'Checkout button is visible and enabled'];
   const prompt = composeSystemPrompt({
@@ -119,6 +143,19 @@ test('composeSystemPrompt: trims whitespace from story', () => {
     selfLook: false,
   });
   expect(prompt).toContain('Trimmed story.');
+});
+
+test('every target learns that `type` appends unless you pass clear:true', () => {
+  // `act`'s `clear` is built from generic contract verbs and works on all three
+  // targets, but the guidance used to live in the web addendum alone — so an
+  // android retry into a pre-filled EditText produced `TestPass1TestPass1` and the
+  // driver reported the doubling as an app bug (the exact false positive the base
+  // prompt warns about).
+  for (const target of ['web', 'desktop', 'android'] as const) {
+    const prompt = composeSystemPrompt({ target, story: 'Test.', selfLook: false });
+    expect(prompt).toContain('clear: true');
+    expect(prompt).toContain('clear:true');
+  }
 });
 
 // --- eye mode (selfLook) — the prompt must describe the `look` tool actually bound ---

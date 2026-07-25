@@ -115,6 +115,23 @@ test('searchArgs prefers title, falls back to class', () => {
   expect(searchArgs({ class: 'myapp' })).toEqual(['search', '--onlyvisible', '--class', 'myapp']);
 });
 
+test('searchArgs escapes regex metacharacters in the literal title/class', () => {
+  // `xdotool search --name` takes a POSIX regex; config gives a literal. Unescaped, the
+  // parens of "MyApp (dev)" are a capture group and the real window never matches, so
+  // `open` polls out its full 10s and blames a window that is plainly on screen.
+  expect(searchArgs({ title: 'MyApp (dev)' })).toEqual([
+    'search',
+    '--onlyvisible',
+    '--name',
+    'MyApp \\(dev\\)',
+  ]);
+  expect(searchArgs({ title: 'Doc [modified]' })[3]).toBe('Doc \\[modified\\]');
+  expect(searchArgs({ title: 'a+b?c*d.e' })[3]).toBe('a\\+b\\?c\\*d\\.e');
+  expect(searchArgs({ class: 'my.app|other' })[3]).toBe('my\\.app\\|other');
+  // A plain title is untouched — matching stays an unanchored substring.
+  expect(searchArgs({ title: 'My App' })[3]).toBe('My App');
+});
+
 test('searchArgs throws when neither title nor class is given', () => {
   expect(() => searchArgs({})).toThrow(AdapterError);
 });

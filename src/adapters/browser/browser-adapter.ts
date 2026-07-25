@@ -16,9 +16,7 @@
  * never a silent fallback.
  */
 
-import { existsSync } from 'node:fs';
-import { URL } from 'node:url';
-import type { Browser, BrowserContext, Frame, Locator, Page } from 'playwright-core';
+import type { Browser, BrowserContext, Page } from 'playwright-core';
 import { chromium } from 'playwright-core';
 import type { WebTarget } from '../../config/schema.js';
 import { AdapterError, UiDebuggerError } from '../../errors.js';
@@ -32,7 +30,7 @@ import type {
   Node,
   NodeRef,
   Query,
-  ScrollDirection,
+  ScreenshotOptions,
   ScrollOptions,
   TabInfo,
   WaitOptions,
@@ -42,52 +40,34 @@ import type { CaptureSink } from './cdp.js';
 import { CdpCapture } from './cdp.js';
 import { NODE_EXTRACTOR, type RawNode } from './extractor.js';
 import { applyNodeFilters, centerWithin } from './filters.js';
-import { closeOnFailure, createFailure } from './launch.js';
+import {
+  frameOffset,
+  isFrameGone,
+  isOutsideViewport,
+  placeInPage,
+  scrollDelta,
+  toNode,
+  VIEWPORT_PROBE,
+} from './geometry.js';
+import {
+  appendDebugLogin,
+  closeOnFailure,
+  createFailure,
+  LAUNCH_TIMEOUT_MS,
+  NAV_TIMEOUT_MS,
+  resolveLaunchBinary,
+  resolveTargetUrl,
+} from './launch.js';
+import { locateAcrossFrames, regionAcrossFrames, waitAcrossFrames } from './locate.js';
 import { normalizeQuery } from './query.js';
 
+// The adapter stays the one import surface its callers (and tests) know: the
+// helpers it leans on live in `geometry.ts`/`launch.ts` only to keep every file
+// under the 500-LOC cap.
 export type { RawNode } from './extractor.js';
 export { applyNodeFilters, NODE_FILTER_KEYS } from './filters.js';
-
-/** System Chrome channel used as the last resort when no binary can be resolved. */
-const DEFAULT_CHANNEL = 'chrome';
-
-/**
- * Playwright's own defaults for launching/connecting and for a navigation, restated
- * so the run budget can only SHORTEN them (`capWait`). Left implicit, these two sit
- * OUTSIDE the caller's cap and a `start_debug` with `timeout: 10` could still burn a
- * minute before the driver takes its first step.
- */
-const LAUNCH_TIMEOUT_MS = 30_000;
-const NAV_TIMEOUT_MS = 30_000;
-
-/** Detect the Playwright-managed Chromium binary; null if it isn't installed. */
-function detectManagedChromium(): string | null {
-  try {
-    const p = chromium.executablePath();
-    return p && existsSync(p) ? p : null;
-  } catch {
-    return null; // Playwright browser not installed
-  }
-}
-
-/**
- * Pick the Chromium binary for a managed launch. Order:
- *   1. explicit `executablePath` from config
- *   2. the Playwright-managed Chromium, if it's installed (`npx playwright install chromium`)
- *   3. fall back to the system Google Chrome channel
- * Without (2) the adapter failed on hosts that have the managed Chromium but no
- * system Chrome — the common dev setup. `detect` is injected so the ordering is
- * unit-testable without a real browser install.
- */
-export function resolveLaunchBinary(
-  config: WebTarget,
-  detect: () => string | null = detectManagedChromium,
-): { executablePath: string } | { channel: string } {
-  if (config.executablePath) return { executablePath: config.executablePath };
-  const managed = detect();
-  if (managed) return { executablePath: managed };
-  return { channel: DEFAULT_CHANNEL };
-}
+export { isFrameGone, isOutsideViewport, scrollDelta } from './geometry.js';
+export { appendDebugLogin, resolveLaunchBinary, resolveTargetUrl } from './launch.js';
 
 /** Default cap on `readState` so the tree stays small (overridable via `limit`). */
 const DEFAULT_LIMIT = 200;
@@ -100,38 +80,6 @@ const DEFAULT_SELECTOR =
   'a[href], button, input, select, textarea, [role], [tabindex], [onclick], [contenteditable="true"], summary, label, h1, h2, h3, h4, h5, h6, [data-testid], p, img';
 
 /**
- * Resolve a navigate target against the configured base URL. Drivers often pass
- * a relative path (`/`, `/login`) — `page.goto` rejects those as "invalid URL",
- * so anchor them to `base`. Absolute targets pass through unchanged.
- */
-export function resolveTargetUrl(target: string, base?: string): string {
-  try {
-    return new URL(target, base).toString();
-  } catch {
-    return target; // relative target with no usable base — let `goto` surface a clear error
-  }
-}
-
-/**
- * Append the login-bypass query param (`?<param>=true`) when `debugLogin` is configured.
- * A relative `target` (no config `url` base to anchor it) can't carry a query param —
- * fail loud with an {@link AdapterError} instead of leaking a raw `TypeError: Invalid URL`.
- */
-export function appendDebugLogin(target: string, debugLogin?: { param: string }): string {
-  if (!debugLogin) return target;
-  let url: URL;
-  try {
-    url = new URL(target);
-  } catch {
-    throw new AdapterError(
-      `cannot append debug-login param to relative target ${JSON.stringify(target)} — set the web target's \`url\` in .ui-debugger-mcp.json so it resolves to an absolute URL`,
-    );
-  }
-  url.searchParams.set(debugLogin.param, 'true');
-  return url.toString();
-}
-
-/**
  * Milliseconds left until `deadline`, floored at 1 so an exhausted budget still
  * hands Playwright a real timeout (0 means "no timeout" there) and fails fast.
  * No deadline → `undefined` (Playwright's default applies). `now` is injectable
@@ -140,98 +88,6 @@ export function appendDebugLogin(target: string, debugLogin?: { param: string })
 export function remainingTimeout(deadline?: number, now: number = Date.now()): number | undefined {
   if (deadline === undefined) return undefined;
   return Math.max(1, deadline - now);
-}
-
-/**
- * True when `point` falls outside a non-null `viewport`. Coordinate clicks use
- * viewport-relative bounds (`getBoundingClientRect`), so an off-screen center
- * dispatches a CDP click that lands on nothing — silently. Null viewport
- * (e.g. some attach targets) → never outside; we can't judge.
- */
-export function isOutsideViewport(
-  point: { x: number; y: number },
-  viewport: { width: number; height: number } | null,
-): boolean {
-  if (!viewport) return false;
-  return point.x < 0 || point.x > viewport.width || point.y < 0 || point.y > viewport.height;
-}
-
-/**
- * Map a {@link ScrollDirection} + pixel `amount` onto Playwright wheel deltas
- * `[deltaX, deltaY]` (the viewport scrolls toward that edge). Fails loud on an
- * unrecognized direction — the switch is exhaustive over the union, so a bad
- * value can only arrive from an unchecked boundary.
- */
-export function scrollDelta(direction: ScrollDirection, amount: number): [number, number] {
-  switch (direction) {
-    case 'up':
-      return [0, -amount];
-    case 'down':
-      return [0, amount];
-    case 'left':
-      return [-amount, 0];
-    case 'right':
-      return [amount, 0];
-    default: {
-      const unreachable: never = direction;
-      throw new AdapterError(`unknown scroll direction: ${JSON.stringify(unreachable)}`);
-    }
-  }
-}
-
-/** Drop the internal `visible` flag — the public contract returns plain {@link Node}s. */
-function toNode(node: RawNode): Node {
-  const out: Node = {
-    role: node.role,
-    name: node.name,
-    bounds: node.bounds,
-    enabled: node.enabled,
-  };
-  if (node.testid) out.testid = node.testid;
-  if (node.style) out.style = node.style;
-  if (node.frame) out.frame = node.frame;
-  // Empty string and `false` are real answers here ("the field is empty", "the box
-  // is unchecked") — test for presence, never truthiness.
-  if (node.value !== undefined) out.value = node.value;
-  if (node.checked !== undefined) out.checked = node.checked;
-  return out;
-}
-
-/**
- * Where a frame's viewport sits in page coordinates: `{x:0,y:0}` for the main
- * document, the iframe element's position for a child, `null` when the frame is
- * gone or not rendered (detached, `display:none`) and must be skipped.
- */
-async function frameOffset(frame: Frame): Promise<{ x: number; y: number } | null> {
-  if (frame.parentFrame() === null) return { x: 0, y: 0 };
-  try {
-    const element = await frame.frameElement();
-    const box = await element.boundingBox();
-    return box ? { x: box.x, y: box.y } : null;
-  } catch {
-    return null; // detached between listing and reading
-  }
-}
-
-/**
- * Translate a node read inside a frame into page coordinates and stamp which
- * frame it came from.
- *
- * Bounds arrive relative to the frame's own viewport; clicks dispatch against
- * the page. Without the shift, every click on embedded content would land at the
- * wrong place on the page — silently, since the coordinates stay plausible.
- */
-function placeInPage(node: RawNode, offset: { x: number; y: number }, frame: Frame): RawNode {
-  if (frame.parentFrame() === null) return node;
-  return {
-    ...node,
-    bounds: {
-      ...node.bounds,
-      x: node.bounds.x + offset.x,
-      y: node.bounds.y + offset.y,
-    },
-    frame: frame.url(),
-  };
 }
 
 interface AdapterHandles {
@@ -317,6 +173,16 @@ export class BrowserAdapter implements Adapter {
     const context = await launcher.launchPersistentContext(profileDir, {
       headless: config.headless,
       timeout,
+      // Signals stay with `main.ts`, which owns the graceful shutdown. These default
+      // to `true`, and Playwright's own SIGINT handler is
+      // `gracefullyCloseAll().then(() => process.exit(130))` — it ran right after
+      // ours started and killed the process mid-teardown, so the terminal findings
+      // write, the summary and `replay.mp4` never landed and `state.json` was left
+      // saying `running`. On SIGTERM it closed Chrome underneath a loop that was
+      // still unwinding, and the last flush died as `Target closed`.
+      handleSIGINT: false,
+      handleSIGTERM: false,
+      handleSIGHUP: false,
       ...resolveLaunchBinary(config),
     });
     // Chrome is LIVE from here on and holds the profile lock — a throw past this point
@@ -375,7 +241,7 @@ export class BrowserAdapter implements Adapter {
   async click(target: NodeRef): Promise<void> {
     await this.#run('click', async () => {
       if (typeof target === 'string') {
-        await (await this.#locate(target)).click();
+        await (await locateAcrossFrames(this.#page, target)).click();
         return;
       }
       await this.#clickBoundsCenter(target);
@@ -384,16 +250,32 @@ export class BrowserAdapter implements Adapter {
 
   async type(target: NodeRef, text: string): Promise<void> {
     // Same semantics for both NodeRef forms: focus the target, then type into it
-    // (the contract is "focuses it first"). A selector focuses via click rather
-    // than `fill()` so it appends like the coordinate path instead of replacing.
+    // (the contract is "focuses it first"). Focus comes from a click rather than
+    // `fill()` so typing APPENDS instead of replacing — but a click drops the caret
+    // wherever it landed, i.e. mid-string on a pre-filled field, and the driver's
+    // own read-back then shows spliced garbage it cannot explain. `End` parks the
+    // caret after the existing value first.
     await this.#run('type', async () => {
       if (typeof target === 'string') {
-        await (await this.#locate(target)).click();
+        await (await locateAcrossFrames(this.#page, target)).click();
       } else {
         await this.#clickBoundsCenter(target);
       }
+      await this.#page.keyboard.press('End');
       await this.#page.keyboard.type(text);
     });
+  }
+
+  /**
+   * The page's visible area in CSS px.
+   *
+   * `viewportSize()` is null for EVERY attach target — `connectOverCDP` hard-codes
+   * `noDefaultViewport: true` — and treating "unknown" as "inside" switched the
+   * off-viewport guard off exactly where the window size is least predictable. The
+   * page can always answer for itself, so ask it before giving up.
+   */
+  async #viewport(): Promise<{ width: number; height: number } | null> {
+    return this.#page.viewportSize() ?? (await this.#page.evaluate(VIEWPORT_PROBE));
   }
 
   /**
@@ -401,9 +283,9 @@ export class BrowserAdapter implements Adapter {
    * mouse events at an off-screen center land on nothing — silently. Fail loud
    * instead so the agent knows to scroll it into view first.
    */
-  #centerInViewport(bounds: Bounds): { x: number; y: number } {
+  async #centerInViewport(bounds: Bounds): Promise<{ x: number; y: number }> {
     const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
-    if (isOutsideViewport(center, this.#page.viewportSize())) {
+    if (isOutsideViewport(center, await this.#viewport())) {
       throw new AdapterError(
         `element center (${Math.round(center.x)}, ${Math.round(center.y)}) is outside the viewport — scroll it into view first, then re-read its bounds`,
       );
@@ -413,7 +295,7 @@ export class BrowserAdapter implements Adapter {
 
   /** Coordinate click at a {@link Node}'s bounds center, shared by `click` and `type`. */
   async #clickBoundsCenter(node: Node): Promise<void> {
-    const center = this.#centerInViewport(node.bounds);
+    const center = await this.#centerInViewport(node.bounds);
     await this.#page.mouse.click(center.x, center.y);
   }
 
@@ -438,7 +320,9 @@ export class BrowserAdapter implements Adapter {
       // Same viewport guard as the coordinate click: an off-screen region would
       // move the cursor nowhere and scroll the viewport instead — silently wrong.
       if (opts.within !== undefined) {
-        const center = this.#centerInViewport(await this.#regionBox(opts.within));
+        const center = await this.#centerInViewport(
+          await regionAcrossFrames(this.#page, opts.within),
+        );
         await this.#page.mouse.move(center.x, center.y);
       }
       await this.#page.mouse.wheel(dx, dy);
@@ -449,9 +333,12 @@ export class BrowserAdapter implements Adapter {
     return this.#run('readState', () => this.#collect(opts, DEFAULT_LIMIT));
   }
 
-  async screenshot(): Promise<Uint8Array> {
+  async screenshot(opts?: ScreenshotOptions): Promise<Uint8Array> {
     return this.#run('screenshot', async () => {
-      const buffer = await this.#page.screenshot({ type: 'png' });
+      const buffer =
+        opts?.format === 'jpeg'
+          ? await this.#page.screenshot({ type: 'jpeg', quality: opts.quality ?? 92 })
+          : await this.#page.screenshot({ type: 'png' });
       return new Uint8Array(buffer);
     });
   }
@@ -465,10 +352,7 @@ export class BrowserAdapter implements Adapter {
     const deadline = opts.timeout === undefined ? undefined : Date.now() + opts.timeout;
     await this.#run('waitFor', async () => {
       if (opts.query) {
-        await this.#page
-          .locator(normalizeQuery(opts.query))
-          .first()
-          .waitFor({ state: 'visible', timeout: opts.timeout });
+        await waitAcrossFrames(this.#page, opts.query, opts.timeout);
       }
       if (opts.networkIdle) {
         await this.#page.waitForLoadState('networkidle', { timeout: remainingTimeout(deadline) });
@@ -511,55 +395,32 @@ export class BrowserAdapter implements Adapter {
     // Agent queries are role+name / plain text (what the tree shows), not raw CSS —
     // normalize them onto a Playwright engine; an absent query reads the default set.
     const selector = opts.query ? normalizeQuery(opts.query) : DEFAULT_SELECTOR;
-    const within = typeof opts.within === 'string' ? normalizeQuery(opts.within) : undefined;
+    // A `within` scope is resolved ONCE, to a page-coordinate rect. Re-resolving a
+    // string scope inside every frame (what `frame.locator(within)` did) matched
+    // nothing in the child frames — so a scope living in the main document silently
+    // dropped everything embedded under it, e.g. the Stripe field inside `#checkout`.
+    const region =
+      opts.within === undefined ? null : await regionAcrossFrames(this.#page, opts.within);
 
     let nodes: RawNode[] = [];
     for (const frame of this.#page.frames()) {
       const offset = await frameOffset(frame);
-      // A frame that detached mid-read (navigation, ad slot recycling) is not an
-      // error — it is one document out of many, and the rest still answer.
       if (offset === null) continue;
-      const scope = within ? frame.locator(within) : frame;
       let found: RawNode[];
       try {
-        found = await scope.locator(selector).evaluateAll<RawNode[]>(NODE_EXTRACTOR);
-      } catch {
-        continue;
+        found = await frame.locator(selector).evaluateAll<RawNode[]>(NODE_EXTRACTOR);
+      } catch (error) {
+        // Only a vanished frame is skippable — a bad selector must fail loud.
+        if (isFrameGone(error, frame.isDetached())) continue;
+        throw error;
       }
       nodes.push(...found.map((node) => placeInPage(node, offset, frame)));
     }
 
-    if (opts.within && typeof opts.within !== 'string') {
-      const region = opts.within.bounds;
-      nodes = nodes.filter((n) => centerWithin(n, region));
-    }
+    if (region) nodes = nodes.filter((n) => centerWithin(n, region));
     nodes = applyNodeFilters(nodes, opts.filters);
 
     return capToLimit(nodes, opts.limit ?? defaultLimit).map(toNode);
-  }
-
-  /**
-   * A locator for `selector` in whichever frame actually contains it — the main
-   * document first, then every child frame.
-   *
-   * `page.locator()` never crosses into an iframe, so a selector copied straight
-   * off an embedded node would simply fail to resolve. Falling back through the
-   * frames keeps `act` working on a target the agent can plainly see in the tree.
-   */
-  async #locate(selector: string): Promise<Locator> {
-    const normalized = normalizeQuery(selector);
-    const frames = this.#page.frames();
-    for (const frame of frames) {
-      const locator = frame.locator(normalized).first();
-      try {
-        if ((await locator.count()) > 0) return locator;
-      } catch {
-        // Detached frame — try the next one.
-      }
-    }
-    // Nothing matched anywhere: hand back the main-frame locator so the caller's
-    // own action reports the miss with Playwright's message, as it always did.
-    return this.#page.locator(normalized).first();
   }
 
   async tabs(): Promise<TabInfo[]> {
@@ -592,16 +453,6 @@ export class BrowserAdapter implements Adapter {
       this.#capture.rebind(page);
       await page.bringToFront();
     });
-  }
-
-  /** Resolve a scroll `within` scope to an on-screen rectangle (Node bounds, or a located selector). */
-  async #regionBox(within: NodeRef): Promise<Bounds> {
-    if (typeof within !== 'string') return within.bounds;
-    const box = await this.#page.locator(normalizeQuery(within)).first().boundingBox();
-    if (!box) {
-      throw new AdapterError(`scroll \`within\` target not found or not visible: ${within}`);
-    }
-    return box;
   }
 
   /** Run a Playwright call, re-throwing any failure as a loud {@link AdapterError}. */

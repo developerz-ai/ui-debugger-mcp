@@ -74,6 +74,13 @@ export interface AtspiReadOptions {
    * as enough *matches* are found, not merely enough nodes visited.
    */
   query?: ParsedQuery;
+  /**
+   * Wall-clock instant (epoch ms) the walk must not run past: it returns what it has
+   * once the deadline passes. `maxNodes` bounds *matches*, not visits, and every visited
+   * node costs ~2 busctl spawns — without this a fruitless walk over a big tree runs for
+   * as long as the tree is deep (`waitFor` passes its own deadline).
+   */
+  deadline?: number;
 }
 
 /** The read seam the adapter depends on — implemented by {@link BusctlAtspi}, faked in tests. */
@@ -370,6 +377,8 @@ export class BusctlAtspi implements AtspiSource {
         // With a query, `out` holds only matches — so this also stops the walk as
         // soon as enough matches are found, not merely enough nodes visited.
         if (out.length >= maxNodes) return out;
+        // Out of time: return what we have rather than spend two more spawns per node.
+        if (opts.deadline !== undefined && Date.now() >= opts.deadline) return out;
         const key = `${ref.dest}${ref.path}`;
         if (seen.has(key)) continue;
         seen.add(key);

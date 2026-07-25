@@ -201,6 +201,68 @@ test('close is not blocked by a hung replay (teardown wins the abort race)', asy
   expect((await store.readFindings()).evidence).toBeUndefined(); // hung replay never written
 });
 
+test('a session aborted before the replay never spawns the encoder', async () => {
+  // `#raceAbort` only stops the WAITING — the step was still evaluated first, so a
+  // teardown spawned ffmpeg anyway, `close()` returned, the process exited, and the
+  // encoder was orphaned (its write-back landing after the run was over).
+  const store = makeStore();
+  let enterSummary: () => void = () => undefined;
+  const summarizing = new Promise<void>((resolve) => {
+    enterSummary = resolve;
+  });
+  let replayCalls = 0;
+  let sawSignal: AbortSignal | undefined;
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    summarize: () => {
+      enterSummary();
+      return new Promise<string>(() => undefined); // a hung summary model
+    },
+    replay: async (signal) => {
+      replayCalls += 1;
+      sawSignal = signal;
+      return { kind: 'skipped' };
+    },
+  });
+
+  session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'passed', steps: [], bugs: [], visual: [] });
+  });
+
+  await summarizing; // the run is parked in the post-verdict summary
+  await session.close(); // aborts, then awaits the run through to the replay step
+
+  expect(replayCalls).toBe(0); // the replay is skipped outright, not started and abandoned
+  expect(sawSignal).toBeUndefined();
+});
+
+test('the replay step is handed the session signal so teardown kills the encoder', async () => {
+  const store = makeStore();
+  let sawSignal: AbortSignal | undefined;
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    replay: async (signal) => {
+      sawSignal = signal;
+      return { kind: 'skipped' };
+    },
+  });
+
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'passed', steps: [], bugs: [], visual: [] });
+  });
+
+  expect(sawSignal).toBeDefined();
+  expect(sawSignal?.aborted).toBe(false);
+  await session.close();
+  expect(sawSignal?.aborted).toBe(true); // the same signal the teardown fires
+});
+
 test('no evidence is recorded when no replay step is wired', async () => {
   const store = makeStore();
   const session = new Session({

@@ -36,8 +36,12 @@ import type {
   ScrollOptions,
   WaitOptions,
 } from '../contract.js';
+// Both managed adapters kill a detached group the same way — one implementation, in the
+// subprocess plumbing module.
+import { terminateGroup } from '../desktop/proc.js';
 import { type Adb, AdbCli, pendingStateOrThrow } from './adb.js';
 import {
+  expectOnScreen,
   keyArgs,
   parseScreenSize,
   scrollSwipe,
@@ -382,19 +386,19 @@ export class AndroidAdapter implements Adapter {
         await this.#transport.adb.adb(['emu', 'kill']).catch(() => undefined);
       }
       const pid = this.#emulator?.pid;
-      this.#emulator = null;
       this.#booted = false;
       this.#serial = null;
       this.#screen = null;
       // Drop the binding so a re-`open` binds to the next emulator, not the dead one.
       if (this.#bind) this.#transport = null;
-      if (pid === undefined) return;
-      try {
-        // Negative pid → the whole detached group.
-        process.kill(-pid, 'SIGTERM');
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      if (pid === undefined) {
+        this.#emulator = null;
+        return;
       }
+      // SIGTERM the group, escalate to SIGKILL, and keep the handle until death is
+      // confirmed — a dropped handle leaves a SIGTERM-ignoring emulator orphaned for good.
+      await terminateGroup(pid);
+      this.#emulator = null;
     });
   }
 
@@ -407,11 +411,19 @@ export class AndroidAdapter implements Adapter {
   async #ensureBooted(timeoutMs?: number): Promise<void> {
     if (this.#booted) return;
     if (!this.#emulator) {
+      // Only managed mode needs an AVD — attach never reads it (hence optional in config).
+      const avd = this.#config.avd;
+      if (avd === undefined) {
+        throw new AdapterError(
+          'android: managed boot needs `avd` on the target (or set `adbSerial` to attach ' +
+            'to a running device/emulator)',
+        );
+      }
       const bin = this.#config.emulatorPath ?? 'emulator';
       const port = await this.#pickPort();
       this.#serial = emulatorSerial(port);
       if (this.#bind) this.#transport = this.#bind(this.#serial);
-      const child = this.#spawn(bin, [`@${this.#config.avd}`, '-port', String(port)]);
+      const child = this.#spawn(bin, [`@${avd}`, '-port', String(port)]);
       this.#emulatorDown = null;
       // Both fire async (later tick): without a listener a bad `emulatorPath` would
       // crash the whole server via an unhandled 'error' event. Capture the failure
@@ -482,12 +494,16 @@ export class AndroidAdapter implements Adapter {
     return node;
   }
 
-  /** Resolve a scope `within` (a {@link Node} or a selector) to an on-screen rectangle. */
+  /**
+   * Resolve a scope `within` (a {@link Node} or a selector) to an on-screen rectangle.
+   * A zero-size region is rejected, not scoped to: `scroll` would swipe 2px at the screen
+   * origin (a shade pull) and `readState` would report the region as simply empty.
+   */
   async #regionBounds(within: NodeRef): Promise<Bounds> {
-    if (typeof within !== 'string') return within.bounds;
+    if (typeof within !== 'string') return expectOnScreen(within);
     const node = await this.find({ query: within });
     if (!node) throw new AdapterError(`android: \`within\` target not found: ${within}`);
-    return node.bounds;
+    return expectOnScreen(node);
   }
 
   /** Run a backend call, re-throwing as a loud {@link AdapterError} (our own errors pass through). */

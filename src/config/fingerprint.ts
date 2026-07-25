@@ -17,6 +17,7 @@
  * a bad assumption, and the house rule is to crash on those rather than run on.
  */
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CONFIG_FILENAME } from './load.js';
@@ -27,14 +28,24 @@ import { CONFIG_FILENAME } from './load.js';
  *
  * Contents, not mtime: editors and formatters rewrite files without changing
  * anything that matters, and a spurious "restart me" is its own kind of noise.
+ *
+ * `node:crypto`, not `Bun.hash`: the package ships as `bin: dist/main.js` behind
+ * `#!/usr/bin/env node`, so the published server runs on Node, where `Bun` is
+ * undefined. Hashing with a Bun global threw a `ReferenceError` straight into the
+ * catch below — the fingerprint was permanently `null` and drift detection was
+ * dead in every installed copy, while working fine under `bun run dev`.
  */
 export function configFingerprint(cwd: string): string | null {
+  let raw: string;
   try {
-    const raw = readFileSync(join(cwd, CONFIG_FILENAME), 'utf8');
-    return Bun.hash(raw).toString(16);
-  } catch {
-    return null;
+    raw = readFileSync(join(cwd, CONFIG_FILENAME), 'utf8');
+  } catch (err) {
+    // Absent config = nothing to drift from. Anything else (permissions, I/O) is a
+    // bad assumption, and the house rule is to crash on those rather than run on.
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+    throw err;
   }
+  return createHash('sha256').update(raw).digest('hex');
 }
 
 /**

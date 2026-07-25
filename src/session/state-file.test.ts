@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureIdentity } from './process-identity.js';
@@ -125,6 +125,26 @@ test('FileStatePort.record writes a running breadcrumb with a derived sessionDir
     startedAt: '2026-06-29T02:00:00.000Z',
   });
   expect(state?.sessionDir).toBe(join(ws.sessions, '1700000000000-0007'));
+});
+
+test('FileStatePort.record fails loud when the breadcrumb cannot be written', async () => {
+  // Swallowed, this is the silent fallback that hurts most: `start_debug` hands
+  // back a session id and Chrome runs, but `state.json` never exists — `status`
+  // and `stop` both report "no debug run" and the only way to free the profile is
+  // killing the server by hand. The service's teardown path depends on this throw.
+  const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
+  await mkdir(join(dir, 'ws'), { recursive: true });
+  await writeFile(ws.root, 'a file where the workspace dir belongs', 'utf8');
+  const port = new FileStatePort(ws, { pid: 99 });
+
+  await expect(port.record({ sessionId: 's', target: 'web', goal: 'g' })).rejects.toThrow();
+});
+
+test('FileStatePort.clear stays best-effort (the run is already down)', async () => {
+  const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
+  const port = new FileStatePort(ws, { pid: 99 });
+  // Nothing recorded, nothing writable — clearing must not throw into teardown.
+  await port.clear();
 });
 
 test('FileStatePort.clear marks the run ended', async () => {

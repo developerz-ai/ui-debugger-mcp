@@ -1,6 +1,11 @@
 import { expect, test } from 'bun:test';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ExecTimeoutError } from '../../errors.js';
-import { desktopEnv, isEnoent, makeExec } from './proc.js';
+import { desktopEnv, isEnoent, makeExec, terminateGroup } from './proc.js';
 
 /** Patch `process.env` for one assertion block, always restoring afterwards. */
 function withEnv(patch: Record<string, string | undefined>, fn: () => void): void {
@@ -69,4 +74,58 @@ test('makeExec passes a missing binary through raw as ENOENT', async () => {
   const error = await exec('uidbg-no-such-binary', []).catch((e: unknown) => e);
   expect(error).not.toBeInstanceOf(ExecTimeoutError);
   expect(isEnoent(error)).toBe(true);
+});
+
+// --- terminateGroup (real detached process groups) ----------------------------
+
+/** True while `pid` is alive (`kill -0`); false once it's gone (ESRCH). */
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Spawn a detached `/bin/sh` group running `script`, and hand back its pid. */
+function spawnGroup(script: string): number {
+  const child = spawn('/bin/sh', ['-c', script], { detached: true, stdio: 'ignore' });
+  const pid = child.pid;
+  if (pid === undefined) throw new Error('test setup: the shell did not spawn');
+  return pid;
+}
+
+test('terminateGroup returns once a well-behaved group is actually dead', async () => {
+  const pid = spawnGroup('sleep 30');
+  await terminateGroup(pid, 2_000);
+  expect(isAlive(pid)).toBe(false); // resolved *after* death, not merely after the signal
+});
+
+test('terminateGroup escalates to SIGKILL when the group ignores SIGTERM', async () => {
+  // An app with a SIGTERM handler ("save changes?") survives the polite signal; without
+  // the escalation it outlives close() forever, holding its X/profile locks.
+  const dir = await mkdtemp(join(tmpdir(), 'uidbg-proc-'));
+  const ready = join(dir, 'ready');
+  const pid = spawnGroup(`trap '' TERM; : > ${JSON.stringify(ready)}; while :; do sleep 0.1; done`);
+  const armed = Date.now() + 5_000;
+  while (!existsSync(ready)) {
+    expect(Date.now()).toBeLessThan(armed); // the trap was never installed
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const started = Date.now();
+  await terminateGroup(pid, 200);
+  expect(Date.now() - started).toBeGreaterThanOrEqual(200); // it did wait out the grace
+  const deadline = Date.now() + 3_000;
+  while (isAlive(pid)) {
+    expect(Date.now()).toBeLessThan(deadline); // survived the SIGKILL escalation
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('terminateGroup on an already-dead group is a no-op', async () => {
+  const pid = spawnGroup('exit 0');
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await expect(terminateGroup(pid, 200)).resolves.toBeUndefined();
 });

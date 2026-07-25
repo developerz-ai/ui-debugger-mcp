@@ -34,7 +34,11 @@ export async function createAdapter(
   onLog?: BrowserAdapterInit['onLog'],
   timeoutMs?: number,
 ): Promise<Adapter> {
-  const target = config.targets[targetName];
+  // `hasOwn`, never a plain index read: `targets` is a plain object, so
+  // `targets['constructor']` (and `toString`, `valueOf`, `__proto__`) walks the
+  // prototype chain and answers truthy — the guard passes and the run dies deeper
+  // as "unknown adapter type: undefined". Mirrors the same guard in `buildSession`.
+  const target = Object.hasOwn(config.targets, targetName) ? config.targets[targetName] : undefined;
 
   if (!target) {
     throw new TargetNotFoundError(`target "${targetName}" not found in config.targets`);

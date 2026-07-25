@@ -161,7 +161,11 @@ export class AdbCli implements Adb {
     if (error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
       return new AdbError('android: `adb` not found on PATH (install Android platform-tools)');
     }
-    if (error instanceof Error && (error as { killed?: boolean }).killed === true) {
+    if (
+      error instanceof Error &&
+      (error as { killed?: boolean }).killed === true &&
+      (error as NodeJS.ErrnoException).code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+    ) {
       return new AdbError(
         `adb ${args[0] ?? ''} timed out after ${this.#timeoutMs}ms (${KILL_SIGNAL}ed — adb or the emulator is wedged)`,
       );

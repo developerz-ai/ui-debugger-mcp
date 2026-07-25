@@ -24,12 +24,17 @@ no JavaScript context. Unlike desktop you DO get a console — **logcat** — bu
 | Channel        | What it gives you | Use via |
 |----------------|-------------------|---------|
 | view hierarchy | element class, text/content-desc, on-screen bounds, enabled/clickable state | \`observe({kind:"tree"})\` |
-| screenshot     | the current frame as PNG (evidence + vision) | \`observe({kind:"screenshot"})\`, \`look\` |
+| screenshot     | the frame SAVED as evidence — you get a file path back, not pixels | \`observe({kind:"screenshot"})\` |
+| eyes           | an actual visual judgment of the current frame | \`look\` |
 | logcat         | app logs, crashes, stack traces, ANRs | \`observe({kind:"console"})\` |
 
 \`observe({kind:"network"})\` is **unsupported** on android and errors out — ADB exposes
 no request stream. Never call it; judge behaviour from the hierarchy, logcat, and the
 pixels instead.
+
+\`observe({kind:"tabs"})\` and \`act({action:"switch_tab"})\` are **unsupported** on
+android and error out too — an app has no tabs to switch between. Never call them;
+move between screens by tapping, or relaunch with \`act({action:"navigate"})\`.
 
 ### Launch the app yourself — the device boots to the launcher
 
@@ -62,10 +67,20 @@ visible element instead, e.g. a button label or a piece of text you expect to re
 ### Selectors — use the node's \`target\`, don't invent one
 
 Actionable nodes from \`observe({kind:"tree"})\` carry a ready-to-use \`target\` string
-built from their class + text/content-desc. When a node has a \`target\`, COPY it
-verbatim into \`act({action, target})\`. Do NOT hand-craft one. If a node is unlabeled,
-pass its visible text as \`target\`, or scope the read with \`within\`/\`filters\` and act
-on what comes back.
+built from their resource-id, or their role + text/content-desc. When a node has a
+\`target\`, COPY it verbatim into \`act({action, target})\`.
+
+Android targets take exactly three forms, and NOTHING else:
+- a \`resource-id\` — e.g. \`com.example.app:id/submit\` (what a node's \`testid\` holds;
+  the most reliable of the three).
+- \`role "name"\` — e.g. \`button "Save"\`, \`textbox "Email"\` (role must match exactly,
+  name is a case-insensitive substring of the text/content-desc).
+- a plain text substring — e.g. \`Save\`.
+
+Web selector syntax does NOT work here: \`data-testid="…"\`, \`role=button[name="Save" i]\`,
+\`text=Save\` and \`>> nth=\` are all read as literal text, match nothing, and cost you the
+step. If a node is unlabeled, or repeats and so carries no \`target\`, scope the read with
+\`within\`/\`filters\` and act on what comes back.
 
 ### Findings — functional + visual
 

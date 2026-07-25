@@ -206,7 +206,39 @@ function failureNote(error: unknown): string {
 }
 
 /** Perform one action against the contract and return its target-derived step label. */
-async function performAct(adapter: Adapter, input: ActInput): Promise<string> {
+/**
+ * Refuse a `navigate` that leaves the app under test.
+ *
+ * Observed end-to-end: driven at the local fixture with the goal "debug the Nimbus
+ * Store home page", the driver's FIRST action was
+ * `navigate → https://nimbus-store.vercel.app` — a public site it inferred from the
+ * goal text. It never returned, and the run ended with six confident, fully-evidenced
+ * bugs about a stranger's production app, with nothing in the output hinting the
+ * target had been left. The smart agent would have gone hunting for a CORS bug that
+ * does not exist in its repo.
+ *
+ * `origin` is the run's own origin (web only; empty for desktop/android, whose
+ * `navigate` means a window title or an app package). Same-origin URLs and relative
+ * paths pass; anything else fails loud, naming where the driver is supposed to be.
+ * A run that wanders off the app under test is worse than a run that stops.
+ */
+function assertSameOrigin(target: string, origin: string | undefined): void {
+  if (!origin) return; // non-web target, or no origin to enforce
+  let destination: URL;
+  try {
+    destination = new URL(target, origin); // relative paths resolve against the app
+  } catch {
+    return; // not URL-shaped — let the adapter reject it with its own message
+  }
+  if (destination.origin === origin) return;
+  throw new AgentError(
+    `act 'navigate' refused: '${target}' leaves the app under test (${origin}). ` +
+      'Findings about another site cannot be acted on. Use a path or a URL on ' +
+      `${origin}; if the app genuinely lives elsewhere, the smart agent must pass that url to start_debug.`,
+  );
+}
+
+async function performAct(adapter: Adapter, input: ActInput, origin?: string): Promise<string> {
   switch (input.action) {
     case 'click': {
       const node = await resolve(adapter, required(input.target, 'target', 'click'));
@@ -240,6 +272,7 @@ async function performAct(adapter: Adapter, input: ActInput): Promise<string> {
     }
     case 'navigate': {
       const target = required(input.target, 'target', 'navigate');
+      assertSameOrigin(target, origin);
       await adapter.open(target);
       return `navigate to ${target}`;
     }
@@ -303,15 +336,20 @@ export async function runAct(
   recorder: StepRecorder,
   input: ActInput,
   trail?: ActTrail,
+  entered?: () => void,
+  origin?: string,
 ): Promise<ActResult> {
   // Enter the gate BEFORE the first await, so a same-step terminal read sees this
-  // act in flight rather than an empty trail.
-  const settle = trail?.begin();
+  // act in flight rather than an empty trail. `entered` is the release of a
+  // `begin()` the CALLER already made — `createActTool` enters the gate when the
+  // act is queued, which is earlier than this and is what makes a queued-but-not-
+  // yet-started act visible to the barrier.
+  const settle = entered ?? trail?.begin();
   // Label the attempt from the input up front: a throw inside `performAct` yields
   // no target-derived label, and an unlabelled failed step is not evidence.
   let label = describeAttempt(input);
   try {
-    label = await performAct(adapter, input);
+    label = await performAct(adapter, input, origin);
     const png = await adapter.screenshot();
     const screenshot = await recorder.saveScreenshot(label, png);
     await recorder.appendLog('agent', `act ${label} → ${screenshot}`);
@@ -352,8 +390,14 @@ async function extraTabs(adapter: Adapter): Promise<{ tabs?: TabInfo[] }> {
  * Build the `act` tool bound to one adapter + recorder, for the debug agent's belt.
  * `trail` (when wired by the loop) is the run's shared step trail, so every act —
  * the ones that worked and the ones that threw — lands in the persisted findings.
+ * `origin` is the app under test's origin (web only); see {@link assertSameOrigin}.
  */
-export function createActTool(adapter: Adapter, recorder: StepRecorder, trail?: ActTrail) {
+export function createActTool(
+  adapter: Adapter,
+  recorder: StepRecorder,
+  trail?: ActTrail,
+  origin?: string,
+) {
   /**
    * Acts run ONE AT A TIME, however many the driver emits in a step.
    *
@@ -378,7 +422,14 @@ export function createActTool(adapter: Adapter, recorder: StepRecorder, trail?: 
       'Drive the target with one action, chosen by action: click | type | key | scroll | navigate | wait | switch_tab. Resolves target via find, then routes to the adapter (click/type/open/waitFor) and records a step to agent.log plus a post-action screenshot. Returns tabs when more than one is open — a click may have opened one. Use observe to read state before and after.',
     inputSchema: ActInputSchema,
     execute: (input) => {
-      const next = queue.then(() => runAct(adapter, recorder, input, trail));
+      // Enter the trail's gate NOW, not when this act's turn on the queue comes up.
+      // `runAct` releases the gate in its `finally`, which is scheduled BEFORE the
+      // queue continuation that starts the next act — so a `report` racing in the
+      // same step saw an idle gate between two queued acts and wrote a verdict
+      // missing every act but the first (and the loop then stops, so that act
+      // reaches no persisted file at all).
+      const entered = trail?.begin();
+      const next = queue.then(() => runAct(adapter, recorder, input, trail, entered, origin));
       // The chain must survive a failed act: swallow the rejection on the QUEUE
       // copy only, so a thrown act still reaches the driver via `next`.
       queue = next.catch(() => undefined);

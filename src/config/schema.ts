@@ -38,8 +38,8 @@ export const WebTargetSchema = z.strictObject({
  * window title itself — with neither, `open` fails loud instead of driving nothing.
  */
 const WindowMatchSchema = z.strictObject({
-  title: z.string().optional(), // WM_NAME / title substring
-  class: z.string().optional(), // WM_CLASS
+  title: z.string().optional(), // WM_NAME / title substring, literal (regex chars escaped)
+  class: z.string().optional(), // WM_CLASS, literal (regex chars escaped)
 });
 
 /**
@@ -57,13 +57,29 @@ export const DesktopTargetSchema = z.strictObject({
   display: z.string().nullish(), // X11 DISPLAY, e.g. ":99" for Xvfb; null = inherit env
 });
 
-/** Android target — ADB adapter. Managed (boot `emulator @avd`) unless `adbSerial` attaches. */
-export const AndroidTargetSchema = z.strictObject({
-  adapter: z.literal('android'),
-  avd: z.string(),
-  emulatorPath: z.string().nullish(), // null = auto-detect from SDK (managed)
-  adbSerial: z.string().nullish(), // set → attach to a running device, no start/stop
-});
+/**
+ * Android target — ADB adapter. Managed (boot `emulator @avd`) unless `adbSerial` attaches.
+ *
+ * `avd`/`emulatorPath` are **managed-only** — attach binds straight to the serial and
+ * never reads them, so a physical device is just `{ adapter, adbSerial }` instead of a
+ * made-up AVD name. The constraint is stated where it is real: managed requires `avd`.
+ */
+export const AndroidTargetSchema = z
+  .strictObject({
+    adapter: z.literal('android'),
+    avd: z.string().optional(), // required in managed mode (see the refinement below)
+    emulatorPath: z.string().nullish(), // null = auto-detect from SDK (managed)
+    adbSerial: z.string().nullish(), // set → attach to a running device, no start/stop
+  })
+  .superRefine((target, ctx) => {
+    if (target.adbSerial == null && target.avd === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['avd'],
+        message: '`avd` is required in managed mode (set `adbSerial` to attach instead)',
+      });
+    }
+  });
 
 /** A single target, discriminated on `adapter`. All three adapters (browser, desktop, android) are operational. */
 export const TargetSchema = z.discriminatedUnion('adapter', [

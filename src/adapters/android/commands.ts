@@ -30,14 +30,15 @@ export function centerOf(bounds: Bounds): { x: number; y: number } {
 }
 
 /**
- * Where a `click`/`type` tap lands on a {@link Node} — its center, zero-size guarded.
+ * The on-screen rectangle of a {@link Node}, or a loud failure when it has none.
  *
  * uiautomator reports detached, collapsed or not-yet-laid-out views as `[0,0][0,0]`,
- * whose "center" is the screen origin: the tap would land on the status bar / back
- * gesture and the run would read as a successful click on the wrong thing. Fail loud
- * instead (the desktop adapter applies the same rule to bounds-less AT-SPI nodes).
+ * whose "center" is the screen origin: a tap would land on the status bar / back
+ * gesture, and a `within`-scoped swipe would drag 2px at the top-left corner (a
+ * notification-shade pull) — both reported as success. Fail loud instead (the desktop
+ * adapter applies the same rule to bounds-less AT-SPI nodes, `input.ts#expectOnScreen`).
  */
-export function tapPointOf(node: Node): { x: number; y: number } {
+export function expectOnScreen(node: Node): Bounds {
   const { width, height } = node.bounds;
   if (width <= 0 || height <= 0) {
     const label = node.name === '' ? node.role : `${node.role} "${node.name}"`;
@@ -46,7 +47,12 @@ export function tapPointOf(node: Node): { x: number; y: number } {
         'wait for it to render or scroll it into view, then re-read its bounds',
     );
   }
-  return centerOf(node.bounds);
+  return node.bounds;
+}
+
+/** Where a `click`/`type` tap lands on a {@link Node} — its center, zero-size guarded. */
+export function tapPointOf(node: Node): { x: number; y: number } {
+  return centerOf(expectOnScreen(node));
 }
 
 // --- launch -----------------------------------------------------------------

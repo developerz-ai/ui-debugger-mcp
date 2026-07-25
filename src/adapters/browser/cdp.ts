@@ -26,9 +26,36 @@
  */
 
 import type { ConsoleMessage, Page, Request, Response } from 'playwright-core';
-import { AdapterError } from '../../errors.js';
-import type { ConsoleEntry, Filters, FilterValue, LogQuery, NetworkEntry } from '../contract.js';
+import type { ConsoleEntry, LogQuery, NetworkEntry } from '../contract.js';
 import { capToLimit } from '../limit.js';
+import { filterConsole, filterNetwork } from './log-filters.js';
+import {
+  formatConsoleLine,
+  formatNetworkLine,
+  normalizeConsoleLevel,
+  redactHeaders,
+  redactUrl,
+  truncateBody,
+} from './log-format.js';
+
+// Filtering lives in `log-filters.ts` and rendering/redaction in `log-format.ts`
+// (500-LOC cap); both are re-exported here so `cdp.js` stays the single import
+// surface for the capture channel.
+export {
+  CONSOLE_FILTER_KEYS,
+  filterConsole,
+  filterNetwork,
+  NETWORK_FILTER_KEYS,
+} from './log-filters.js';
+export {
+  BODY_CAP,
+  formatConsoleLine,
+  formatNetworkLine,
+  normalizeConsoleLevel,
+  redactHeaders,
+  redactUrl,
+  truncateBody,
+} from './log-format.js';
 
 /** Default ring size per channel — keeps memory bounded on chatty pages. */
 const DEFAULT_BUFFER_CAP = 1000;
@@ -42,10 +69,15 @@ const DEFAULT_BUFFER_CAP = 1000;
 export const BODY_RESOURCE_TYPES = new Set(['fetch', 'xhr']);
 
 /**
- * Per-body character cap. Big enough for an error payload or a small collection,
- * small enough that the driver re-reading tool results every step cannot drown.
+ * How long a response body/header read may take before the exchange is recorded
+ * without it. A streaming response (SSE, long-poll, a chunked download) only
+ * "finishes" when the page tears it down, so an uncapped read would keep the
+ * durable log line hostage for the whole run.
  */
-export const BODY_CAP = 4096;
+export const BODY_WAIT_MS = 2_000;
+
+/** Stand-in body for a response that was still streaming when the cap expired. */
+export const BODY_UNFINISHED = '<body not finished>';
 
 /**
  * `{ key: value }` when the value exists, `{}` when it does not — spread into an
@@ -72,6 +104,37 @@ async function readBody(response: Response): Promise<string | undefined> {
   }
 }
 
+/**
+ * `promise`'s value, or `undefined` when it takes longer than `ms`.
+ *
+ * Never leaves a timer behind: the loser is cleared as soon as the race settles,
+ * so a capped read cannot hold the process open past the run.
+ */
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const capped = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms);
+  });
+  try {
+    return await Promise.race([promise, capped]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * The response payload, capped in SIZE and in TIME — {@link BODY_UNFINISHED} when
+ * the stream had not finished within `waitMs`. The `{ body }` wrapper keeps the
+ * two `undefined`s apart: "no body to read" (a redirect) vs "still streaming".
+ */
+async function readBodyWithin(response: Response, waitMs: number): Promise<string | undefined> {
+  const settled = await withTimeout(
+    readBody(response).then((body) => ({ body })),
+    waitMs,
+  );
+  return settled === undefined ? BODY_UNFINISHED : settled.body;
+}
+
 /** Redacted headers off a request or response; `undefined` if they cannot be read. */
 async function readHeaders(
   source: Pick<Response, 'allHeaders'> | Pick<Request, 'allHeaders'>,
@@ -82,48 +145,6 @@ async function readHeaders(
     return undefined;
   }
 }
-
-/** Header names whose VALUE is a credential — kept as a length marker, never verbatim. */
-const SENSITIVE_HEADER =
-  /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token)$/i;
-
-/** Truncate a captured body, marking what was dropped (never silently shortened). */
-export function truncateBody(body: string, cap = BODY_CAP): string {
-  if (body.length <= cap) return body;
-  return `${body.slice(0, cap)}…[truncated, ${body.length} chars total]`;
-}
-
-/**
- * Copy headers with credential values replaced by `<redacted, N chars>`.
- *
- * Presence is diagnostic (an absent `cookie` explains a 401 as well as a wrong
- * one), the value is a secret that must not reach the model's context, the log
- * files, or the findings the caller reads back.
- */
-export function redactHeaders(headers: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [name, value] of Object.entries(headers)) {
-    out[name] = SENSITIVE_HEADER.test(name) ? `<redacted, ${value.length} chars>` : value;
-  }
-  return out;
-}
-
-/** Whitelisted `filters` keys for the console channel — anything else is rejected. */
-export const CONSOLE_FILTER_KEYS = ['level_eq', 'level_in', 'text_contains'] as const;
-
-/** Whitelisted `filters` keys for the network channel — anything else is rejected. */
-export const NETWORK_FILTER_KEYS = [
-  'status_eq',
-  'status_gte',
-  'status_lt',
-  'ok_eq',
-  'failed_eq',
-  'method_eq',
-  'resource_in',
-  'url_contains',
-  'duration_gte',
-  'body_contains',
-] as const;
 
 /**
  * Where captured entries are streamed as formatted log lines. The session layer
@@ -141,197 +162,8 @@ export interface CdpCaptureInit {
   now?: () => number;
   /** Per-channel ring size; default {@link DEFAULT_BUFFER_CAP}. */
   cap?: number;
-}
-
-// --- Normalizers ------------------------------------------------------------
-
-/** Map a CDP console `type()` onto the normalized {@link ConsoleEntry} level. */
-export function normalizeConsoleLevel(type: string): ConsoleEntry['level'] {
-  switch (type) {
-    case 'error':
-    case 'assert':
-      return 'error';
-    case 'warning':
-    case 'warn':
-      return 'warn';
-    case 'info':
-    case 'count':
-    case 'timeEnd':
-      return 'info';
-    case 'debug':
-      return 'debug';
-    default:
-      return 'log';
-  }
-}
-
-// --- Line formatting (durable log trail) ------------------------------------
-
-/** ISO-8601 stamp from epoch ms; deterministic given the injected clock. */
-function stamp(ts: number): string {
-  return new Date(ts).toISOString();
-}
-
-/** Render a {@link ConsoleEntry} as one greppable `logs/console.log` line. */
-export function formatConsoleLine(entry: ConsoleEntry): string {
-  const where = entry.location ? ` @ ${entry.location}` : '';
-  return `${stamp(entry.timestamp)} ${entry.level.toUpperCase()} ${entry.text}${where}`;
-}
-
-/** One log line's worth of a captured body — single-line, hard-capped, never secret-bearing. */
-function bodySnippet(label: string, body: string | undefined): string {
-  if (body === undefined || body.length === 0) return '';
-  return ` ${label}=${JSON.stringify(truncateBody(body, 500))}`;
-}
-
-/**
- * Render a {@link NetworkEntry} as one greppable `logs/network.log` line.
- *
- * Failures carry their payloads inline: the durable log is what a human (or a
- * later agent) reads after the run, and `POST /login → 400` without the body is
- * the exact dead end this log exists to prevent.
- */
-export function formatNetworkLine(entry: NetworkEntry): string {
-  const head = `${stamp(entry.timestamp)} ${entry.method} ${entry.url}`;
-  const sent = bodySnippet('req', entry.requestBody);
-  if (entry.error !== undefined) return `${head} → FAILED ${entry.error}${sent}`;
-  const type = entry.resourceType ? ` [${entry.resourceType}]` : '';
-  const took = entry.durationMs !== undefined ? ` ${entry.durationMs}ms` : '';
-  const got = entry.ok ? '' : bodySnippet('res', entry.responseBody);
-  return `${head} → ${entry.status}${type}${took}${sent}${got}`;
-}
-
-// --- Filter value type-guards (fail loud, never coerce) ---------------------
-
-function expectBoolean(key: string, value: FilterValue): boolean {
-  if (typeof value !== 'boolean') throw new AdapterError(`filter \`${key}\` expects a boolean`);
-  return value;
-}
-
-function expectNumber(key: string, value: FilterValue): number {
-  if (typeof value !== 'number') throw new AdapterError(`filter \`${key}\` expects a number`);
-  return value;
-}
-
-function expectString(key: string, value: FilterValue): string {
-  if (typeof value !== 'string') throw new AdapterError(`filter \`${key}\` expects a string`);
-  return value;
-}
-
-function expectStringArray(key: string, value: FilterValue): string[] {
-  if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
-    throw new AdapterError(`filter \`${key}\` expects a string[]`);
-  }
-  return value;
-}
-
-// --- Filtering (whitelisted, per-channel) -----------------------------------
-
-/**
- * Narrow console entries by the whitelisted `filters` keys
- * ({@link CONSOLE_FILTER_KEYS}). Throws {@link AdapterError} on an unknown key
- * (no silent injection surface) or a wrong value type.
- */
-export function filterConsole(entries: ConsoleEntry[], filters?: Filters): ConsoleEntry[] {
-  if (!filters) return entries;
-  let out = entries;
-  for (const [key, value] of Object.entries(filters)) {
-    switch (key) {
-      case 'level_eq': {
-        const want = expectString(key, value);
-        out = out.filter((e) => e.level === want);
-        break;
-      }
-      case 'level_in': {
-        const want = expectStringArray(key, value);
-        out = out.filter((e) => want.includes(e.level));
-        break;
-      }
-      case 'text_contains': {
-        const needle = expectString(key, value).toLowerCase();
-        out = out.filter((e) => e.text.toLowerCase().includes(needle));
-        break;
-      }
-      default:
-        throw new AdapterError(
-          `unknown console filter \`${key}\` (allowed: ${CONSOLE_FILTER_KEYS.join(', ')})`,
-        );
-    }
-  }
-  return out;
-}
-
-/**
- * Narrow network entries by the whitelisted `filters` keys
- * ({@link NETWORK_FILTER_KEYS}). Throws {@link AdapterError} on an unknown key or
- * a wrong value type.
- */
-export function filterNetwork(entries: NetworkEntry[], filters?: Filters): NetworkEntry[] {
-  if (!filters) return entries;
-  let out = entries;
-  for (const [key, value] of Object.entries(filters)) {
-    switch (key) {
-      case 'status_eq': {
-        const want = expectNumber(key, value);
-        out = out.filter((e) => e.status === want);
-        break;
-      }
-      case 'status_gte': {
-        const want = expectNumber(key, value);
-        out = out.filter((e) => e.status >= want);
-        break;
-      }
-      case 'status_lt': {
-        const want = expectNumber(key, value);
-        out = out.filter((e) => e.status < want);
-        break;
-      }
-      case 'ok_eq': {
-        const want = expectBoolean(key, value);
-        out = out.filter((e) => e.ok === want);
-        break;
-      }
-      case 'failed_eq': {
-        const want = expectBoolean(key, value);
-        out = out.filter((e) => (e.error !== undefined) === want);
-        break;
-      }
-      case 'method_eq': {
-        const want = expectString(key, value).toUpperCase();
-        out = out.filter((e) => e.method.toUpperCase() === want);
-        break;
-      }
-      case 'resource_in': {
-        const want = expectStringArray(key, value);
-        out = out.filter((e) => e.resourceType !== undefined && want.includes(e.resourceType));
-        break;
-      }
-      case 'url_contains': {
-        const needle = expectString(key, value).toLowerCase();
-        out = out.filter((e) => e.url.toLowerCase().includes(needle));
-        break;
-      }
-      case 'duration_gte': {
-        const want = expectNumber(key, value);
-        // A request with no timing (never answered, or in flight before capture)
-        // is not "slower than N" — excluded rather than counted as 0.
-        out = out.filter((e) => e.durationMs !== undefined && e.durationMs >= want);
-        break;
-      }
-      case 'body_contains': {
-        const needle = expectString(key, value).toLowerCase();
-        out = out.filter((e) =>
-          `${e.requestBody ?? ''}\n${e.responseBody ?? ''}`.toLowerCase().includes(needle),
-        );
-        break;
-      }
-      default:
-        throw new AdapterError(
-          `unknown network filter \`${key}\` (allowed: ${NETWORK_FILTER_KEYS.join(', ')})`,
-        );
-    }
-  }
-  return out;
+  /** How long a body/header read may take before it is given up on; default {@link BODY_WAIT_MS}. */
+  bodyWaitMs?: number;
 }
 
 /**
@@ -346,12 +178,10 @@ function newestFirst<T>(filtered: T[], limit?: number): T[] {
 /**
  * Newest-first by capture time, then capped.
  *
- * Network entries are buffered only after their body has been awaited, so a slow
- * response can land in the ring *after* a fast one that started later — insertion
- * order is no longer capture order. Sorting on the recorded timestamp restores
- * "newest first" as a promise about the traffic rather than about our await
- * scheduling. The sort is stable, so same-timestamp entries keep the reversed
- * insertion order {@link newestFirst} alone would give them.
+ * Sorting on the recorded timestamp (rather than trusting insertion order) makes
+ * "newest first" a promise about the TRAFFIC, independent of how the handlers
+ * happened to be scheduled. The sort is stable, so same-timestamp entries keep
+ * the reversed insertion order {@link newestFirst} alone would give them.
  */
 function newestFirstByTime(filtered: NetworkEntry[], limit?: number): NetworkEntry[] {
   return capToLimit(
@@ -371,6 +201,7 @@ export class CdpCapture {
   readonly #sink: CaptureSink | undefined;
   readonly #now: () => number;
   readonly #cap: number;
+  readonly #bodyWait: number;
 
   readonly #console: ConsoleEntry[] = [];
   readonly #network: NetworkEntry[] = [];
@@ -381,6 +212,10 @@ export class CdpCapture {
    * same one is recognized as teardown rather than logged as a second exchange.
    */
   readonly #responded = new WeakSet<Request>();
+  /** Request → the buffered entry it produced, so a late failure can amend it in place. */
+  readonly #entryOf = new WeakMap<Request, NetworkEntry>();
+  /** Entries whose log line was already streamed — the line lands once, when enrichment settles. */
+  readonly #logged = new WeakSet<NetworkEntry>();
   /** Detacher thunks captured at `start`, replayed at `stop`. */
   readonly #detachers: Array<() => void> = [];
   #started = false;
@@ -390,6 +225,7 @@ export class CdpCapture {
     this.#sink = init.sink;
     this.#now = init.now ?? (() => Date.now());
     this.#cap = init.cap ?? DEFAULT_BUFFER_CAP;
+    this.#bodyWait = init.bodyWaitMs ?? BODY_WAIT_MS;
   }
 
   /** Subscribe to the console/error/network events. Idempotent (a re-`start` is a no-op). */
@@ -449,7 +285,9 @@ export class CdpCapture {
     this.#pushConsole({
       level: normalizeConsoleLevel(msg.type()),
       text: msg.text(),
-      location: loc.url ? `${loc.url}:${loc.line}:${loc.column}` : undefined,
+      // Playwright reports line/column 0-BASED; `url:line:col` is read (and opened
+      // in an editor) 1-based, so the raw numbers point one line too high.
+      location: loc.url ? `${loc.url}:${loc.line + 1}:${loc.column + 1}` : undefined,
       timestamp: this.#now(),
     });
   };
@@ -494,36 +332,50 @@ export class CdpCapture {
   }
 
   readonly #onRequestFailed = (request: Request): void => {
-    // A request that ALREADY answered and is now aborted is not a failed request:
-    // Chrome fires `requestfailed` with `net::ERR_ABORTED` when the connection is
-    // torn down after the response (a logout that navigates, a fetch whose page
-    // unloads). Logging both produced two rows for one exchange — a clean `204`
-    // and a phantom `FAILED` at the same millisecond — and readers reasonably took
-    // the phantom for a real outage. The response is the truth; drop the echo.
-    if (this.#responded.has(request)) return;
     const at = this.#now();
-    this.#pushNetwork({
+    const error = request.failure()?.errorText ?? 'request failed';
+    const answered = this.#entryOf.get(request);
+    if (this.#responded.has(request)) {
+      // An abort AFTER the response is teardown, not a failed request: Chrome fires
+      // `requestfailed` with `net::ERR_ABORTED` when the connection is torn down
+      // once the exchange is over (a logout that navigates, a fetch whose page
+      // unloads, a stream we stopped reading). Logging that produced two rows for
+      // one exchange — a clean `204` and a phantom `FAILED` — so drop the echo.
+      if (error.includes('net::ERR_ABORTED')) return;
+      // Anything else is a REAL failure that struck after the headers arrived (a
+      // connection reset mid-body). Amend the exchange in place: reported as a
+      // clean `200` it is indistinguishable from a body-less success.
+      if (answered) {
+        answered.error = error;
+        answered.ok = false;
+        if (this.#logged.has(answered)) this.#logNetwork(answered);
+        return;
+      }
+    }
+    const entry: NetworkEntry = {
       method: request.method(),
-      url: request.url(),
+      url: redactUrl(request.url()),
       status: 0,
       ok: false,
       resourceType: request.resourceType(),
-      error: request.failure()?.errorText ?? 'request failed',
+      error,
       timestamp: at,
       ...optional('durationMs', this.#elapsed(request, at)),
       ...optional('requestBody', this.#requestBodyOf(request)),
-    });
+    };
+    this.#bufferNetwork(entry);
+    this.#logNetwork(entry);
   };
 
   /**
-   * Buffer a finished exchange, enriched for API traffic.
+   * Record an exchange the moment its headers arrive, then enrich it in place.
    *
-   * Async on purpose: the response body only exists behind an await, and a `400`
-   * without its body is the dead end this capture exists to prevent. The
-   * timestamp is taken UP FRONT (before the await) so ordering reflects when the
-   * response actually arrived — `network()` sorts on it, since bodies resolve out
-   * of order. Playwright tolerates an async listener; a rejection here must not
-   * become an unhandled rejection that kills the run, so everything is guarded.
+   * The row is buffered SYNCHRONOUSLY — a body only exists behind an await, and a
+   * response that never finishes (SSE, long-poll, a stalled download) would
+   * otherwise leave no trace at all: no row for the driver to see, no line in the
+   * log. The bodies and headers land on the same object a moment later
+   * ({@link #enrichResponse}), which is also when its log line is written, so the
+   * durable trail still carries the payloads a `400` is explained by.
    */
   readonly #onResponse = (response: Response): void => {
     const at = this.#now();
@@ -531,46 +383,61 @@ export class CdpCapture {
     // Marked SYNCHRONOUSLY, before the body await: an abort that lands while the
     // body is still resolving must already see this request as answered.
     this.#responded.add(request);
-    void this.#captureResponse(response, request, at).catch(() => undefined);
-  };
-
-  async #captureResponse(response: Response, request: Request, at: number): Promise<void> {
-    const isApi = BODY_RESOURCE_TYPES.has(request.resourceType());
-    this.#pushNetwork({
+    const entry: NetworkEntry = {
       method: request.method(),
-      url: response.url(),
+      url: redactUrl(response.url()),
       status: response.status(),
       ok: response.ok(),
       resourceType: request.resourceType(),
       timestamp: at,
       ...optional('durationMs', this.#elapsed(request, at)),
       ...optional('requestBody', this.#requestBodyOf(request)),
-      ...optional('responseBody', isApi ? await readBody(response) : undefined),
-      ...optional('requestHeaders', isApi ? await readHeaders(request) : undefined),
-      ...optional('responseHeaders', isApi ? await readHeaders(response) : undefined),
-    });
+    };
+    this.#entryOf.set(request, entry);
+    this.#bufferNetwork(entry);
+    // Playwright tolerates an async listener; a rejection here must not become an
+    // unhandled rejection that kills the run, so everything is guarded.
+    void this.#enrichResponse(entry, response, request).catch(() => undefined);
+  };
+
+  /** Attach bodies + headers to an already-buffered entry, then stream its log line. */
+  async #enrichResponse(entry: NetworkEntry, response: Response, request: Request): Promise<void> {
+    if (BODY_RESOURCE_TYPES.has(request.resourceType())) {
+      const [body, requestHeaders, responseHeaders] = await Promise.all([
+        readBodyWithin(response, this.#bodyWait),
+        withTimeout(readHeaders(request), this.#bodyWait),
+        withTimeout(readHeaders(response), this.#bodyWait),
+      ]);
+      if (body !== undefined) entry.responseBody = body;
+      if (requestHeaders !== undefined) entry.requestHeaders = requestHeaders;
+      if (responseHeaders !== undefined) entry.responseHeaders = responseHeaders;
+    }
+    this.#logNetwork(entry);
   }
 
   /** Ring-buffer a console entry and stream its formatted line to the sink. */
   #pushConsole(entry: ConsoleEntry): void {
     this.#console.push(entry);
     if (this.#console.length > this.#cap) this.#console.shift();
-    try {
-      this.#sink?.('console', formatConsoleLine(entry));
-    } catch (error) {
-      // Sink failure must not crash the handler — log but continue.
-      console.error(
-        `CDP capture sink failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    this.#emit('console', formatConsoleLine(entry));
   }
 
-  /** Ring-buffer a network entry and stream its formatted line to the sink. */
-  #pushNetwork(entry: NetworkEntry): void {
+  /** Ring-buffer a network entry. Its log line is written separately, once it is complete. */
+  #bufferNetwork(entry: NetworkEntry): void {
     this.#network.push(entry);
     if (this.#network.length > this.#cap) this.#network.shift();
+  }
+
+  /** Stream a network entry's formatted line to the sink. */
+  #logNetwork(entry: NetworkEntry): void {
+    this.#logged.add(entry);
+    this.#emit('network', formatNetworkLine(entry));
+  }
+
+  /** Hand one formatted line to the sink; a sink failure never crashes the handler. */
+  #emit(channel: 'console' | 'network', line: string): void {
     try {
-      this.#sink?.('network', formatNetworkLine(entry));
+      this.#sink?.(channel, line);
     } catch (error) {
       // Sink failure must not crash the handler — log but continue.
       console.error(

@@ -182,7 +182,15 @@ export type TreeNode = Partial<Node> & { target?: string };
 export type ObserveResult =
   | { kind: 'tree'; count: number; nodes: TreeNode[] }
   | { kind: 'screenshot'; path: string; bytes: number }
-  | { kind: 'console'; count: number; entries: ConsoleEntry[] }
+  | {
+      kind: 'console';
+      count: number;
+      entries: ConsoleEntry[];
+      /** Older rows the `limit` cut off (absent when none were). */
+      truncated?: number;
+      /** How to see the missing rows — present only alongside {@link truncated}. */
+      hint?: string;
+    }
   | { kind: 'tabs'; count: number; tabs: TabInfo[] }
   | {
       kind: 'network';
@@ -190,9 +198,58 @@ export type ObserveResult =
       entries: NetworkEntry[];
       /** Static-asset rows a default read held back (absent when none were). */
       hidden?: number;
-      /** How to see the held-back rows — present only alongside {@link hidden}. */
+      /** Older rows the `limit` cut off, after the asset default (absent when none were). */
+      truncated?: number;
+      /** How to see the missing rows — present only alongside {@link hidden}/{@link truncated}. */
       hint?: string;
     };
+
+/**
+ * Which selector grammar a target's `find({query})` parses — the belt emits the
+ * `target` of every tree node in it, and the driver is told to copy that string
+ * verbatim, so a `target` in the wrong dialect makes every click and type fail.
+ *
+ *  - `web` — Playwright engines (`data-testid="…"`, `role=button[name="…" i]`,
+ *    `text=…`, `>> nth=N`), normalized by `adapters/browser/query.ts`.
+ *  - `native` — the desktop (AT-SPI) and android (uiautomator) parsers, which take
+ *    `role "name"` or a bare name substring and NOTHING else: an engine-prefixed
+ *    selector degrades to a literal name substring, matches nothing, and `act`
+ *    throws `no element matched …`.
+ */
+export type SelectorDialect = 'web' | 'native';
+
+/**
+ * The dialect an adapter speaks. Inferred from `tabs`, which the contract marks
+ * web-only ("implemented by targets that have a tab concept (web); absent
+ * elsewhere") — the one structural difference between the browser adapter and the
+ * two native ones, since the rest of the contract is deliberately identical.
+ */
+export function dialectOf(adapter: Adapter): SelectorDialect {
+  return typeof adapter.tabs === 'function' ? 'web' : 'native';
+}
+
+/** A role token both native parsers accept as the leading word of `role "name"`. */
+const NATIVE_ROLE_TOKEN = /^[a-zA-Z][\w-]*$/;
+
+/**
+ * The base selector for a node on a NATIVE target (desktop AT-SPI · android
+ * uiautomator). Their query parsers accept exactly two shapes — `role "name"`
+ * (`/^([a-zA-Z][\w-]*)\s+["'](.+)["']$/`, role matched exactly, name as a
+ * case-insensitive substring) and a bare name substring — so that is all we emit.
+ *
+ * A `testid` here is android's `resource-id` (`com.app:id/submit`), which its
+ * matcher tests against `name + resourceId`: the bare id is both accepted and
+ * near-unique, so it wins, exactly like `data-testid` does on web.
+ */
+function nativeSelector(node: Pick<Node, 'role' | 'name' | 'testid'>): string | null {
+  if (node.testid) return node.testid;
+  const name = node.name.trim();
+  if (!name) return null;
+  // A quote inside the name would close the parser's quoted group early; fall back
+  // to the bare-name form rather than emit a selector that resolves the wrong node.
+  if (NATIVE_ROLE_TOKEN.test(node.role) && !name.includes('"')) return `${node.role} "${name}"`;
+  return name;
+}
 
 /** ARIA roles Playwright's `role=` engine accepts (others fall back to a text selector). */
 const ARIA_ROLES = new Set([
@@ -223,11 +280,17 @@ const ARIA_ROLES = new Set([
 ]);
 
 /**
- * The base selector for a node the agent can paste straight into `act`'s `target`.
- * Role + accessible name when the role is ARIA-addressable, else the visible text.
- * `null` for an unnamed, non-semantic node (the agent targets those by other means).
+ * The base selector for a node the agent can paste straight into `act`'s `target`,
+ * in the target's own {@link SelectorDialect} (a `native` node goes to
+ * {@link nativeSelector}). Web: role + accessible name when the role is
+ * ARIA-addressable, else the visible text. `null` for an unnamed, non-semantic
+ * node (the agent targets those by other means).
  */
-function baseSelector(node: Pick<Node, 'role' | 'name' | 'testid'>): string | null {
+function baseSelector(
+  node: Pick<Node, 'role' | 'name' | 'testid'>,
+  dialect: SelectorDialect,
+): string | null {
+  if (dialect === 'native') return nativeSelector(node);
   // A test hook beats everything: document-unique, stable across renames/moves.
   if (node.testid) return `data-testid=${JSON.stringify(node.testid)}`;
   const name = node.name.trim();
@@ -247,24 +310,39 @@ function baseSelector(node: Pick<Node, 'role' | 'name' | 'testid'>): string | nu
  * index — and even a bare role/text selector — can resolve a different element when
  * `act` replays it with an unscoped, document-wide `find` (e.g. header "Settings"
  * instead of the sidebar "Settings" the narrowed read returned). In that case we
- * emit no `target` — EXCEPT a `data-testid` one, which is document-unique and
- * survives any scoping. Otherwise, better the agent falls back (visible text /
+ * emit no `target` — EXCEPT a testid one, which is document-unique and survives
+ * any scoping. Otherwise, better the agent falls back (visible text /
  * `role "name"`) than act on the wrong node.
+ *
+ * `>> nth=` is Playwright chaining and exists on WEB only; the native parsers read
+ * it as part of a name substring and match nothing. So on a native target a
+ * repeated selector yields a `target` for the FIRST node only — the others are
+ * genuinely unaddressable there, and saying so beats handing out a string that
+ * silently acts on the first one.
  */
-function withTargets(nodes: Node[], fields?: readonly NodeField[], scoped = false): TreeNode[] {
+function withTargets(
+  nodes: Node[],
+  dialect: SelectorDialect,
+  fields?: readonly NodeField[],
+  scoped = false,
+): TreeNode[] {
   const seen = new Map<string, number>();
   const projection = fields && fields.length > 0 ? fields : DEFAULT_PROJECTION;
   return nodes.map((node) => {
     const projected: TreeNode = pick(node, projection);
     if (scoped) {
-      if (node.testid) projected.target = `data-testid=${JSON.stringify(node.testid)}`;
+      if (node.testid) {
+        projected.target =
+          dialect === 'native' ? node.testid : `data-testid=${JSON.stringify(node.testid)}`;
+      }
       return projected;
     }
-    const base = baseSelector(node);
+    const base = baseSelector(node, dialect);
     if (!base) return projected;
     const k = seen.get(base) ?? 0;
     seen.set(base, k + 1);
-    projected.target = k === 0 ? base : `${base} >> nth=${k}`;
+    if (k === 0) projected.target = base;
+    else if (dialect === 'web') projected.target = `${base} >> nth=${k}`;
     return projected;
   });
 }
@@ -287,10 +365,10 @@ function pick<T, K extends keyof T>(obj: T, keys: readonly K[]): Pick<T, K> {
  * scoping; the contract just requires the field, so a projection that dropped it
  * defaults to `true` rather than throwing away an exact region.
  */
-function scopeOf(node: WithinNode): NodeRef {
+function scopeOf(node: WithinNode, dialect: SelectorDialect): NodeRef {
   const { bounds } = node;
   if (bounds !== undefined) return { ...node, bounds, enabled: node.enabled ?? true };
-  const selector = baseSelector(node);
+  const selector = baseSelector(node, dialect);
   if (selector) return selector;
   throw new AgentError(
     'observe `within` node has no `bounds` and no name/testid to resolve it — re-read with `fields` including "bounds", or pass a selector string',
@@ -307,9 +385,12 @@ function scopeOf(node: WithinNode): NodeRef {
  *    Garbage-that-looks-like-JSON fails loud instead of reading the whole page.
  *  - a node projected without `bounds` (`fields:["role","name"]`) → {@link scopeOf}.
  */
-export function coerceWithin(within: ObserveInput['within']): NodeRef | undefined {
+export function coerceWithin(
+  within: ObserveInput['within'],
+  dialect: SelectorDialect,
+): NodeRef | undefined {
   if (within === undefined) return undefined;
-  if (typeof within !== 'string') return scopeOf(within);
+  if (typeof within !== 'string') return scopeOf(within, dialect);
   if (!within.trimStart().startsWith('{')) return within;
   let data: unknown;
   try {
@@ -325,7 +406,23 @@ export function coerceWithin(within: ObserveInput['within']): NodeRef | undefine
       'observe `within` was a JSON string but not a valid node (needs role + name) — pass a node from a previous observe, or a selector string',
     );
   }
-  return scopeOf(parsed.data);
+  return scopeOf(parsed.data, dialect);
+}
+
+/**
+ * The `truncated` + `hint` pair for log rows the `limit` cut off; `{}` when the cap
+ * dropped nothing.
+ *
+ * Silent truncation is the failure this exists to prevent: a submit flow that
+ * produced 120 failing requests, read back capped at 50, tells a blind driver
+ * "there were 50 failures" — and it reports that truncated picture as the finding.
+ */
+function truncation(dropped: number, cap: number): { truncated?: number; hint?: string } {
+  if (dropped <= 0) return {};
+  return {
+    truncated: dropped,
+    hint: `${dropped} older row(s) cut off by limit ${cap}; raise \`limit\` or narrow \`filters\` to see them`,
+  };
 }
 
 /**
@@ -342,10 +439,11 @@ export async function runObserve(
 
   switch (kind) {
     case 'tree': {
-      const scope = coerceWithin(within);
+      const dialect = dialectOf(adapter);
+      const scope = coerceWithin(within, dialect);
       const nodes = await adapter.readState({ query, filters, limit, within: scope });
       const scoped = query !== undefined || scope !== undefined || filters !== undefined;
-      const projected = withTargets(nodes, fields, scoped);
+      const projected = withTargets(nodes, dialect, fields, scoped);
       return { kind, count: projected.length, nodes: projected };
     }
     case 'screenshot': {
@@ -357,32 +455,43 @@ export async function runObserve(
       return { kind, path, bytes: png.byteLength };
     }
     // Both log channels default to a bounded tail (see DEFAULT_LOG_LIMIT); an explicit
-    // `limit` — including `0` — passes through, invalid ones still die in the adapter.
+    // `limit` — including `0` — wins, invalid ones still die in the adapter. Both read
+    // the adapter UNCAPPED and cap HERE, so the rows the cap drops can be counted and
+    // reported: the buffers behind them are already bounded (a 1000-entry in-memory
+    // ring on web, a 500-line logcat tail on android), so the extra rows cost nothing.
     case 'console': {
-      const entries = await adapter.console({ filters, limit: limit ?? DEFAULT_LOG_LIMIT });
-      return { kind, count: entries.length, entries };
+      const cap = limit ?? DEFAULT_LOG_LIMIT;
+      const matched = await adapter.console({ filters });
+      const entries = matched.slice(0, cap);
+      return { kind, count: entries.length, entries, ...truncation(matched.length - cap, cap) };
     }
     case 'network': {
       // Read the caller's filters UNCAPPED, then apply the asset default and the
       // limit here: capping first would spend the whole budget on static assets
       // and leave nothing to hide, reporting `hidden: 0` on a page that is 90%
       // noise. The read is an in-memory ring, so the extra rows cost nothing.
+      const cap = limit ?? DEFAULT_LOG_LIMIT;
       const matched = await adapter.network({ filters });
       // An explicit `resource_in` is the caller naming the types they want —
       // never second-guess it.
       const explicitTypes = filters !== undefined && 'resource_in' in filters;
       const kept = explicitTypes ? matched : matched.filter(keepByDefault);
-      const entries = kept.slice(0, limit ?? DEFAULT_LOG_LIMIT);
+      const entries = kept.slice(0, cap);
       const hidden = matched.length - kept.length;
+      const cut = truncation(kept.length - cap, cap);
+      // Never truncate silently: say what was held back and how to see it.
+      const assetHint =
+        hidden > 0
+          ? `${hidden} static asset request(s) hidden; add filters:{resource_in:["script","stylesheet","image","font"]} to see them`
+          : undefined;
+      const hint = [assetHint, cut.hint].filter((part) => part !== undefined).join('; ');
       return {
         kind,
         count: entries.length,
         entries,
-        // Never truncate silently: say what was held back and how to see it.
-        ...(hidden > 0 && {
-          hidden,
-          hint: `${hidden} static asset request(s) hidden; add filters:{resource_in:["script","stylesheet","image","font"]} to see them`,
-        }),
+        ...(hidden > 0 && { hidden }),
+        ...(cut.truncated !== undefined && { truncated: cut.truncated }),
+        ...(hint !== '' && { hint }),
       };
     }
     case 'tabs': {

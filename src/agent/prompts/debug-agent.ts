@@ -97,6 +97,18 @@ Never screenshot for information you can read from the tree or logs.
   behavior to all of them. If there are more than ~5, test the first, the last and
   one in the middle, and say in your report that you sampled rather than swept.${mode.extraRule}
 
+## Typing APPENDS — say so when you mean to replace
+
+\`act({action:"type"})\` types into the field on top of whatever it already holds —
+on every target (web, desktop, android). Re-typing a field you have used before
+yields \`old textnew text\`, and that doubled value is YOUR bug, not the app's.
+
+Pass \`clear: true\` to replace the contents instead:
+\`act({action:"type", target:"...", text:"...", clear:true})\`
+
+Use \`clear\` whenever the field may be non-empty: a retry, a second item through
+the same form, or any field you have not just read as empty.
+
 ## Budget discipline — an unreported run produces NOTHING
 
 You have a limited number of steps. If you spend them all without calling

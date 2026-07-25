@@ -167,10 +167,20 @@ export interface WindowMatch {
   class?: string;
 }
 
-/** `search --onlyvisible (--name|--class) <value>` — locate the window to activate. */
+/**
+ * Escape POSIX-regex metacharacters. `xdotool search` matches its `--name`/`--class`
+ * value as a **regex**, but config gives a literal substring (`"MyApp (dev)"`,
+ * `"Doc [modified]"`) — unescaped, the parens become a capture group and the window
+ * never matches, so `open` polls out and blames a window that is plainly on screen.
+ */
+export function escapeRegex(value: string): string {
+  return value.replace(/[.[\]{}()*+?^$|\\]/g, '\\$&');
+}
+
+/** `search --onlyvisible (--name|--class) <regex-escaped value>` — the window to activate. */
 export function searchArgs(match: WindowMatch): string[] {
-  if (match.title) return ['search', '--onlyvisible', '--name', match.title];
-  if (match.class) return ['search', '--onlyvisible', '--class', match.class];
+  if (match.title) return ['search', '--onlyvisible', '--name', escapeRegex(match.title)];
+  if (match.class) return ['search', '--onlyvisible', '--class', escapeRegex(match.class)];
   throw new AdapterError('window match requires `title` or `class`');
 }
 

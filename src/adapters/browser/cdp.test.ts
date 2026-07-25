@@ -1,17 +1,12 @@
+/**
+ * `CdpCapture` — the live console/network observers. The pure pieces it leans on
+ * are covered next door: rendering + redaction in `log-format.test.ts`, the
+ * whitelisted `filters` in `log-filters.test.ts`.
+ */
+
 import { expect, test } from 'bun:test';
 import type { Page } from 'playwright-core';
-import { AdapterError } from '../../errors.js';
-import type { ConsoleEntry, NetworkEntry } from '../contract.js';
-import {
-  type CaptureSink,
-  CdpCapture,
-  filterConsole,
-  filterNetwork,
-  formatConsoleLine,
-  formatNetworkLine,
-  normalizeConsoleLevel,
-  truncateBody,
-} from './cdp.js';
+import { BODY_UNFINISHED, type CaptureSink, CdpCapture } from './cdp.js';
 
 // --- Fakes ------------------------------------------------------------------
 
@@ -88,8 +83,8 @@ const fakeResponse = (o: {
 };
 
 /**
- * Let the async response capture settle. `#onResponse` awaits the body before
- * buffering, so a test that emits and reads in the same tick sees nothing.
+ * Let the async response capture settle. The row is buffered synchronously, but
+ * its bodies/headers (and its log line) land behind an await.
  */
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -105,160 +100,23 @@ const fakeFailed = (o: {
   failure: () => (o.errorText === null ? null : { errorText: o.errorText }),
 });
 
-function setup(opts?: { now?: () => number; cap?: number; sink?: CaptureSink }) {
+function setup(opts?: {
+  now?: () => number;
+  cap?: number;
+  sink?: CaptureSink;
+  bodyWaitMs?: number;
+}) {
   const page = new FakeEmitter();
   const cap = new CdpCapture({
     page: page as unknown as Page,
     now: opts?.now ?? (() => 1000),
     cap: opts?.cap,
     sink: opts?.sink,
+    bodyWaitMs: opts?.bodyWaitMs,
   });
   cap.start();
   return { page, cap };
 }
-
-// --- normalizeConsoleLevel --------------------------------------------------
-
-test('normalizeConsoleLevel maps CDP types to normalized levels', () => {
-  expect(normalizeConsoleLevel('error')).toBe('error');
-  expect(normalizeConsoleLevel('assert')).toBe('error');
-  expect(normalizeConsoleLevel('warning')).toBe('warn');
-  expect(normalizeConsoleLevel('info')).toBe('info');
-  expect(normalizeConsoleLevel('debug')).toBe('debug');
-  expect(normalizeConsoleLevel('log')).toBe('log');
-  expect(normalizeConsoleLevel('table')).toBe('log');
-});
-
-// --- line formatting --------------------------------------------------------
-
-test('formatConsoleLine renders level, text, and location', () => {
-  expect(
-    formatConsoleLine({ level: 'error', text: 'boom', location: 'app.js:1:2', timestamp: 0 }),
-  ).toBe('1970-01-01T00:00:00.000Z ERROR boom @ app.js:1:2');
-});
-
-test('formatConsoleLine omits location when absent', () => {
-  expect(formatConsoleLine({ level: 'log', text: 'hi', timestamp: 0 })).toBe(
-    '1970-01-01T00:00:00.000Z LOG hi',
-  );
-});
-
-test('formatNetworkLine renders status and resourceType', () => {
-  expect(
-    formatNetworkLine({
-      method: 'GET',
-      url: 'http://x/a',
-      status: 200,
-      ok: true,
-      resourceType: 'fetch',
-      timestamp: 0,
-    }),
-  ).toBe('1970-01-01T00:00:00.000Z GET http://x/a → 200 [fetch]');
-});
-
-test('formatNetworkLine renders failures', () => {
-  expect(
-    formatNetworkLine({
-      method: 'POST',
-      url: 'http://x/b',
-      status: 0,
-      ok: false,
-      error: 'net::ERR',
-      timestamp: 0,
-    }),
-  ).toBe('1970-01-01T00:00:00.000Z POST http://x/b → FAILED net::ERR');
-});
-
-// --- filterConsole ----------------------------------------------------------
-
-const c = (over: Partial<ConsoleEntry>): ConsoleEntry => ({
-  level: 'log',
-  text: '',
-  timestamp: 0,
-  ...over,
-});
-
-test('filterConsole returns all when no filters', () => {
-  const entries = [c({ text: 'a' }), c({ text: 'b' })];
-  expect(filterConsole(entries)).toEqual(entries);
-});
-
-test('filterConsole narrows by level_eq', () => {
-  const entries = [c({ level: 'error', text: 'a' }), c({ level: 'log', text: 'b' })];
-  expect(filterConsole(entries, { level_eq: 'error' }).map((e) => e.text)).toEqual(['a']);
-});
-
-test('filterConsole narrows by level_in', () => {
-  const entries = [c({ level: 'error' }), c({ level: 'warn' }), c({ level: 'log' })];
-  expect(filterConsole(entries, { level_in: ['error', 'warn'] }).map((e) => e.level)).toEqual([
-    'error',
-    'warn',
-  ]);
-});
-
-test('filterConsole narrows by text_contains (case-insensitive)', () => {
-  const entries = [c({ text: 'TypeError: x' }), c({ text: 'ok' })];
-  expect(filterConsole(entries, { text_contains: 'typeerror' }).map((e) => e.text)).toEqual([
-    'TypeError: x',
-  ]);
-});
-
-test('filterConsole throws on unknown key', () => {
-  expect(() => filterConsole([c({})], { bogus_eq: true })).toThrow(AdapterError);
-});
-
-test('filterConsole throws on wrong value type', () => {
-  expect(() => filterConsole([c({})], { level_in: 'error' })).toThrow(AdapterError);
-  expect(() => filterConsole([c({})], { level_eq: 5 })).toThrow(AdapterError);
-});
-
-// --- filterNetwork ----------------------------------------------------------
-
-const n = (over: Partial<NetworkEntry>): NetworkEntry => ({
-  method: 'GET',
-  url: '',
-  status: 200,
-  ok: true,
-  timestamp: 0,
-  ...over,
-});
-
-test('filterNetwork narrows by status_gte', () => {
-  const entries = [n({ status: 200 }), n({ status: 404 }), n({ status: 500 })];
-  expect(filterNetwork(entries, { status_gte: 400 }).map((e) => e.status)).toEqual([404, 500]);
-});
-
-test('filterNetwork narrows by status_lt and status_eq', () => {
-  const entries = [n({ status: 200 }), n({ status: 301 }), n({ status: 500 })];
-  expect(filterNetwork(entries, { status_lt: 400 }).map((e) => e.status)).toEqual([200, 301]);
-  expect(filterNetwork(entries, { status_eq: 301 }).map((e) => e.status)).toEqual([301]);
-});
-
-test('filterNetwork narrows by ok_eq and failed_eq', () => {
-  const entries = [n({ ok: true }), n({ ok: false }), n({ ok: false, error: 'net::ERR' })];
-  expect(filterNetwork(entries, { ok_eq: false }).length).toBe(2);
-  expect(filterNetwork(entries, { failed_eq: true }).map((e) => e.error)).toEqual(['net::ERR']);
-});
-
-test('filterNetwork narrows by method_eq (case-insensitive), resource_in, url_contains', () => {
-  const entries = [
-    n({ method: 'GET', url: 'http://x/api/users', resourceType: 'xhr' }),
-    n({ method: 'POST', url: 'http://x/assets/logo.png', resourceType: 'image' }),
-  ];
-  expect(filterNetwork(entries, { method_eq: 'post' }).map((e) => e.url)).toEqual([
-    'http://x/assets/logo.png',
-  ]);
-  expect(filterNetwork(entries, { resource_in: ['xhr', 'fetch'] }).map((e) => e.method)).toEqual([
-    'GET',
-  ]);
-  expect(filterNetwork(entries, { url_contains: '/API/' }).map((e) => e.method)).toEqual(['GET']);
-});
-
-test('filterNetwork throws on unknown key and wrong value type', () => {
-  expect(() => filterNetwork([n({})], { bogus: 1 })).toThrow(AdapterError);
-  expect(() => filterNetwork([n({})], { status_gte: '400' })).toThrow(AdapterError);
-  expect(() => filterNetwork([n({})], { ok_eq: 'no' })).toThrow(AdapterError);
-});
 
 // --- CdpCapture -------------------------------------------------------------
 
@@ -271,13 +129,15 @@ test('captures console messages newest-first with normalized level', () => {
   expect(out[0]?.level).toBe('warn');
 });
 
-test('builds console location url:line:column, omits when no url', () => {
+test('builds console location url:line:column 1-BASED, omits when no url', () => {
+  // Playwright reports both 0-based; `url:line:col` is read 1-based, so the raw
+  // numbers sent the smart agent to the line above the actual error.
   const { page, cap } = setup();
   page.emit('console', fakeConsole('error', 'x', 'app.js', 3, 7));
   page.emit('console', fakeConsole('error', 'y', '', 0, 0));
   const out = cap.console();
   expect(out[0]?.location).toBeUndefined();
-  expect(out[1]?.location).toBe('app.js:3:7');
+  expect(out[1]?.location).toBe('app.js:4:8');
 });
 
 test('folds uncaught pageerror into a console error entry', () => {
@@ -364,8 +224,8 @@ test('redacts credential headers, keeping only their length', async () => {
   );
   await flush();
   const [entry] = cap.network();
-  expect(entry?.requestHeaders?.['cookie']).toBe('<redacted, 19 chars>');
-  expect(entry?.requestHeaders?.['accept']).toBe('application/json');
+  expect(entry?.requestHeaders?.cookie).toBe('<redacted, 19 chars>');
+  expect(entry?.requestHeaders?.accept).toBe('application/json');
   expect(entry?.responseHeaders?.['set-cookie']).toBe('<redacted, 11 chars>');
   expect(entry?.responseHeaders?.['content-type']).toBe('application/json');
 });
@@ -427,41 +287,6 @@ test('network() sorts newest-first by capture time, not by await order', async (
   );
   await new Promise((r) => setTimeout(r, 30));
   expect(cap.network().map((e) => e.url)).toEqual(['http://x/api/fast', 'http://x/api/slow']);
-});
-
-test('filterNetwork narrows by duration_gte and body_contains', () => {
-  const entries = [
-    n({ url: 'fast', durationMs: 10 }),
-    n({ url: 'slow', durationMs: 900 }),
-    n({ url: 'untimed' }),
-    n({ url: 'boom', responseBody: '{"error":"nope"}' }),
-  ];
-  expect(filterNetwork(entries, { duration_gte: 500 }).map((e) => e.url)).toEqual(['slow']);
-  expect(filterNetwork(entries, { body_contains: 'ERROR' }).map((e) => e.url)).toEqual(['boom']);
-});
-
-test('formatNetworkLine carries duration + the payloads of a failure', () => {
-  expect(
-    formatNetworkLine({
-      method: 'POST',
-      url: 'http://x/api/login',
-      status: 401,
-      ok: false,
-      resourceType: 'fetch',
-      timestamp: 0,
-      durationMs: 42,
-      requestBody: '{"email":"a"}',
-      responseBody: '{"error":"bad creds"}',
-    }),
-  ).toBe(
-    '1970-01-01T00:00:00.000Z POST http://x/api/login → 401 [fetch] 42ms ' +
-      'req="{\\"email\\":\\"a\\"}" res="{\\"error\\":\\"bad creds\\"}"',
-  );
-});
-
-test('truncateBody marks what it dropped', () => {
-  expect(truncateBody('abcdef', 3)).toBe('abc…[truncated, 6 chars total]');
-  expect(truncateBody('abc', 3)).toBe('abc');
 });
 
 test('captures request failures as status 0 with error', () => {
@@ -596,4 +421,78 @@ test('a request that never answered is still recorded as failed', async () => {
   );
   await flush();
   expect(cap.network()[0]?.error).toBe('net::ERR_FAILED');
+});
+
+// --- a body that never finishes ---------------------------------------------
+
+test('a streaming response is recorded IMMEDIATELY, before its body finishes', async () => {
+  // `fetch('/events')` (SSE, long-poll) only "finishes" at teardown. Waiting for
+  // the body before buffering left the exchange with zero trace — no row, no log
+  // line — and the abort at teardown was then swallowed as a response echo.
+  const lines: string[] = [];
+  const { page, cap } = setup({ bodyWaitMs: 20, sink: (_ch, line) => lines.push(line) });
+  const streaming = {
+    ...fakeResponse({ url: 'http://x/events', status: 200, ok: true, resourceType: 'fetch' }),
+    text: () => new Promise<string>(() => undefined), // never settles
+  };
+  page.emit('response', streaming);
+
+  // Visible in the SAME tick the headers arrived — the driver polls, it cannot wait.
+  const [live] = cap.network();
+  expect(live?.url).toBe('http://x/events');
+  expect(live?.status).toBe(200);
+  expect(live?.responseBody).toBeUndefined();
+
+  // The teardown abort that finally ends the stream neither erases the row nor
+  // adds a phantom second one.
+  const request = streaming.request() as unknown as { failure: () => { errorText: string } };
+  request.failure = () => ({ errorText: 'net::ERR_ABORTED' });
+  page.emit('requestfailed', request);
+
+  // Once the cap expires the row says WHY the body is missing, and the durable
+  // log line finally lands (once, with everything that could be read).
+  await new Promise((r) => setTimeout(r, 60));
+  const entries = cap.network();
+  expect(entries.length).toBe(1);
+  expect(entries[0]?.responseBody).toBe(BODY_UNFINISHED);
+  expect(entries[0]?.error).toBeUndefined();
+  expect(lines.filter((l) => l.includes('/events')).length).toBe(1);
+});
+
+test('a REAL failure after the response amends the exchange instead of vanishing', async () => {
+  // A connection reset mid-body is not the teardown echo: reported as a clean
+  // `200 ok:true` it is indistinguishable from a body-less success.
+  const lines: string[] = [];
+  const { page, cap } = setup({ sink: (_ch, line) => lines.push(line) });
+  const response = fakeResponse({ url: 'http://x/api/report', status: 200, ok: true, body: '{' });
+  page.emit('response', response);
+  await flush();
+  const request = response.request() as unknown as { failure: () => { errorText: string } };
+  request.failure = () => ({ errorText: 'net::ERR_CONNECTION_RESET' });
+  page.emit('requestfailed', request);
+
+  const entries = cap.network();
+  expect(entries.length).toBe(1);
+  expect(entries[0]?.error).toBe('net::ERR_CONNECTION_RESET');
+  expect(entries[0]?.ok).toBe(false);
+  expect(entries[0]?.status).toBe(200);
+  // The durable log carries the amended verdict too, not just the clean line.
+  expect(lines.some((l) => l.includes('FAILED net::ERR_CONNECTION_RESET'))).toBe(true);
+});
+
+test('a credential-bearing URL never reaches the buffer or the log verbatim', async () => {
+  const lines: string[] = [];
+  const { page, cap } = setup({ sink: (_ch, line) => lines.push(line) });
+  const url = 'https://app/oauth?access_token=ya29.SECRET';
+  page.emit('response', fakeResponse({ url, status: 200, ok: true, body: '{}' }));
+  page.emit(
+    'requestfailed',
+    fakeFailed({ url: 'https://app/reset?token=SECRET2', errorText: 'net::ERR_FAILED' }),
+  );
+  await flush();
+  const urls = cap.network().map((e) => e.url);
+  expect(urls.some((u) => u.includes('ya29.SECRET'))).toBe(false);
+  expect(urls.some((u) => u.includes('SECRET2'))).toBe(false);
+  expect(urls).toContain('https://app/oauth?access_token=<redacted, 11 chars>');
+  expect(lines.some((l) => l.includes('SECRET'))).toBe(false);
 });

@@ -17,6 +17,7 @@ import {
   type LoopInbox,
   type ProgressWriter,
   runDebugLoop,
+  UNDELIVERED_NOTE,
 } from './loop.js';
 
 /** An inbox that hands back `items` once, then drains empty. */
@@ -299,6 +300,48 @@ test('prepareStep folds mid-run instructions AND the budget nudge together, nudg
   // Ordering matches `createDebugAgent`'s `prepareStep`: the inbox fold builds
   // `base` first, the nudge is appended as one more message AFTER `base`.
   expect(foldIndex).toBeLessThan(nudgeIndex);
+});
+
+test('a message that lands after the last prepareStep is surfaced in the verdict, not lost', async () => {
+  const { written, writer } = findingsTracker();
+  const belt = realBelt(writer);
+
+  const pending: string[] = [];
+  const inbox: LoopInbox = {
+    drain() {
+      const out = [...pending];
+      pending.length = 0;
+      return out;
+    },
+  };
+
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      // Injected while the model is producing the step that calls `report`: the
+      // session accepts it (the run has not settled, so no SessionSettledError),
+      // and no further `prepareStep` ever runs — so it reached no turn and, before
+      // this, no surface at all. The caller believed it was delivered.
+      pending.push('also check the footer links');
+      return toolCallResponse('c1', 'report', { status: 'passed', summary: 'Checkout works.' });
+    },
+  });
+
+  const agent = createDebugAgent({
+    model,
+    tools: belt,
+    instructions: 'debug',
+    inbox,
+    progress: writer,
+    maxSteps: 10,
+  });
+
+  await runDebugLoop({ agent });
+
+  const verdict = written.filter((f) => f.status !== 'running').at(-1);
+  if (!verdict) throw new Error('expected a terminal findings write');
+  expect(verdict.summary).toContain('Checkout works.');
+  expect(verdict.summary).toContain('also check the footer links');
+  expect(verdict.summary).toContain(UNDELIVERED_NOTE);
 });
 
 test('abort signal propagates: loop rejects when the model throws AbortError', async () => {

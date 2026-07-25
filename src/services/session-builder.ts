@@ -195,11 +195,33 @@ function splitCriteria(criteria: string | undefined): string[] | undefined {
  * asked to do, so a person poking through the workspace after the fact doesn't have
  * to reconstruct the goal from `findings.json` alone.
  */
-function renderStoryMd(target: string, goal: string, criteriaLines: string[] | undefined): string {
+function renderStoryMd(
+  target: string,
+  address: string,
+  goal: string,
+  criteriaLines: string[] | undefined,
+): string {
   const criteriaBlock = criteriaLines
     ? criteriaLines.map((line) => `- ${line}`).join('\n')
     : '(none)';
-  return `# Story\n\n**Target:** ${target}\n\n## Goal\n\n${goal}\n\n## Criteria\n\n${criteriaBlock}\n`;
+  // The address is not decoration: a run's own record of itself has to say WHICH app
+  // it drove. Without it, findings from a run that wandered off-target are
+  // indistinguishable after the fact from findings about the app you asked for.
+  const addressLine = address ? `\n**Address:** ${address}\n` : '';
+  return `# Story\n\n**Target:** ${target}\n${addressLine}\n## Goal\n\n${goal}\n\n## Criteria\n\n${criteriaBlock}\n`;
+}
+
+/**
+ * The origin `act` pins a web run to — the app under test. Empty for desktop and
+ * android, whose `navigate` means a window title or an app package, not a URL.
+ */
+function runOrigin(target: Target): string | undefined {
+  if (target.adapter !== 'browser' || !target.url) return undefined;
+  try {
+    return new URL(target.url).origin;
+  } catch {
+    return undefined; // resolveRunTarget already validated it; never block a run on this
+  }
 }
 
 /**
@@ -215,7 +237,11 @@ export async function buildSession(
   const { config, models, workspace } = deps;
   const { id, target, goal, criteria } = params;
 
-  const baseTarget = config.targets[target];
+  // `hasOwn`, never a plain index read: `targets` is a plain object, so
+  // `targets['constructor']` (or `toString`, `valueOf`, `__proto__`) walks the
+  // prototype chain and answers truthy — the guard would pass and the run would
+  // die deeper as "unknown adapter type: undefined", after littering a session dir.
+  const baseTarget = Object.hasOwn(config.targets, target) ? config.targets[target] : undefined;
   if (!baseTarget) {
     throw new TargetNotFoundError(`target '${target}' not found in config.targets`);
   }
@@ -231,7 +257,9 @@ export async function buildSession(
   const paths = sessionPaths(workspace, id);
   await ensureSession(paths);
   const criteriaLines = splitCriteria(criteria);
-  await writeFile(paths.storyMd, renderStoryMd(target, goal, criteriaLines), 'utf8');
+  const address = openAddress(targetConfig);
+  const origin = runOrigin(targetConfig);
+  await writeFile(paths.storyMd, renderStoryMd(target, address, goal, criteriaLines), 'utf8');
   const store = new FindingsStore(paths);
   const onLog: CaptureSink = (channel, line) => {
     void store.appendLog(channel, line).catch(() => undefined);
@@ -254,6 +282,7 @@ export async function buildSession(
     story: goal,
     criteria: criteriaLines,
     selfLook,
+    address: origin ? address : undefined,
   });
 
   const appendAgentLog = (line: string): Promise<string> =>
@@ -285,7 +314,7 @@ export async function buildSession(
       model: models.driver,
       tools: {
         observe: withToolLog('observe', createObserveTool(adapter, store), logAgent),
-        act: withToolLog('act', createActTool(adapter, store, trail), logAgent),
+        act: withToolLog('act', createActTool(adapter, store, trail, origin), logAgent),
         look: withToolLog(
           'look',
           selfLook

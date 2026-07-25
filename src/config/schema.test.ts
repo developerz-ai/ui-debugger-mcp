@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import {
+  AndroidTargetSchema,
   ConfigSchema,
   DesktopTargetSchema,
   ModelsSchema,
@@ -85,6 +86,26 @@ test('DesktopTargetSchema: display accepts null, strict rejects unknown keys', (
   expect(DesktopTargetSchema.safeParse({ adapter: 'desktop', launch: 'a', bogus: 1 }).success).toBe(
     false,
   );
+});
+
+test('AndroidTargetSchema: attach needs no `avd`, managed does', () => {
+  // A physical device is `{adapter, adbSerial}` — attach binds straight to the serial and
+  // never reads `avd`, so demanding one forced users to invent a fake AVD name.
+  expect(
+    AndroidTargetSchema.safeParse({ adapter: 'android', adbSerial: 'R58M12345' }).success,
+  ).toBe(true);
+  expect(AndroidTargetSchema.safeParse({ adapter: 'android', avd: 'my-avd' }).success).toBe(true);
+
+  const managed = AndroidTargetSchema.safeParse({ adapter: 'android' });
+  expect(managed.success).toBe(false); // managed still requires it, where the rule is real
+  expect(managed.error?.issues[0]?.path).toEqual(['avd']);
+  // `adbSerial: null` means "not attached" — managed rules apply.
+  expect(AndroidTargetSchema.safeParse({ adapter: 'android', adbSerial: null }).success).toBe(
+    false,
+  );
+  // The refinement survives the discriminated union (config goes through TargetSchema).
+  expect(TargetSchema.safeParse({ adapter: 'android', adbSerial: 'R58M12345' }).success).toBe(true);
+  expect(TargetSchema.safeParse({ adapter: 'android' }).success).toBe(false);
 });
 
 test('TargetSchema: discriminates desktop and android, rejects unknown adapters', () => {

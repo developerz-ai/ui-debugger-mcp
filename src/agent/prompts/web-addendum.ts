@@ -77,16 +77,6 @@ NEVER spend a \`look\` asking "did my text land?" or "is the box checked now?" â
 the tree answers exactly, instantly, and for free. Vision is for how things LOOK,
 not for reading back your own input.
 
-### Typing replaces nothing unless you say so
-
-\`act({action:"type"})\` APPENDS to whatever the field already holds. Re-typing a
-field you have used before yields \`old textnew text\` â€” and that doubled value is
-YOUR bug, not the app's. Pass \`clear: true\` to replace the contents instead:
-\`act({action:"type", target:"...", text:"...", clear:true})\`.
-
-Use \`clear\` whenever the field may be non-empty: a retry, a second item through
-the same form, or any field you have not just seen empty in the tree.
-
 ### Login bypass
 
 If the target has \`?debug-ai=true\` support (the app's captcha bypass gate),
