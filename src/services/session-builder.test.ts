@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tool } from 'ai';
@@ -169,6 +169,33 @@ test(
   },
   STORY_TIMEOUT_MS,
 );
+
+test('buildSession prunes old session dirs, keeping the newest 5 including this run', async () => {
+  // Nothing ever removed a session dir: every run leaves story.md, findings.json,
+  // the whole logs/ trail, every screenshot and a replay.mp4 behind, so an
+  // afternoon of dogfooding was hundreds of MB of tmp/ nobody cleaned up.
+  const d = deps();
+  const old = [
+    '2026-07-20_09-00-00-0001',
+    '2026-07-21_09-00-00-0001',
+    '2026-07-22_09-00-00-0001',
+    '2026-07-23_09-00-00-0001',
+    '2026-07-24_09-00-00-0001',
+    '2026-07-25_09-00-00-0001',
+  ];
+  for (const id of old) {
+    await mkdir(join(sessionPaths(d.workspace, id).root, 'logs'), { recursive: true });
+  }
+
+  const fresh = '2026-07-26_09-00-00-0001';
+  await buildSession(d, { id: fresh, target: 'screen', goal: 'open the settings dialog' });
+
+  // The new run plus the 4 newest old ones survive; the 2 oldest are gone.
+  expect(existsSync(sessionPaths(d.workspace, fresh).root)).toBe(true);
+  for (const id of old.slice(2)) expect(existsSync(sessionPaths(d.workspace, id).root)).toBe(true);
+  for (const id of old.slice(0, 2))
+    expect(existsSync(sessionPaths(d.workspace, id).root)).toBe(false);
+});
 
 test('buildSession writes story.md without a criteria section when none given', async () => {
   const d = deps();

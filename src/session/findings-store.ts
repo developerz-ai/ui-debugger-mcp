@@ -148,10 +148,15 @@ export class FindingsStore {
   }
 
   /**
-   * List saved screenshots as ordered frames (`NNN-<label>.png`), ascending by
-   * sequence — the capture order the replay video stitches. Returns `[]` when none
-   * were saved yet (or the dir is missing); files that don't match the pattern are
-   * skipped. Decodes the step label back from the filename slug.
+   * List saved screenshots as ordered frames (`NNN-<label>.<png|jpg>`), ascending
+   * by sequence — the capture order the replay video stitches. Returns `[]` when
+   * none were saved yet (or the dir is missing); files that don't match the pattern
+   * are skipped. Decodes the step label back from the filename slug.
+   *
+   * BOTH extensions, not just `.png`: `look` re-captures a photo-heavy frame as
+   * JPEG (`saveScreenshot(..., 'jpg')`), and a png-only match silently dropped
+   * exactly those frames from the replay — the run's most visual evidence, gone
+   * from the clip with nothing to say why.
    */
   async listScreenshots(): Promise<ScreenshotFrame[]> {
     let entries: string[];
@@ -162,7 +167,7 @@ export class FindingsStore {
     }
     const frames: ScreenshotFrame[] = [];
     for (const entry of entries) {
-      const match = /^(\d+)-(.*)\.png$/.exec(entry);
+      const match = /^(\d+)-(.*)\.(?:png|jpe?g)$/.exec(entry);
       const digits = match?.[1];
       const slug = match?.[2];
       if (digits === undefined || slug === undefined) continue;

@@ -284,6 +284,9 @@ The run may still be in progress — use `wait` (ms) to long-poll:
 get_findings { session_id: "...", wait: 30000 }
 ```
 Check `./tmp/ui-debugger-mcp/<project>/sessions/<id>/logs/agent.log` for the agent's trace.
+Session ids are local timestamps (`2026-07-27_14-30-05-0001`), so the newest run
+sorts last. Only the **5 most recent** sessions are kept — each new run prunes the
+rest, so evidence from a run six ago is gone by design.
 
 **Run fails instantly: "… is not a valid model ID"**
 The model string in `.ui-debugger-mcp.json` is not a catalog id. OpenRouter takes

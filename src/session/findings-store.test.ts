@@ -107,6 +107,22 @@ test('listScreenshots ignores files that do not match NNN-<slug>.png', async () 
   expect(frames[0]?.label).toBe('frame one');
 });
 
+test('listScreenshots includes JPEG frames — `look` saves photo-heavy ones as .jpg', async () => {
+  // The regression: `look` re-captures a photo-heavy page as JPEG and saves it
+  // with a `.jpg` extension. A png-only match dropped exactly those frames, so the
+  // replay video silently lost the run's most visual evidence — and the seq
+  // numbering left a hole no one could explain.
+  await store.saveScreenshot('open gallery', new Uint8Array([1]));
+  await store.saveScreenshot('photo wall', new Uint8Array([2]), 'jpg');
+  await store.saveScreenshot('back to list', new Uint8Array([3]));
+
+  const frames = await store.listScreenshots();
+
+  expect(frames.map((f) => f.seq)).toEqual([1, 2, 3]);
+  expect(frames[1]?.label).toBe('photo wall');
+  expect(frames[1]?.path).toEndWith('002-photo-wall.jpg');
+});
+
 // --- writeFindings / readFindings -------------------------------------------
 
 test('writeFindings returns the findings.json path', async () => {
