@@ -11,19 +11,32 @@ import { z } from 'zod';
 import { FindingsSchema } from '../../findings/schema.js';
 import type { DebugApi } from '../../services/debug-service.js';
 import type { McpTool } from '../server.js';
-import { toToolResult } from './result.js';
+import { TRUNCATED_KEY, toToolResult } from './result.js';
 
 /** Selectable top-level findings keys, derived from the findings schema. */
 const FindingsField = FindingsSchema.keyof();
 
 /**
- * Declared output: the findings object with every key optional.
+ * Declared output: the findings object with every key optional, plus the
+ * truncation counts a capped whole-object read carries.
  *
  * A `fields` projection returns only the requested keys, so no key can be
  * promised — an all-required schema would make every sparse read fail output
  * validation. Types stay exact per key; only presence is loose.
+ *
+ * `truncated` is declared rather than smuggled: it is the structural half of the
+ * cap (the prose note is the other), and a caller can only act on what the output
+ * schema tells it exists.
  */
-const FindingsOutputSchema = FindingsSchema.partial();
+const FindingsOutputSchema = FindingsSchema.partial().extend({
+  [TRUNCATED_KEY]: z
+    .record(z.string(), z.object({ returned: z.number().int(), total: z.number().int() }))
+    .optional()
+    .describe(
+      'Present only on a capped whole-object read: per field, how many items came back vs how ' +
+        'many the run has. Re-read with fields=[…] to get them all.',
+    ),
+});
 
 /** Build the `get_findings` outer tool bound to the debug service. */
 export function getFindingsTool(service: DebugApi): McpTool {
@@ -60,7 +73,8 @@ export function getFindingsTool(service: DebugApi): McpTool {
               .optional()
               .describe(
                 'Project a subset of findings keys (e.g. ["status","bugs"]). Omit for the whole ' +
-                  'object, whose lists are capped at 20 items; a projected read returns them in full.',
+                  'object, whose lists are capped at 20 items — a capped read says so in ' +
+                  '`truncated` ({returned,total} per field); a projected read returns them in full.',
               ),
           },
           outputSchema: FindingsOutputSchema,

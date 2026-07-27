@@ -29,9 +29,11 @@ as `isError: true` on the result, never a protocol-level error.
 Truncation applies to `get_findings` only, and only to a whole-object read: a
 `steps`/`bugs`/`visual` array over 20 items is capped, with a trailing text note
 steering the caller to `get_findings` with a `fields` projection — a projected
-read returns those arrays in full. No other tool caps anything; `describe`
-always returns the complete target catalog, since there is no second call that
-could reach an omitted target.
+read returns those arrays in full. The cap is also **structural**: the payload
+carries a declared `truncated` map, `{ "steps": { "returned": 20, "total": 57 } }`,
+so a caller that never reads the note still cannot mistake a capped list for the
+whole run. No other tool caps anything; `describe` always returns the complete
+target catalog, since there is no second call that could reach an omitted target.
 
 ---
 
@@ -43,7 +45,9 @@ List this project's configured debug targets, resolved per-role models, and work
 |-------|------|----------|-------------|
 | `target` | `string` | no | Narrow output to a single target by name. |
 
-**Returns** — catalog of targets (name, adapter, managed vs attach, wired status, URL/headless for web) plus models and workspace.
+**Returns** — catalog of targets (name, adapter, managed vs attach, wired status, URL/headless for web, and `personas[]` — the names a web target's `auth` map configures, valid values for `start_debug`'s `as`) plus models and workspace.
+
+> `operational` means "this adapter is wired", not "the target is up". A web target that is not serving fails `start_debug` at the first navigation with an error naming the address, rather than spending a run reporting an empty page.
 
 ---
 
@@ -57,9 +61,14 @@ Open a debug session: hand the driver agent a goal for a configured target. One 
 | `goal` | `string` | yes | The story — what to accomplish in plain language (e.g. `"log in and add item 3 to cart"`). |
 | `criteria` | `string` | no | Explicit pass/fail rules, one per line. Omit to let the agent judge. |
 | `url` | `string` (URL) | no | Where to point the driver for this run (web targets) — e.g. a local dev server, a preview, or production. Overrides the target's configured url; required when the target has none. |
+| `as` | `string` | no | Sign in as this configured auth persona before the run starts (a key in the target's `auth` map — see `describe`). The login runs out-of-band: it costs the driver no steps and the credentials never enter its context. Omit to run signed out; an unknown name fails loud listing the valid ones. |
 | `timeout` | `number` (int, seconds) | no | Wall-clock cap before the run auto-ends and frees the browser/profile. Default: 300 s. Max: 2 147 483 s. |
 
 **Returns** — `{ session_id: string }`.
+
+Personas are configured per web target in `.ui-debugger-mcp.json` — see
+[`idea/config.md`](idea/config.md#auth--named-login-personas-web) for the shape,
+the field-matching order, and the redaction guarantees.
 
 ---
 
@@ -86,7 +95,8 @@ Poll the run: status plus the full structured findings snapshot. Supports long-p
 | `wait` | `number` (int, ms, 0–120 000) | no | Long-poll up to this many ms for a terminal verdict before reading. Omit or `0` to read immediately. |
 | `fields` | `FindingsField[]` | no | Project a subset of findings keys (e.g. `["status","bugs"]`). Omit for the whole object, whose lists are capped at 20 items; a projected read returns them in full. Valid values: `status`, `steps`, `bugs`, `visual`, `summary`, `evidence`. |
 
-**Returns** — `Findings` object (see schema below), possibly projected.
+**Returns** — `Findings` object (see schema below), possibly projected. A capped
+whole-object read additionally carries `truncated: Record<field, { returned, total }>`.
 
 ---
 

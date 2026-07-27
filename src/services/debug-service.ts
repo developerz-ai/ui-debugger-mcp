@@ -53,6 +53,12 @@ export interface StartInput {
   /** Per-run URL the caller points the driver at (web); overrides the target's configured url. */
   url?: string;
   /**
+   * Named auth persona to open the run as — a key in the target's `auth` map. The
+   * run signs in out-of-band before the driver's first step; an unknown key fails
+   * loud rather than running the goal signed out.
+   */
+  as?: string;
+  /**
    * Wall-clock cap (ms) before the run auto-ends, counted from THIS call — assembly,
    * launch and the first navigation spend it too. Defaults to
    * {@link DEFAULT_SESSION_TIMEOUT_MS}.
@@ -101,6 +107,12 @@ export interface TargetInfo {
   url?: string;
   /** Web headless flag, when applicable. */
   headless?: boolean;
+  /**
+   * Named auth personas configured for this target — the valid `start_debug({as})`
+   * values. NAMES ONLY; the credentials never leave `.ui-debugger-mcp.json`.
+   * Absent when the target has no `auth` block.
+   */
+  personas?: string[];
 }
 
 /** `describe` output — configured targets plus the resolved models + workspace. */
@@ -264,7 +276,7 @@ export class DebugService implements DebugApi {
    * project's profile lock.
    */
   async #launch(
-    { target, goal, criteria, url }: StartInput,
+    { target, goal, criteria, url, as }: StartInput,
     deadline: number,
     signal: AbortSignal,
   ): Promise<StartResult> {
@@ -284,7 +296,15 @@ export class DebugService implements DebugApi {
 
     try {
       this.#assertStartNotAborted(signal, id);
-      const built = await this.#build({ id, target, goal, criteria, url, timeoutMs: remaining() });
+      const built = await this.#build({
+        id,
+        target,
+        goal,
+        criteria,
+        url,
+        as,
+        timeoutMs: remaining(),
+      });
 
       try {
         this.#assertStartNotAborted(signal, id);
@@ -572,7 +592,15 @@ function describeTarget(name: string, target: Target): TargetInfo {
     operational: true,
   };
   if (target.adapter === 'browser') {
-    return { ...base, url: target.url, headless: target.headless };
+    // Persona NAMES are the discoverable half — a caller can pick a valid `as`
+    // without opening the config file, and never sees the values.
+    const personas = Object.keys(target.auth ?? {});
+    return {
+      ...base,
+      url: target.url,
+      headless: target.headless,
+      ...(personas.length > 0 && { personas }),
+    };
   }
   return base;
 }

@@ -50,6 +50,16 @@ export function startDebugTool(service: DebugApi): McpTool {
               .describe(
                 'Where to point the driver for this run (web targets) — e.g. a local dev server, a preview, or production. Overrides the target\'s configured url; required when the target has none. You ("the boss") decide where the driver goes.',
               ),
+            as: z
+              .string()
+              .min(1)
+              .optional()
+              .describe(
+                'Sign in as this configured auth persona before the run starts (a key in the ' +
+                  "target's auth map — see describe.targets[].personas). The login runs " +
+                  'out-of-band, so it costs the driver no steps and the credentials never enter ' +
+                  'its context. Omit to run signed out; an unknown name fails loud.',
+              ),
             criteria: z
               .string()
               .optional()

@@ -142,6 +142,9 @@ Config files:
 - `.mcp.json` → **how to launch** the server (command + secret key). Gitignored.
 - `.ui-debugger-mcp.json` → **how to debug this app** (models, targets). Committed.
 
+Every key of both files is documented in [`docs/idea/config.md`](docs/idea/config.md);
+every tool's exact input/output shape is in [`docs/idea/mcp-tools.md`](docs/idea/mcp-tools.md).
+
 The server reads the **current directory** to pick the project session — open it
 in your repo and it debugs that repo.
 
@@ -196,15 +199,47 @@ It's a **conversation**, not a remote control — five fat tools, not one-per-cl
 
 | Tool | What it does |
 |------|--------------|
-| `start_debug` | Open a run: `{ target, goal, url?, criteria?, timeout? }`. `url` is required when the target has no configured url. The small agent drives autonomously. Returns `{ session_id }`. |
-| `get_findings` | Poll status + structured findings (functional bugs + visual issues) + evidence. Long-poll with `wait`. |
+| `start_debug` | Open a run: `{ target, goal, url?, as?, criteria?, timeout? }`. `url` is required when the target has no configured url; `as` names a login persona. The small agent drives autonomously. Returns `{ session_id }`. |
+| `get_findings` | Poll status + structured findings (functional bugs + visual issues) + evidence. Long-poll with `wait`. A whole-object read caps each list at 20 and says so in `truncated` (`{returned, total}` per field) — pass `fields` for the full lists. |
 | `send_message` | Talk to the running agent mid-flight — add work, redirect, or answer a question. |
-| `describe` | List the configured targets + models for this project. |
+| `describe` | List the configured targets + models for this project — including each target's auth `personas[]`. |
 | `end_session` | Close the run, free the browser/profile. |
 
 A run is **always time-capped**: `start_debug`'s `timeout` (seconds) overrides the
 default 300s, so a session can never hang forever — it auto-ends and frees the
 profile lock when the cap fires.
+
+### Logging in — named personas
+
+Almost every interesting screen is behind a login, and re-explaining the login
+flow in every `goal` string costs driver steps before the real goal starts. Say it
+once, in the target:
+
+```jsonc
+"targets": {
+  "dashboard": {
+    "adapter": "browser",
+    "url": "http://localhost:5173",
+    "auth": {
+      "admin": { "path": "/login", "fields": { "email": "admin@dev.local", "password": "admin" }, "submit": "Sign in" },
+      "user":  { "path": "/login", "fields": { "email": "user@dev.local",  "password": "user"  }, "submit": "Sign in" }
+    }
+  }
+}
+```
+
+```text
+start_debug { target: "dashboard", as: "admin", goal: "open Audit and check the table renders" }
+```
+
+The run signs in **out-of-band**, before the driver's first step: it costs zero
+driver steps, and the credentials never enter the model's context — the prompt
+only learns *"you are already signed in as `admin`"*. Values are redacted out of
+every log the run writes; `describe` reports persona **names** only. A typo'd `as`
+fails loud listing the valid names, and a login that does not take fails the run
+rather than handing back a session that will report every page behind it as empty.
+Use dev/seed credentials — this file is committed. Details in
+[`docs/idea/config.md`](docs/idea/config.md).
 
 Every tool result carries **both** a pretty-printed text block and a typed
 `structuredContent` payload validated against a declared `outputSchema` — parse

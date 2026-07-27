@@ -10,7 +10,7 @@ import { chromium } from 'playwright-core';
 import { z } from 'zod';
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
-import { AdapterError, ConfigError, TargetNotFoundError } from '../errors.js';
+import { AdapterError, AuthError, ConfigError, TargetNotFoundError } from '../errors.js';
 import { sessionPaths, workspacePaths } from '../session/workspace.js';
 import {
   buildSession,
@@ -315,6 +315,177 @@ const CHROME = findChrome();
       await built.session.close(); // releases the real Chromium process
     }
   },
+);
+
+// --- named auth personas (`start_debug({as})`) ------------------------------
+
+/** A web target carrying two personas; `executablePath` is never reached in these. */
+const AUTH_TARGET: Target = {
+  adapter: 'browser',
+  url: 'http://localhost:3000',
+  headless: true,
+  auth: {
+    admin: {
+      path: '/login',
+      fields: { email: 'admin@dev.local', password: 'hunter2' },
+      submit: 'Sign in',
+    },
+  },
+};
+
+function authDeps(): SessionBuilderDeps {
+  return {
+    ...deps(),
+    config: { ...CONFIG, targets: { ...CONFIG.targets, web: AUTH_TARGET } },
+  };
+}
+
+test('buildSession rejects an unknown persona before touching disk or the browser', async () => {
+  // The alternative is a full run signed out, where every screen behind the login
+  // reads as a broken UI — indistinguishable, to the caller, from a real defect.
+  const d = authDeps();
+  await expect(
+    buildSession(d, { id: 'auth-bad', target: 'web', goal: 'x', as: 'admn' }),
+  ).rejects.toThrow(ConfigError);
+  expect(existsSync(sessionPaths(d.workspace, 'auth-bad').root)).toBe(false);
+});
+
+test('buildSession rejects a persona on a target that has no auth block', async () => {
+  await expect(
+    buildSession(deps(), { id: 'auth-none', target: 'web', goal: 'x', as: 'admin' }),
+  ).rejects.toThrow(/has no 'auth' block/);
+});
+
+test('buildSession rejects a persona on a non-web target', async () => {
+  await expect(
+    buildSession(deps(), { id: 'auth-desktop', target: 'screen', goal: 'x', as: 'admin' }),
+  ).rejects.toThrow(ConfigError);
+});
+
+// --- the login itself, against a real browser and a real login form ---------
+
+/** A two-page fixture: a login form that `fetch`es, and the page it lands on. */
+function serveLoginApp(credentials: { email: string; password: string }) {
+  const page = (body: string) => new Response(body, { headers: { 'content-type': 'text/html' } });
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      const { pathname } = new URL(request.url);
+      if (pathname === '/api/login') {
+        const body = (await request.json()) as { email?: string; password?: string };
+        const ok = body.email === credentials.email && body.password === credentials.password;
+        return Response.json({ ok }, { status: ok ? 200 : 401 });
+      }
+      if (pathname === '/dashboard') return page('<h1>Dashboard</h1><a href="/">Sign out</a>');
+      // The form posts over `fetch` on purpose: that is the resource type whose
+      // request BODY the adapter captures into `logs/network.log`, which is
+      // exactly where an unredacted credential would come to rest.
+      return page(`<form id="f">
+        <input name="email" type="email" aria-label="Email">
+        <input name="password" type="password" aria-label="Password">
+        <button type="submit">Sign in</button>
+      </form>
+      <script>
+        document.getElementById('f').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const data = new FormData(e.target);
+          const res = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ email: data.get('email'), password: data.get('password') }),
+          });
+          if (res.ok) location.href = '/dashboard';
+        });
+      </script>`);
+    },
+  });
+  return { server, url: `http://localhost:${server.port}` };
+}
+
+(CHROME ? test : test.skip)(
+  'a persona signs the run in before the first step, and leaves no credential in the logs',
+  async () => {
+    const credentials = { email: 'admin@dev.local', password: 'p@ssw0rd' };
+    const { server, url } = serveLoginApp(credentials);
+    const web: Target = {
+      adapter: 'browser',
+      url,
+      headless: true,
+      ...(typeof CHROME === 'string' ? { executablePath: CHROME } : {}),
+      auth: { admin: { path: '/login', fields: credentials, submit: 'Sign in' } },
+    };
+    const d: SessionBuilderDeps = {
+      ...deps(),
+      config: { ...CONFIG, targets: { ...CONFIG.targets, web } },
+    };
+    const built = await buildSession(d, {
+      id: 'auth-e2e',
+      target: 'web',
+      goal: 'open the dashboard',
+      as: 'admin',
+    });
+    try {
+      await built.open();
+
+      // Reaching here at all is the first assertion: `open` only resolves once the
+      // login left `/login`, so the driver's first step starts INSIDE the app.
+      const paths = sessionPaths(d.workspace, 'auth-e2e');
+      const logs = await Promise.all(
+        ['agent.log', 'network.log', 'console.log'].map((name) =>
+          readFile(join(paths.logs, name), 'utf8').catch(() => ''),
+        ),
+      );
+      const written = logs.join('\n');
+      // The whole run's durable trail, and not one credential in it.
+      expect(written).toContain('auth: signed in as "admin"');
+      expect(written).not.toContain(credentials.password);
+      expect(written).not.toContain(encodeURIComponent(credentials.password));
+      expect(written).not.toContain(credentials.email);
+      // …but the POST is still visible, which is what the log is FOR.
+      expect(written).toContain('<redacted, 8 chars>');
+    } finally {
+      await built.session.close();
+      server.stop(true);
+    }
+  },
+  STORY_TIMEOUT_MS,
+);
+
+(CHROME ? test : test.skip)(
+  'a persona whose credentials are wrong fails the run instead of opening it signed out',
+  async () => {
+    const { server, url } = serveLoginApp({ email: 'admin@dev.local', password: 'p@ssw0rd' });
+    const web: Target = {
+      adapter: 'browser',
+      url,
+      headless: true,
+      ...(typeof CHROME === 'string' ? { executablePath: CHROME } : {}),
+      auth: {
+        admin: {
+          path: '/login',
+          fields: { email: 'admin@dev.local', password: 'wrong' },
+          submit: 'Sign in',
+        },
+      },
+    };
+    const d: SessionBuilderDeps = {
+      ...deps(),
+      config: { ...CONFIG, targets: { ...CONFIG.targets, web } },
+    };
+    const built = await buildSession(d, {
+      id: 'auth-e2e-bad',
+      target: 'web',
+      goal: 'open the dashboard',
+      as: 'admin',
+    });
+    try {
+      await expect(built.open()).rejects.toThrow(AuthError);
+    } finally {
+      await built.session.close();
+      server.stop(true);
+    }
+  },
+  STORY_TIMEOUT_MS,
 );
 
 test('makeSessionBuilder binds the deps into a per-run builder', async () => {

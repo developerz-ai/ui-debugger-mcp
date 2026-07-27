@@ -172,6 +172,33 @@ test('toToolResult caps an over-long array only when the caller opts in', () => 
   expect(notes.some((t) => t.includes('get_findings with fields=["steps"]'))).toBe(true);
 });
 
+test('a capped read says so STRUCTURALLY, with the real totals per field', () => {
+  // The prose note is easy to skip; a caller that misses it must still be unable to
+  // read `steps: [20 items]` as "the run took exactly 20 steps".
+  const steps = Array.from({ length: 57 }, (_, i) => ({ step: `s${i}`, ok: true }));
+  const bugs = Array.from({ length: 31 }, () => ({ kind: 'console' as const, detail: 'x' }));
+  const result = toToolResult({ status: 'failed', steps, bugs, visual: [] }, { capLists: true });
+
+  const truncated = (result.structuredContent as { truncated: Record<string, unknown> }).truncated;
+  expect(truncated).toEqual({
+    steps: { returned: 20, total: 57 },
+    bugs: { returned: 20, total: 31 },
+  });
+  // …and it rides the text half too, which is what a human reads off the transcript.
+  expect(JSON.parse(text(result))).toMatchObject({ truncated });
+  // A list under the cap never appears — the map is about what was DROPPED.
+  expect(Object.keys(truncated)).not.toContain('visual');
+});
+
+test('an uncapped result carries no truncated key at all', () => {
+  const result = toToolResult(
+    { status: 'passed', steps: [{ step: 's0', ok: true }] },
+    { capLists: true },
+  );
+  expect(result.structuredContent).not.toHaveProperty('truncated');
+  expect(toToolResult({ status: 'passed' })).not.toHaveProperty('structuredContent.truncated');
+});
+
 test('toToolResult leaves arrays whole by default — no cap without a recovery path', () => {
   const targets = Array.from({ length: 25 }, (_, i) => ({ name: `t${i}` }));
   const result = toToolResult({ targets, workspace: 'w' });
@@ -225,6 +252,9 @@ test('get_findings caps a whole-object read but returns a projected read in full
 
   const whole = await handler({ session_id: 's1' });
   expect((whole.structuredContent as { steps: unknown[] }).steps).toHaveLength(20);
+  expect(whole.structuredContent).toMatchObject({
+    truncated: { steps: { returned: 20, total: 25 } },
+  });
 
   // The steering note's own advice, followed: the projected read comes back complete.
   const projected = await handler({ session_id: 's1', fields: ['steps'] });

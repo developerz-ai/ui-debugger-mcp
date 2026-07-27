@@ -71,6 +71,24 @@ test('start_debug converts a 1-second timeout to exactly 1000ms', async () => {
   expect(starts[0]?.timeoutMs).toBe(1000);
 });
 
+test('start_debug forwards the auth persona to the service verbatim', async () => {
+  const { api, starts } = fakeApi();
+  const handler = capture(startDebugTool(api));
+
+  await handler({ target: 'dashboard', goal: 'open Audit', as: 'admin' });
+
+  expect(starts).toEqual([{ target: 'dashboard', goal: 'open Audit', as: 'admin' }]);
+});
+
+test('start_debug omits `as` entirely for a signed-out run', async () => {
+  const { api, starts } = fakeApi();
+  const handler = capture(startDebugTool(api));
+
+  await handler({ target: 'dashboard', goal: 'open the landing page' });
+
+  expect(starts[0] && 'as' in starts[0]).toBe(false);
+});
+
 test('start_debug forwards url and criteria alongside the converted timeout', async () => {
   const { api, starts } = fakeApi();
   const handler = capture(startDebugTool(api));

@@ -61,6 +61,52 @@ test('WebTargetSchema: profile is optional but never empty', () => {
   expect(WebTargetSchema.safeParse({ ...base, profile: '' }).success).toBe(false);
 });
 
+// --- named auth personas (`start_debug({as})`) -------------------------------
+
+const persona = {
+  path: '/login',
+  fields: { email: 'admin@dev.local', password: 'admin' },
+  submit: 'Sign in',
+};
+
+test('WebTargetSchema: auth is an optional map of named personas', () => {
+  const base = { adapter: 'browser', url: 'http://x.test' };
+  expect(WebTargetSchema.parse(base).auth).toBeUndefined();
+
+  const parsed = WebTargetSchema.parse({
+    ...base,
+    auth: { admin: persona, user: { ...persona, expect: 'text=Sign out' } },
+  });
+  expect(Object.keys(parsed.auth ?? {})).toEqual(['admin', 'user']);
+  expect(parsed.auth?.admin?.fields.email).toBe('admin@dev.local');
+  expect(parsed.auth?.user?.expect).toBe('text=Sign out');
+});
+
+test('WebTargetSchema: a persona needs path, at least one field, and a submit', () => {
+  const base = { adapter: 'browser', url: 'http://x.test' };
+  const bad = (auth: unknown) => WebTargetSchema.safeParse({ ...base, auth }).success;
+
+  expect(bad({ admin: { ...persona, path: '' } })).toBe(false);
+  expect(bad({ admin: { ...persona, submit: '' } })).toBe(false);
+  // An empty `fields` would submit a blank form and read as bad credentials.
+  expect(bad({ admin: { ...persona, fields: {} } })).toBe(false);
+  expect(bad({ admin: { path: '/login', fields: { email: 'a' } } })).toBe(false); // no submit
+  // Strict: a typo'd key must not be silently ignored — it would run signed out.
+  expect(bad({ admin: { ...persona, sumbit: 'Sign in' } })).toBe(false);
+  // A nameless persona is unaddressable by `as`.
+  expect(bad({ '': persona })).toBe(false);
+});
+
+test('ConfigSchema: personas survive the discriminated union', () => {
+  const parsed = ConfigSchema.parse({
+    targets: {
+      dashboard: { adapter: 'browser', url: 'http://localhost:5173', auth: { admin: persona } },
+    },
+  });
+  const target = parsed.targets.dashboard;
+  expect(target?.adapter === 'browser' && target.auth?.admin?.submit).toBe('Sign in');
+});
+
 test('DesktopTargetSchema: launch required; window match and display optional', () => {
   const base = { adapter: 'desktop', launch: 'my-app' };
   expect(DesktopTargetSchema.safeParse(base).success).toBe(true); // minimal still valid

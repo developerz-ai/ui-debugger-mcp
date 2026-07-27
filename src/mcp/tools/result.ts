@@ -8,9 +8,11 @@
  * Two spec-alignment behaviors live here too, so no tool handler has to think
  * about them:
  *  - **Truncation steering** (opt-in, see {@link ToolResultOptions.capLists}):
- *    a list over {@link MAX_LIST_ITEMS} gets capped and a trailing text block
- *    names the retrieval that returns it whole. Never capped without one — a
- *    dropped entry the caller cannot ask for again is silent data loss.
+ *    a list over {@link MAX_LIST_ITEMS} gets capped, a `truncated` map records
+ *    `{returned, total}` per capped field, and a trailing text block names the
+ *    retrieval that returns it whole. Never capped without both — a dropped entry
+ *    the caller cannot ask for again is silent data loss, and prose alone lets a
+ *    caller that skips the note conclude there were exactly 20 findings.
  *  - **`resource_link`s**: evidence paths (screenshots, `replay.mp4`, logs) ride
  *    as `resource_link` content items (file:// URIs) alongside the text block —
  *    the spec-blessed form, not inline path strings the caller has to notice.
@@ -82,17 +84,31 @@ function collectResourceLinks(value: unknown): ResourceLinkContent[] {
   return links;
 }
 
-/** Cap any top-level array field over {@link MAX_LIST_ITEMS}; report which ones. */
+/** How much of one capped list actually came back. */
+export interface Truncation {
+  /** Items in this response. */
+  returned: number;
+  /** Items the run really has. */
+  total: number;
+}
+
+/**
+ * The key {@link toToolResult} attaches the per-list {@link Truncation} counts
+ * under. Findings has no field by this name, so it can never shadow real data.
+ */
+export const TRUNCATED_KEY = 'truncated';
+
+/** Cap any top-level array field over {@link MAX_LIST_ITEMS}; report what was dropped. */
 function capLists(data: Record<string, unknown>): {
   capped: Record<string, unknown>;
-  truncated: string[];
+  truncated: Record<string, Truncation>;
 } {
-  const truncated: string[] = [];
+  const truncated: Record<string, Truncation> = {};
   const capped: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
     if (Array.isArray(value) && value.length > MAX_LIST_ITEMS) {
       capped[key] = value.slice(0, MAX_LIST_ITEMS);
-      truncated.push(key);
+      truncated[key] = { returned: MAX_LIST_ITEMS, total: value.length };
     } else {
       capped[key] = value;
     }
@@ -104,7 +120,8 @@ function capLists(data: Record<string, unknown>): {
 function steeringNote(truncated: string[]): string {
   const fields = truncated.map((f) => `"${f}"`).join(', ');
   return (
-    `Truncated ${truncated.join(', ')} to the first ${MAX_LIST_ITEMS} items. ` +
+    `Truncated ${truncated.join(', ')} to the first ${MAX_LIST_ITEMS} items (see "${TRUNCATED_KEY}" ` +
+    'for the real totals). ' +
     `Call get_findings with fields=[${fields}] to read those arrays in full — ` +
     'a projected read is never truncated. The complete run also sits on disk: ' +
     'findings.json / replay.mp4 / the logs under the session workspace.'
@@ -133,12 +150,18 @@ export function toToolResult(data: unknown, options: ToolResultOptions = {}): Ca
 
   const { capped, truncated } = options.capLists
     ? capLists(data)
-    : { capped: data, truncated: [] as string[] };
+    : { capped: data, truncated: {} as Record<string, Truncation> };
+  const fields = Object.keys(truncated);
+  // Structural, not just prose: a caller that skips the steering note below still
+  // cannot read `steps: [20 items]` as "the run took 20 steps" — the counts say
+  // otherwise, in the typed half of the result, where a client can assert on them.
+  if (fields.length > 0) capped[TRUNCATED_KEY] = truncated;
+
   const content: CallToolResult['content'] = [
     { type: 'text', text: JSON.stringify(capped, null, 2) },
   ];
-  if (truncated.length > 0) {
-    content.push({ type: 'text', text: steeringNote(truncated) });
+  if (fields.length > 0) {
+    content.push({ type: 'text', text: steeringNote(fields) });
   }
   content.push(...collectResourceLinks(capped));
 

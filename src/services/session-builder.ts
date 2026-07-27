@@ -17,6 +17,9 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import type { LanguageModel, Tool } from 'ai';
 import type { CaptureSink } from '../adapters/browser/cdp.js';
+import { resolveTargetUrl } from '../adapters/browser/launch.js';
+import { createSecretRedactor } from '../adapters/browser/log-format.js';
+import type { Adapter } from '../adapters/contract.js';
 import { createAdapter } from '../adapters/factory.js';
 import { createActTool } from '../agent/belt/act.js';
 import { createLookTool, createSelfLookTool } from '../agent/belt/look.js';
@@ -28,6 +31,7 @@ import { composeSystemPrompt, type TargetName } from '../agent/prompts/compose.j
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import { ConfigError, TargetNotFoundError } from '../errors.js';
+import type { Step } from '../findings/schema.js';
 import { pruneSessions, SESSION_RETENTION } from '../session/cleanup.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
@@ -37,6 +41,7 @@ import {
   sessionPaths,
   type WorkspacePaths,
 } from '../session/workspace.js';
+import { performLogin, type ResolvedAuth, resolveAuth } from './login.js';
 import { createReplayStep } from './replay.js';
 import { createSummarize } from './summarize.js';
 
@@ -75,6 +80,8 @@ export interface BuildSessionParams {
   criteria?: string;
   /** Per-run URL the caller points the driver at (web); overrides the target's configured url. */
   url?: string;
+  /** Named auth persona to sign in as before the first step — a key in the target's `auth`. */
+  as?: string;
   /**
    * The run's remaining wall-clock budget (ms) at build time. Assembly happens inside
    * the caller's `timeout`, so the launch/connect wait shortens to fit it.
@@ -87,7 +94,8 @@ export interface BuiltSession {
   /** Ready to register with the manager; not yet opened or started. */
   session: Session;
   /**
-   * Navigate the adapter to the target (launches/attaches the browser page).
+   * Navigate the adapter to the target (launches/attaches the browser page), then
+   * — when `as` named a persona — sign in out-of-band, before the loop starts.
    * `timeoutMs` is the run's budget left AFTER the build — the first navigation
    * spends the caller's cap, never a fresh one of its own.
    */
@@ -249,6 +257,11 @@ export async function buildSession(
   // "The boss tells the driver where to go": a per-run `url` overrides the target's
   // configured url. Web targets need one or the other — fail loud before any launch.
   const targetConfig = resolveRunTarget(baseTarget, target, params.url);
+  // Before disk, before any launch: an unknown `as` must fail here, not silently
+  // run the whole goal signed out — every screen behind the login would then read
+  // as a broken UI. Resolved against the run's target so a per-run `url` override
+  // still anchors the login path.
+  const auth = resolveAuth(targetConfig, target, params.as);
   const effectiveConfig: ResolvedConfig =
     targetConfig === baseTarget
       ? config
@@ -267,8 +280,13 @@ export async function buildSession(
   const origin = runOrigin(targetConfig);
   await writeFile(paths.storyMd, renderStoryMd(target, address, goal, criteriaLines), 'utf8');
   const store = new FindingsStore(paths);
+  // Bound once, applied to EVERY durable log line this run writes. A persona's
+  // values are typed into the app, so they come back at us through the form POST
+  // in `network.log` and through anything an adapter error quotes — the same
+  // posture `log-format.ts` already holds for credential headers and `?token=`.
+  const redact = createSecretRedactor(auth ? Object.values(auth.persona.fields) : []);
   const onLog: CaptureSink = (channel, line) => {
-    void store.appendLog(channel, line).catch(() => undefined);
+    void store.appendLog(channel, redact(line)).catch(() => undefined);
   };
 
   // `profile` is a browser-target key — no other adapter has a profile dir. A managed
@@ -289,10 +307,12 @@ export async function buildSession(
     criteria: criteriaLines,
     selfLook,
     address: origin ? address : undefined,
+    // Name + path only — never the field values. The prompt is resent every step.
+    ...(auth && { auth: { persona: auth.name, loginPath: auth.persona.path } }),
   });
 
   const appendAgentLog = (line: string): Promise<string> =>
-    store.appendLog('agent', `${new Date().toISOString()} ${line}`);
+    store.appendLog('agent', redact(`${new Date().toISOString()} ${line}`));
   // High-frequency, fire-and-forget: the agent's own log sink + per-step tool logs.
   const logAgent = (line: string) => {
     void appendAgentLog(line).catch(() => undefined);
@@ -308,14 +328,19 @@ export async function buildSession(
     }
   };
 
+  // One trail per run, shared between the `act` tool (which records every step as
+  // it finishes, `ok: false` included), the loop (which snapshots it into each
+  // running flush) and the `report` tool (which merges it with the driver's
+  // reported steps), so the persisted findings and the returned counts derive from
+  // the same object. `report` reads it through `settled()`, so an act racing it in
+  // the SAME step still makes the verdict.
+  //
+  // Built HERE rather than inside `run` because the pre-run login (`open`, below)
+  // happens first and has to land on the same trail: the driver did not do it, but
+  // it did happen to the app, and a trail that omits it is a lie about the run.
+  const trail = createActTrail();
+
   const run: LoopRunner = async ({ inbox, progress, signal }) => {
-    // One trail per run, shared between the `act` tool (which records every step as
-    // it finishes, `ok: false` included), the loop (which snapshots it into each
-    // running flush) and the `report` tool (which merges it with the driver's
-    // reported steps), so the persisted findings and the returned counts derive from
-    // the same object. `report` reads it through `settled()`, so an act racing it in
-    // the SAME step still makes the verdict.
-    const trail = createActTrail();
     const agent = createDebugAgent({
       model: models.driver,
       tools: {
@@ -376,7 +401,32 @@ export async function buildSession(
 
   return {
     session,
-    open: (timeoutMs) => adapter.open(openAddress(targetConfig), timeoutMs),
+    open: async (timeoutMs) => {
+      await adapter.open(openAddress(targetConfig), timeoutMs);
+      if (!auth) return;
+      // Out-of-band and BEFORE the loop: the driver never sees the credentials, and
+      // a login that cannot complete fails `start_debug` outright instead of handing
+      // back a run that will report every screen behind it as empty. See `login.ts`.
+      const steps = await signIn(adapter, auth, targetConfig, logAgent, timeoutMs);
+      for (const step of steps) trail.record(step);
+    },
     run,
   };
+}
+
+/** Run the persona's login against the opened target, anchoring `path` to the run's url. */
+function signIn(
+  adapter: Adapter,
+  auth: ResolvedAuth,
+  target: Target,
+  log: (line: string) => void,
+  timeoutMs?: number,
+): Promise<Step[]> {
+  const base = target.adapter === 'browser' ? target.url : undefined;
+  return performLogin(adapter, {
+    ...auth,
+    loginUrl: resolveTargetUrl(auth.persona.path, base),
+    timeoutMs,
+    log,
+  });
 }

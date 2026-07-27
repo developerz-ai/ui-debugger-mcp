@@ -24,8 +24,9 @@ export function describeTool(service: DebugApi): McpTool {
           title: 'Describe debug targets',
           description:
             'List the configured targets for this project (name, adapter, managed|attach, whether wired, ' +
-            'and web url/headless) plus the resolved per-role models and workspace. Call this first to pick ' +
-            'a valid target for start_debug. Pass target to narrow to one.',
+            'web url/headless, and any named auth personas) plus the resolved per-role models and ' +
+            'workspace. Call this first to pick a valid target — and a valid `as` persona — for ' +
+            'start_debug. Pass target to narrow to one.',
           annotations: {
             readOnlyHint: true,
           },

@@ -9,8 +9,10 @@
  *   1. Base debug-agent prompt   (loop rules, tools, finding shape, verdict),
  *      in the eye mode (`selfLook`) the belt's `look` tool actually runs in
  *   2. Target addendum           (web/desktop/android specifics)
- *   3. Session story             (what the smart agent wants done)
- *   4. Criteria (optional)       (pass/fail rules for this run)
+ *   3. Address (optional)        (which app — and only that app — is under test)
+ *   4. Signed in (optional)      (which auth persona the run opened as)
+ *   5. Session story             (what the smart agent wants done)
+ *   6. Criteria (optional)       (pass/fail rules for this run)
  */
 
 import { ANDROID_ADDENDUM_PROMPT } from './android-addendum.js';
@@ -50,6 +52,16 @@ export interface ComposeOptions {
    * vision model that this run never calls.
    */
   selfLook: boolean;
+  /**
+   * The persona `start_debug({as})` named, when the run signed in for the driver.
+   *
+   * NAME AND PATH ONLY. The credentials are typed out-of-band before the first
+   * step and never enter this prompt — the system prompt is resent to the
+   * provider on EVERY step, and the repo's standing rule for a secret is that it
+   * never reaches the model's context (see `adapters/browser/log-format.ts`).
+   * What the driver needs is not the recipe, it is knowing it is already inside.
+   */
+  auth?: { persona: string; loginPath: string };
 }
 
 /**
@@ -59,7 +71,7 @@ export interface ComposeOptions {
  * model can orient itself without relying on positional context.
  */
 export function composeSystemPrompt(options: ComposeOptions): string {
-  const { target, story, criteria, selfLook, address } = options;
+  const { target, story, criteria, selfLook, address, auth } = options;
 
   const addendum = TARGET_ADDENDA[target];
 
@@ -74,6 +86,18 @@ app you debug. NEVER navigate to another host, however plausible its name looks 
 to the goal: a bug found elsewhere is worthless, because the smart agent cannot fix
 code it does not own. Links and paths within this app are fine; a different host is
 not, and \`act\` will refuse it.
+`
+    : '';
+
+  const authSection = auth
+    ? `\
+## Signed in
+
+Already signed in as \`${auth.persona}\` — the run submitted \`${auth.loginPath}\` before your
+first step. Start on the goal.
+
+You do NOT have the credentials and CANNOT log in again. Back on \`${auth.loginPath}\` mid-run
+means the session dropped: that is a bug — \`report\` it, never retry the form.
 `
     : '';
 
@@ -94,7 +118,14 @@ ${criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}
 `
       : '';
 
-  return [debugAgentPrompt(selfLook), addendum, addressSection, storySection, criteriaSection]
+  return [
+    debugAgentPrompt(selfLook),
+    addendum,
+    addressSection,
+    authSection,
+    storySection,
+    criteriaSection,
+  ]
     .filter((section) => section.length > 0)
     .join('\n---\n\n');
 }

@@ -76,6 +76,46 @@ test('composeSystemPrompt: omits the address section for targets without one', (
   expect(prompt).not.toContain('## The app under test');
 });
 
+// --- the signed-in section (`start_debug({as})`) -----------------------------
+
+test('composeSystemPrompt: tells the driver it is already signed in as the persona', () => {
+  const prompt = composeSystemPrompt({
+    target: 'web',
+    story: 'Open Audit and check the table.',
+    selfLook: false,
+    auth: { persona: 'admin', loginPath: '/login' },
+  });
+  expect(prompt).toContain('## Signed in');
+  expect(prompt).toContain('`admin`');
+  expect(prompt).toContain('/login');
+  // The whole point: it must not spend steps re-doing a login that already happened.
+  expect(prompt).toMatch(/CANNOT log in again/);
+});
+
+test('composeSystemPrompt: the signed-in section carries NAMES, never credentials', () => {
+  // The system prompt is resent to the provider on EVERY step. The repo's standing
+  // rule for a secret is that it never reaches the model's context — the login runs
+  // out-of-band precisely so this section can be name-only.
+  const prompt = composeSystemPrompt({
+    target: 'web',
+    story: 'Test.',
+    selfLook: false,
+    auth: { persona: 'admin', loginPath: '/login' },
+  });
+  // `ComposeOptions.auth` structurally cannot carry a value — it takes a name and a
+  // path. This pins that: nothing field-shaped reaches the section.
+  const section = prompt.split('## Signed in')[1]?.split('\n---')[0] ?? '';
+  expect(section).not.toBe('');
+  for (const leak of ['@', 'password', 'field']) {
+    expect(section.includes(leak)).toBe(false);
+  }
+});
+
+test('composeSystemPrompt: omits the signed-in section for a run with no persona', () => {
+  const prompt = composeSystemPrompt({ target: 'web', story: 'Test.', selfLook: false });
+  expect(prompt).not.toContain('## Signed in');
+});
+
 test('composeSystemPrompt: includes criteria when provided', () => {
   const criteria = ['No JS errors in the console', 'Checkout button is visible and enabled'];
   const prompt = composeSystemPrompt({

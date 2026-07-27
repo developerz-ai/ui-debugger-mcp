@@ -158,6 +158,9 @@ describe('integration: real MCP server + outer tools + fake DebugService', () =>
       'visual',
       'summary',
       'evidence',
+      // The cap is declared, not smuggled: a client compiles this schema, so a
+      // `truncated` map it never heard of would be data it cannot act on.
+      'truncated',
     ]);
   });
 
