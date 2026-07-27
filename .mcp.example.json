@@ -2,7 +2,7 @@
   "mcpServers": {
     "ui-debugger": {
       "command": "npx",
-      "args": ["-y", "@developerz.ai/ui-debugger-mcp"],
+      "args": ["-y", "@developerz.ai/ui-debugger-mcp@latest"],
       "env": {
         "OPENAI_API_KEY": "sk-...",
         "OPENAI_BASE_URL": "https://openrouter.ai/api/v1"

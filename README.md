@@ -96,7 +96,7 @@ Install like any local MCP server — one entry in your `.mcp.json`:
   "mcpServers": {
     "ui-debugger": {
       "command": "npx",
-      "args": ["-y", "@developerz.ai/ui-debugger-mcp"],
+      "args": ["-y", "@developerz.ai/ui-debugger-mcp@latest"],
       "env": {
         "OPENAI_API_KEY": "sk-...",
         "OPENAI_BASE_URL": "https://openrouter.ai/api/v1"
@@ -125,7 +125,7 @@ Then add a per-project `.ui-debugger-mcp.json` describing the app to debug
 (models, targets, urls). The fastest way is the `init` command:
 
 ```bash
-npx @developerz.ai/ui-debugger-mcp init   # in your project root
+npx @developerz.ai/ui-debugger-mcp@latest init   # in your project root
 ```
 
 **`ui-debugger-mcp init`** scaffolds a project for debugging (described in
@@ -149,7 +149,7 @@ in your repo and it debugs that repo.
 
 ```bash
 # 1. Scaffold the project (run once in your app's root)
-npx @developerz.ai/ui-debugger-mcp init
+npx @developerz.ai/ui-debugger-mcp@latest init
 ```
 
 This creates `./tmp/ui-debugger-mcp/`, writes a starter `.ui-debugger-mcp.json`,
@@ -161,7 +161,7 @@ and prints the `.mcp.json` snippet to paste.
   "mcpServers": {
     "ui-debugger": {
       "command": "npx",
-      "args": ["-y", "@developerz.ai/ui-debugger-mcp"],
+      "args": ["-y", "@developerz.ai/ui-debugger-mcp@latest"],
       "env": {
         "OPENAI_API_KEY": "sk-...",
         "OPENAI_BASE_URL": "https://openrouter.ai/api/v1"
@@ -265,7 +265,7 @@ set `executablePath` in `.ui-debugger-mcp.json`:
 **Session locked — "another run is active"**
 One Chrome profile = one run. If a previous run crashed without cleaning up:
 ```bash
-npx @developerz.ai/ui-debugger-mcp stop   # graceful teardown
+npx @developerz.ai/ui-debugger-mcp@latest stop   # graceful teardown
 ```
 Or delete `./tmp/ui-debugger-mcp/<project>/state.json` and restart the MCP server.
 
@@ -292,6 +292,20 @@ rest, so evidence from a run six ago is gone by design.
 The model string in `.ui-debugger-mcp.json` is not a catalog id. OpenRouter takes
 `provider/model` with optional `:floor` / `:nitro` routing suffixes — a `#…`
 suffix is rejected outright. Use plain ids (`deepseek/deepseek-v4-flash`).
+
+**Still running an old version after upgrading**
+`npx -y <pkg>` REUSES a cached install when one exists, so a bare
+`"@developerz.ai/ui-debugger-mcp"` in `.mcp.json` keeps booting whatever version
+first landed in `~/.npm/_npx` — with no signal that anything is stale. There is no
+auto-update: nothing in the server checks the registry. Pin `@latest` in your
+`args` (what `init` now prints) so every cold start re-resolves:
+
+```json
+"args": ["-y", "@developerz.ai/ui-debugger-mcp@latest"]
+```
+
+Already stuck? `rm -rf ~/.npm/_npx`, then reconnect the server (`/mcp` in Claude
+Code). Check what you're on with `npx @developerz.ai/ui-debugger-mcp@latest --version`.
 
 **Config edits seem to have no effect**
 Config is read ONCE when the MCP server starts, so an edit cannot reach a running

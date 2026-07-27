@@ -103,3 +103,21 @@ test('does not write .mcp.json or any API key to disk (snippet is stdout-only)',
   // Placeholder in the snippet must remain a placeholder, not a real value.
   expect(config).not.toContain('<your-key-here>');
 });
+
+test('the printed .mcp.json snippet pins @latest — a bare spec sticks on a cached version', () => {
+  // `npx -y <pkg>` reuses whatever is already in ~/.npm/_npx, so an unpinned spec
+  // keeps booting the first version ever installed with no signal it is stale: a
+  // client was observed still launching 1.4.0 days after 1.5.0 shipped. Nothing in
+  // the server checks the registry, so the pin IS the update mechanism.
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => void lines.push(args.join(' '));
+  try {
+    runInit(TMP);
+  } finally {
+    console.log = original;
+  }
+  const printed = lines.join('\n');
+  expect(printed).toContain('"@developerz.ai/ui-debugger-mcp@latest"');
+  expect(printed).not.toContain('"@developerz.ai/ui-debugger-mcp"');
+});

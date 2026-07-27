@@ -37,12 +37,20 @@ const STARTER_CONFIG = JSON.stringify(
   2,
 );
 
-/** `.mcp.json` snippet printed to stdout (API key placeholder — never written). */
+/**
+ * `.mcp.json` snippet printed to stdout (API key placeholder — never written).
+ *
+ * The spec is pinned to `@latest`, not left bare. `npx -y <pkg>` REUSES a cached
+ * install when one exists, so an unpinned entry keeps launching whatever version
+ * first landed in `~/.npm/_npx` — observed in the wild: a client still booting
+ * 1.4.0 days after 1.5.0 shipped, with no signal that anything was stale.
+ * `@latest` forces the registry check on every cold start.
+ */
 const MCP_JSON_SNIPPET = `{
   "mcpServers": {
     "ui-debugger": {
       "command": "npx",
-      "args": ["-y", "@developerz.ai/ui-debugger-mcp"],
+      "args": ["-y", "@developerz.ai/ui-debugger-mcp@latest"],
       "env": {
         "OPENAI_API_KEY": "<your-key-here>",
         "OPENAI_BASE_URL": "https://openrouter.ai/api/v1"

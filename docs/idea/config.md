@@ -12,7 +12,7 @@ reads it and spawns this server over stdio.
   "mcpServers": {
     "ui-debugger": {
       "command": "npx",
-      "args": ["-y", "@developerz.ai/ui-debugger-mcp"],
+      "args": ["-y", "@developerz.ai/ui-debugger-mcp@latest"],
       "env": {
         "OPENAI_API_KEY": "sk-...",
         "OPENAI_BASE_URL": "https://openrouter.ai/api/v1"
@@ -35,7 +35,7 @@ The `ui-debugger-mcp` bin has two modes: no args runs the stdio server; `init`
 scaffolds a project so you don't write config by hand.
 
 ```bash
-npx @developerz.ai/ui-debugger-mcp init   # run in the project root
+npx @developerz.ai/ui-debugger-mcp@latest init   # run in the project root
 ```
 
 `init` (idempotent — won't clobber existing files):
