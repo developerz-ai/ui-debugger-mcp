@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-07-27
+
+The workspace stops growing forever, and you can read it. Plus one real defect:
+the replay video was silently dropping frames.
+
+### Added
+
+- **Session retention — the newest 5.** Every run left `story.md`,
+  `findings.json`, the full `logs/` trail, every screenshot and a `replay.mp4`
+  behind, and nothing ever removed them: an afternoon of dogfooding is hundreds
+  of megabytes of `tmp/`. A starting run now prunes `sessions/` to the 5 most
+  recent (itself included) as part of its own setup — before the browser
+  launches, so the cost never lands mid-run. Fails loud (`WorkspaceError`)
+  naming the directories rather than quietly accumulating. `chrome-user-data/`
+  is never touched: the login still survives forever.
+
+### Changed
+
+- **Session ids are human-readable local timestamps.**
+  `2026-07-27_14-30-05-0001` instead of `1784985071909-0001` — `ls sessions/`
+  now tells you when each run happened without a converter. Fixed-width and
+  zero-padded on purpose: byte order equals chronological order, which is what
+  retention sorts by (no `stat` per directory, no race with a live run). No
+  legacy format handling — old epoch-ms directories simply sort oldest and are
+  the first pruned.
+
+### Fixed
+
+- **JPEG frames never made it into `replay.mp4`.** `look` re-captures a
+  photo-heavy page as JPEG and saves it as `.jpg`, but `listScreenshots` matched
+  `^(\d+)-(.*)\.png$` — so exactly the frames with the most visual content were
+  dropped from the replay, leaving an unexplained hole in the sequence
+  numbering. Both extensions now match.
+
+### Verified
+
+- **Two projects at once.** Two editor windows, two Claude Codes, two apps: the
+  workspace root, Chrome profile, `sessions/`, `state.json`, the session
+  registry and the retention prune are all keyed by cwd — including two
+  checkouts sharing a basename, and two projects pointed at one absolute
+  `workspace`. No defect found; pinned by `src/session/isolation.test.ts` so it
+  stays that way.
+
 ## [1.4.0] - 2026-07-25
 
 A four-way audit of every source file, plus a dogfood run against the in-repo

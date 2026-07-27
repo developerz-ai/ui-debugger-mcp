@@ -28,6 +28,7 @@ import { composeSystemPrompt, type TargetName } from '../agent/prompts/compose.j
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import { ConfigError, TargetNotFoundError } from '../errors.js';
+import { pruneSessions, SESSION_RETENTION } from '../session/cleanup.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
 import {
@@ -256,6 +257,11 @@ export async function buildSession(
 
   const paths = sessionPaths(workspace, id);
   await ensureSession(paths);
+  // Housekeeping, before a browser is launched and before this run writes a byte:
+  // keep the newest `SESSION_RETENTION` runs (this one included — it sorts newest)
+  // and drop the rest, so the workspace stops growing forever. `protect` pins this
+  // run's dir even if the clock moved backwards since the previous one.
+  await pruneSessions(workspace, { keep: SESSION_RETENTION, protect: id });
   const criteriaLines = splitCriteria(criteria);
   const address = openAddress(targetConfig);
   const origin = runOrigin(targetConfig);

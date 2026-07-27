@@ -128,7 +128,12 @@ test('start assembles, locks the cwd, opens, and runs in the background', async 
 
   const { session_id } = await svc.start({ target: 'web', goal: 'log in', criteria: 'cart has 1' });
 
-  expect(session_id).toBe(`${NOW}-0001`);
+  // The id IS the run's local timestamp — `2026-07-27_14-30-05-0001`.
+  expect(session_id).toMatch(/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-0001$/);
+  const at = new Date(NOW);
+  expect(session_id).toStartWith(
+    `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-`,
+  );
   expect(log.params[0]).toEqual({
     id: session_id,
     target: 'web',

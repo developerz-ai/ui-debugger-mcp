@@ -104,16 +104,20 @@ test('sessionPaths builds correct paths', () => {
 
 // --- generateSessionId ------------------------------------------------------
 
-test('generateSessionId includes injected time', () => {
-  const id = generateSessionId(1_700_000_000_000);
-  expect(id).toStartWith('1700000000000-');
+test('generateSessionId renders the injected time as a human-readable local date', () => {
+  const when = new Date(2026, 6, 27, 14, 30, 5); // 2026-07-27 14:30:05 local
+  expect(generateSessionId(when.getTime())).toBe('2026-07-27_14-30-05-0001');
+});
+
+test('generateSessionId zero-pads every field so ids stay fixed-width', () => {
+  const when = new Date(2026, 0, 2, 3, 4, 5); // 2026-01-02 03:04:05 local
+  expect(generateSessionId(when.getTime())).toBe('2026-01-02_03-04-05-0001');
 });
 
 test('generateSessionId counter increments per call', () => {
-  const a = generateSessionId(1000);
-  const b = generateSessionId(1000);
-  expect(a).toBe('1000-0001');
-  expect(b).toBe('1000-0002');
+  const when = new Date(2026, 6, 27, 14, 30, 5).getTime();
+  expect(generateSessionId(when)).toBe('2026-07-27_14-30-05-0001');
+  expect(generateSessionId(when)).toBe('2026-07-27_14-30-05-0002');
 });
 
 test('generateSessionId counter resets after 9999', () => {
@@ -127,6 +131,16 @@ test('generateSessionId ids are unique with same timestamp', () => {
   const ids = Array.from({ length: 5 }, (_, _i) => generateSessionId(42));
   const unique = new Set(ids);
   expect(unique.size).toBe(5);
+});
+
+test('generateSessionId ids sort chronologically as plain strings (what prune relies on)', () => {
+  const ids = [
+    generateSessionId(new Date(2026, 8, 9, 8, 5, 9).getTime()),
+    generateSessionId(new Date(2026, 8, 9, 8, 5, 10).getTime()),
+    generateSessionId(new Date(2026, 8, 10, 7, 0, 0).getTime()),
+    generateSessionId(new Date(2026, 11, 31, 23, 59, 59).getTime()),
+  ];
+  expect([...ids].sort()).toEqual(ids);
 });
 
 // --- ensureWorkspace / ensureSession ----------------------------------------

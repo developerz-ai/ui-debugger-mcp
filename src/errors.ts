@@ -82,6 +82,15 @@ export class AdbError extends AdapterError {
   }
 }
 
+/** The per-project workspace could not be managed — e.g. old session dirs that refuse to prune. */
+export class WorkspaceError extends UiDebuggerError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkspaceError';
+    Object.setPrototypeOf(this, WorkspaceError.prototype);
+  }
+}
+
 export class AgentError extends UiDebuggerError {
   constructor(message: string) {
     super(message);

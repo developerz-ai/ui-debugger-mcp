@@ -121,6 +121,18 @@ managed vs attach: `cdpUrl` (web) / `adbSerial` (android) → attach, never star
 - `logs/` — `console.log`, `network.log`, `agent.log`.
 - `state.json` — session keyed by cwd.
 
+Session id **is** a local timestamp: `YYYY-MM-DD_HH-MM-SS-NNNN`
+(`2026-07-27_14-30-05-0001`). Fixed-width, so byte order == time order.
+
+A starting run **prunes** `sessions/` to the newest 5 (itself included) before the
+browser launches — evidence is heavy and nothing else ever removed it. Fails loud
+(`WorkspaceError`); `chrome-user-data/` is never touched.
+
+Everything that could collide across concurrently-debugged projects is keyed by
+cwd — workspace root, profile, `sessions/`, `state.json`, the session registry,
+the prune. Two editor windows on two apps never see each other
+(`src/session/isolation.test.ts`).
+
 ## Login bypass (captcha)
 Add `?debug-ai=true` escape hatch in the app under test. Skips **captcha only**,
 not auth. Gate behind `ALLOW_AI_DEBUG_LOGIN` env so it's off in prod.

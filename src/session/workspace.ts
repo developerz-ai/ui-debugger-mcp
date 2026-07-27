@@ -17,14 +17,32 @@ export function _resetCounter(): void {
   _counter = 0;
 }
 
+/** Zero-pad a number to `width` digits. */
+function pad(value: number, width = 2): string {
+  return String(value).padStart(width, '0');
+}
+
 /**
- * Generate a session ID.
- * @param now  - injected epoch ms (e.g. Date.now() from the caller)
- * Returns `<now>-<0000-padded counter>`, e.g. `1751234567890-0001`.
+ * Generate a session ID: `YYYY-MM-DD_HH-MM-SS-<0000-padded counter>`, e.g.
+ * `2026-07-27_14-30-05-0001`.
+ *
+ * The id IS the session directory name, so a human listing
+ * `sessions/` reads *when* each run happened instead of decoding an epoch. Local
+ * time, deliberately — the reader is sitting at the machine that ran it.
+ *
+ * Fixed-width and zero-padded on purpose: byte order == chronological order, which
+ * is what {@link pruneSessions} sorts by to decide which runs are the newest. (A
+ * DST fall-back hour can invert one pair; the only consequence is which of two
+ * same-hour runs is pruned first.)
+ *
+ * @param now - injected epoch ms (e.g. Date.now() from the caller)
  */
 export function generateSessionId(now: number): string {
   _counter = (_counter + 1) % 10_000;
-  return `${now}-${String(_counter).padStart(4, '0')}`;
+  const d = new Date(now);
+  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const time = `${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+  return `${date}_${time}-${pad(_counter, 4)}`;
 }
 
 // --- Path types -------------------------------------------------------------
