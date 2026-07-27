@@ -476,6 +476,76 @@ test('start refuses when another live server holds a run for this cwd', async ()
   expect(manager.has(CWD)).toBe(false);
 });
 
+test('replace never takes over a run another live server owns', async () => {
+  // That browser is not ours to close: killing it would leave the other server
+  // driving a dead page. `ui-debugger-mcp stop` is the (out-of-band) door there,
+  // and the refusal already names it.
+  const { build, log } = fakeBuilder();
+  const { state } = spyState({
+    foreign: () => ({ pid: 4242, sessionId: 'other-run', sessionDir: '/tmp/foreign' }),
+  });
+  const svc = makeService(build, { state });
+
+  const err = (await svc
+    .start({ target: 'web', goal: 'x', replace: true })
+    .catch((e: unknown) => e)) as Error;
+
+  expect(err).toBeInstanceOf(SessionBusyError);
+  expect(err.message).toContain('pid 4242');
+  expect(err.message).toContain('ui-debugger-mcp stop');
+  expect(log.builds).toBe(0);
+});
+
+test('a takeover leaves the NEW run in the breadcrumb (its own clear cannot outrun it)', async () => {
+  // The replaced run's `end` clears `state.json`; if that landed after the new
+  // run recorded itself, the CLI would see "no run" while a live browser held the
+  // profile — so the takeover must happen before the new breadcrumb is written.
+  const { build } = fakeBuilder();
+  const events: string[] = [];
+  const state: StatePort = {
+    async record(run) {
+      events.push(`record:${run.sessionId}`);
+    },
+    async clear() {
+      events.push('clear');
+    },
+    async foreignRun() {
+      return null;
+    },
+    async foreignFindings() {
+      return null;
+    },
+  };
+  const svc = makeService(build, { state });
+
+  const first = await svc.start({ target: 'web', goal: 'x' });
+  const second = await svc.start({ target: 'web', goal: 'y', replace: true });
+
+  expect(events).toEqual([`record:${first.session_id}`, 'clear', `record:${second.session_id}`]);
+});
+
+test('describe still names a run that auto-ended, so its findings stay reachable by id', async () => {
+  // The exact wedge this closes: the run timed out, the caller's context was
+  // compacted, and the session id — the only handle on those findings — went with
+  // it. `describe` hands it back instead of the CLI having to.
+  const { build } = fakeBuilder({ run: partialRun });
+  const svc = makeService(build, { defaultTimeoutMs: 20 });
+  const { session_id } = await svc.start({ target: 'web', goal: 'check the audit table' });
+  await tick(60);
+
+  expect(manager.has(CWD)).toBe(false); // auto-ended: the lock is already free
+  expect(svc.describe({}).session).toEqual({
+    id: session_id,
+    status: 'failed',
+    goal: 'check the audit table',
+  });
+  expect((await svc.getFindings({ session_id })).bugs).toHaveLength(1);
+
+  // …and the explicit forget clears it, exactly as it clears the snapshot.
+  await svc.end({ session_id });
+  expect(svc.describe({})).not.toHaveProperty('session');
+});
+
 test('a stale breadcrumb from a dead server never blocks a start', async () => {
   const { build, log } = fakeBuilder();
   // What `FileStatePort.foreignRun` reports for a `running` file whose pid is dead

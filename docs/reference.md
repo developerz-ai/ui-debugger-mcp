@@ -45,9 +45,16 @@ List this project's configured debug targets, resolved per-role models, and work
 |-------|------|----------|-------------|
 | `target` | `string` | no | Narrow output to a single target by name. |
 
-**Returns** — catalog of targets (name, adapter, managed vs attach, wired status, URL/headless for web, and `personas[]` — the names a web target's `auth` map configures, valid values for `start_debug`'s `as`) plus models and workspace.
+**Returns** — catalog of targets (name, adapter, managed vs attach, wired status, URL/headless for web, `personas[]` — the names a web target's `auth` map configures, valid values for `start_debug`'s `as` — and `notes`, the target's declared preconditions) plus models, workspace, and `session`.
 
 > `operational` means "this adapter is wired", not "the target is up". A web target that is not serving fails `start_debug` at the first navigation with an error naming the address, rather than spending a run reporting an empty page.
+
+`session` — `{ id, status, goal }` for the run this project currently holds, or
+the last one (kept readable until it is ended or superseded); absent when there is
+none. This is how a caller that lost its `session_id` gets back in: read that run
+with `get_findings`, close it with `end_session`, or replace it. A run owned by a
+different ui-debugger-mcp server is not reported here — `start_debug` names that
+one in its refusal.
 
 ---
 
@@ -62,9 +69,23 @@ Open a debug session: hand the driver agent a goal for a configured target. One 
 | `criteria` | `string` | no | Explicit pass/fail rules, one per line. Omit to let the agent judge. |
 | `url` | `string` (URL) | no | Where to point the driver for this run (web targets) — e.g. a local dev server, a preview, or production. Overrides the target's configured url; required when the target has none. |
 | `as` | `string` | no | Sign in as this configured auth persona before the run starts (a key in the target's `auth` map — see `describe`). The login runs out-of-band: it costs the driver no steps and the credentials never enter its context. Omit to run signed out; an unknown name fails loud listing the valid ones. |
+| `replace` | `boolean` | no | Take the project over when a run is already active: end it first (closing its browser, freeing the profile), then start. Default `false` — the start is refused instead. |
 | `timeout` | `number` (int, seconds) | no | Wall-clock cap before the run auto-ends and frees the browser/profile. Default: 300 s. Max: 2 147 483 s. |
 
 **Returns** — `{ session_id: string }`.
+
+One run per project (cwd). A second `start_debug` is **refused**, and the refusal
+names the active `session_id` and the exact calls that read it (`get_findings`),
+close it (`end_session`) or take it over (`replace: true`) — `describe` reports
+that id too, so a caller that lost it is never stuck with only the out-of-band
+`ui-debugger-mcp stop`. Refusing stays the default deliberately: a silent takeover
+kills a healthy run its own caller may still be watching. `replace` ends the
+active run through the very path `end_session` uses, and never touches a run
+another live server owns.
+
+```text
+start_debug { target: "web", goal: "re-check the audit table", replace: true }
+```
 
 Personas are configured per web target in `.ui-debugger-mcp.json` — see
 [`idea/config.md`](idea/config.md#auth--named-login-personas-web) for the shape,

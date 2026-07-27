@@ -60,12 +60,13 @@ picks the binary via `executablePath`/`emulatorPath`.
 
 ## MCP tools (few, fat — not playwright-mcp)
 A **conversation**, not a remote control. Small agent owns the clicking loop.
-- `start_debug` — open a session with a goal `{ target, goal, criteria?, as?, timeout? }`
+- `start_debug` — open a session with a goal `{ target, goal, criteria?, as?, replace?, timeout? }`
   (`timeout` seconds; always capped — default 300s — so a run never hangs forever).
   `as` names a configured auth persona; the run signs in before the first step.
+  `replace:true` takes the project over from an already-open run (opt-in only).
 - `send_message` — talk to the small agent **mid-run** (add work, redirect, answer).
 - `get_findings` — poll status + structured findings (functional + visual) + evidence.
-- `describe` — list targets/config for this project (lazy schema).
+- `describe` — list targets/config for this project (lazy schema) + the run it holds.
 - `end_session` — close it.
 
 NEVER ship click/type/screenshot as separate tools — that floods context.
@@ -107,9 +108,9 @@ project (cwd) → no run selector needed.
 ```
 models:  { driver, vision, summary? }   per-role; defaults: deepseek (text), glm (image)
 targets:
-  web:     { adapter: "browser", url, headless, debugLogin, auth, executablePath, profile, cdpUrl }
-  desktop: { adapter: "desktop", launch }
-  mobile:  { adapter: "android", adbSerial }            attach — a real device
+  web:     { adapter: "browser", url, headless, notes, debugLogin, auth, executablePath, profile, cdpUrl }
+  desktop: { adapter: "desktop", launch, notes }
+  mobile:  { adapter: "android", adbSerial, notes }      attach — a real device
   mobile:  { adapter: "android", avd, emulatorPath? }   managed — `avd` only here
 workspace: "./tmp/ui-debugger-mcp"
 ```
@@ -158,6 +159,30 @@ the login as an empty page.
 **Redaction.** `createSecretRedactor` (`browser/log-format.ts`) is bound per run to
 the persona's values and wraps every `logs/*.log` sink — plain, percent-encoded,
 `+`-for-space and JSON-escaped spellings. `describe` exposes names only.
+
+## Target `notes` — preconditions, not a goal
+`targets.<t>.notes` (any adapter) = what is EXPECTED of this app: "needs seeded
+data — empty tables are expected on /new", "onboarding modal on first load".
+
+Per-target config, NOT the per-run `goal`. Composed once into the prompt as
+`## Known about this app`, ahead of the goal: treat as expected, never `report`
+one as a bug; a screen CONTRADICTING one still is a finding. Capped at
+`TARGET_NOTES_MAX_CHARS` (1000) — fails loud at config validation, never
+truncated. The section rides every step; that is what the cap is for. `describe`
+returns it verbatim.
+
+## One run per cwd — never a wedged project
+A forgotten `end_session` must not need the out-of-band CLI to recover:
+- `describe` reports `session { id, status, goal }` — the run this server holds
+  (active OR the retained auto-ended snapshot). The way back to a lost id.
+- `start_debug({replace:true})` — opt-in takeover: ends the active run via
+  `DebugService.end` (the `end_session` path — NEVER hand-rolled teardown), then
+  starts. Only a run THIS server owns; a foreign one still refuses (its browser is
+  not ours to close), and neither is a start still in flight.
+
+Refuse-and-explain stays the DEFAULT: a silent takeover kills a healthy run its
+caller is watching. The refusal names the id + `get_findings`/`end_session`/
+`replace:true`.
 
 ## Commands
 ```

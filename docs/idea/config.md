@@ -65,6 +65,7 @@ Per-project. Lives in the repo, travels with it. Describes the app + targets.
       "adapter": "browser",
       "url": "http://localhost:3000",
       "headless": true,                            // optional — defaults to true
+      "notes": "needs seeded data — empty tables are expected on /new",  // preconditions — see below
       "debugLogin": { "param": "debug-ai" },      // skip captcha, not auth
       "auth": {                                    // named login personas — see below
         "admin": {
@@ -96,6 +97,41 @@ Per-project. Lives in the repo, travels with it. Describes the app + targets.
   }
 }
 ```
+
+## `notes` — what is EXPECTED of this app (any adapter)
+
+A freshly-migrated app with no seed data renders empty states everywhere, and the
+driver correctly-but-uselessly reports *"the table is empty"* as the run's
+headline defect. `notes` is where the preconditions live, so the driver is told
+once instead of finding out the expensive way.
+
+```jsonc
+"web": {
+  "adapter": "browser",
+  "url": "http://localhost:3000",
+  "notes": "needs seeded data — empty tables are expected on /new\nfirst load shows an onboarding modal; dismiss it\ndark mode is the default theme"
+}
+```
+
+| | `notes` (this) | `goal` (`start_debug`) |
+|---|---|---|
+| Scope | the target — **every** run against this app | one run |
+| Lives in | `.ui-debugger-mcp.json`, committed | the call |
+| Says | what is always true | what to do this time |
+
+One fact per line. They become a `## Known about this app` section of the composed
+system prompt (`agent/prompts/compose.ts`), ahead of the goal: *stated by the
+project, treat as expected, never `report` one as a bug — and a screen that
+CONTRADICTS one IS worth reporting*. A note is context, not a gag order.
+
+**Bounded, and loud about it.** Max 1000 characters (`TARGET_NOTES_MAX_CHARS`),
+enforced at config validation — over it, the config fails to load naming the cap.
+This section is part of the system prompt, which is resent to the provider on
+EVERY step, so an essay here is paid for per step for the whole run. It is never
+silently truncated: a caller has to know exactly what the driver was told.
+
+`describe` returns each target's `notes` verbatim, so the caller can see what the
+run was told without opening the file.
 
 ## `auth` — named login personas (web)
 

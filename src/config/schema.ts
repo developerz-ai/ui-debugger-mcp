@@ -50,11 +50,42 @@ const AuthPersonaSchema = z.strictObject({
   expect: z.string().min(1).optional(),
 });
 
+/**
+ * Hard cap on a target's `notes`, in characters.
+ *
+ * The composed system prompt is resent to the provider on EVERY step, so notes are
+ * paid for per step, for the whole run. ~1000 characters is a dozen preconditions —
+ * enough for what a driver must not mistake for a bug, short of an essay. Over the
+ * cap fails at config validation, loud, instead of quietly inflating every step.
+ */
+export const TARGET_NOTES_MAX_CHARS = 1000;
+
+/**
+ * Standing facts about a target — what is EXPECTED, so the driver stops reporting
+ * it as a defect.
+ *
+ * Per-target, not per-run: `start_debug`'s `goal` says what to do this time,
+ * `notes` says what is always true of this app ("needs seeded data — empty tables
+ * are expected on /new", "dark mode by default", "first load shows an onboarding
+ * modal — dismiss it"). One fact per line; composed into the prompt once, as its
+ * own section (see `agent/prompts/compose.ts`).
+ */
+const TargetNotesSchema = z
+  .string()
+  .min(1)
+  .max(TARGET_NOTES_MAX_CHARS, {
+    message:
+      `must be at most ${TARGET_NOTES_MAX_CHARS} characters — the system prompt carrying it is ` +
+      'resent to the model on every step. Keep it to the preconditions a driver would ' +
+      'otherwise mis-report as bugs; the per-run `goal` carries the rest.',
+  });
+
 /** Web target — CDP-driven browser. Managed (default) unless `cdpUrl` attaches. */
 export const WebTargetSchema = z.strictObject({
   adapter: z.literal('browser'),
   url: z.url().optional(), // optional: the caller ("boss") can supply it per-run via start_debug
   headless: z.boolean().default(true), // docs/idea/config.md promises headless by default
+  notes: TargetNotesSchema.optional(), // standing preconditions — see the schema above
   debugLogin: DebugLoginSchema.optional(),
   auth: z.record(z.string().min(1), AuthPersonaSchema).optional(), // personas, keyed by `as`
   executablePath: z.string().nullish(), // null = auto-detect Chrome/Chromium (managed)
@@ -86,6 +117,7 @@ const WindowMatchSchema = z.strictObject({
 export const DesktopTargetSchema = z.strictObject({
   adapter: z.literal('desktop'),
   launch: z.string(), // command that starts the app (managed, must stay foreground)
+  notes: TargetNotesSchema.optional(), // standing preconditions — see the schema above
   window: WindowMatchSchema.optional(), // which window to drive; omit → `open` must supply a title
   display: z.string().nullish(), // X11 DISPLAY, e.g. ":99" for Xvfb; null = inherit env
 });
@@ -100,6 +132,7 @@ export const DesktopTargetSchema = z.strictObject({
 export const AndroidTargetSchema = z
   .strictObject({
     adapter: z.literal('android'),
+    notes: TargetNotesSchema.optional(), // standing preconditions — see the schema above
     avd: z.string().optional(), // required in managed mode (see the refinement below)
     emulatorPath: z.string().nullish(), // null = auto-detect from SDK (managed)
     adbSerial: z.string().nullish(), // set → attach to a running device, no start/stop

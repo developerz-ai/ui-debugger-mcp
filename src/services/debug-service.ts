@@ -37,7 +37,7 @@ import {
 } from '../errors.js';
 import { type Findings, FindingsSchema } from '../findings/schema.js';
 import type { SessionManager } from '../session/manager.js';
-import type { Session, SnapshotField } from '../session/session.js';
+import type { Session, SessionStatus, SnapshotField } from '../session/session.js';
 import { noopStatePort, type StatePort } from '../session/state-file.js';
 import { generateSessionId, workspacePaths } from '../session/workspace.js';
 import type { SessionBuilder } from './session-builder.js';
@@ -58,6 +58,18 @@ export interface StartInput {
    * loud rather than running the goal signed out.
    */
   as?: string;
+  /**
+   * Take the project over instead of being refused when a run is already active
+   * here: end that run first (through the `end_session` path), then start.
+   *
+   * OFF by default, and it must stay off by default — a silent takeover kills a
+   * healthy run its own caller is still watching. Opt in when the active run is
+   * yours and you lost its id (a compacted context, a crashed client) or it is
+   * stuck. Only ever replaces a run THIS server owns; one held by another live
+   * server is still refused ({@link SessionBusyError}), since its browser is not
+   * ours to close.
+   */
+  replace?: boolean;
   /**
    * Wall-clock cap (ms) before the run auto-ends, counted from THIS call — assembly,
    * launch and the first navigation spend it too. Defaults to
@@ -113,6 +125,26 @@ export interface TargetInfo {
    * Absent when the target has no `auth` block.
    */
   personas?: string[];
+  /**
+   * The target's standing `notes` — what is EXPECTED of this app (seeded data,
+   * onboarding modals, dark mode), verbatim from config. Also composed into the
+   * driver's prompt; surfaced here so a caller can see what the run was told.
+   */
+  notes?: string;
+}
+
+/**
+ * The run this server holds for the project, as `describe` reports it — the way
+ * back in-band for a caller that lost its `session_id` (a compacted context, a
+ * client restart). Without it the only recovery was the out-of-band CLI.
+ */
+export interface RunInfo {
+  /** Pass to `get_findings` / `send_message` / `end_session`. */
+  id: string;
+  /** `running`, or the verdict it settled on (still readable, still holding the slot). */
+  status: SessionStatus;
+  /** The goal this run was started with — enough to tell whose run it is. */
+  goal: string;
 }
 
 /** `describe` output — configured targets plus the resolved models + workspace. */
@@ -121,6 +153,12 @@ export interface DescribeResult {
   models: { driver: string; vision: string; summary: string };
   /** Resolved per-project workspace root (`<base>/<project>`) — where evidence lands. */
   workspace: string;
+  /**
+   * The active run for this project (or the retained snapshot of the last one that
+   * auto-ended). Absent when this server holds no run. A run another live server
+   * owns is NOT reported here — `start_debug` names that one in its refusal.
+   */
+  session?: RunInfo;
 }
 
 /** The surface the outer MCP tools call. Implemented by {@link DebugService}. */
@@ -229,21 +267,35 @@ export class DebugService implements DebugApi {
    * `timeout` is wall-clock from HERE: the deadline is fixed on entry and the
    * remaining budget is threaded into the build and the first navigation, so a slow
    * Chrome launch spends the caller's cap instead of sitting outside it.
+   *
+   * The refusal is the default and stays the default; `replace: true` is the
+   * caller's explicit takeover. Either way the caller ends up with a way forward:
+   * the refusal names the active id and the exact calls that read, close or
+   * replace it, and `describe` reports that id at any time — so a lost session id
+   * is a detour, not the dead end that used to need the out-of-band CLI.
    */
   async start(input: StartInput): Promise<StartResult> {
     const cwd = this.#cwd;
-    if (this.#manager.has(cwd)) {
-      throw new SessionBusyError(
-        `A debug session ('${this.#manager.get(cwd).id}') is already active for '${cwd}'. ` +
-          'End it before starting another — one run per project at a time.',
-      );
-    }
-    // Taken synchronously (no await since the has() check) — a concurrent start
-    // must fail here, not launch a second browser on the same profile.
+    // Checked first, and synchronously (no await before `#starting` is set) — a
+    // concurrent start must fail here, not launch a second browser on the same
+    // profile. Ahead of `replace` on purpose: a run that is still opening owns no
+    // manager slot to hand over, and racing its teardown is how a half-launched
+    // Chrome gets orphaned on the profile lock.
     if (this.#starting !== undefined) {
       throw new SessionBusyError(
-        `A debug session is already starting for '${cwd}'. ` +
-          'Wait for it to open (or end it) before starting another — one run per project at a time.',
+        `A debug session is already starting for '${cwd}' — one run per project at a time. ` +
+          'Wait a moment for it to open, then describe() names it, ' +
+          'get_findings({session_id}) reads it, and end_session({session_id}) closes it.',
+      );
+    }
+    if (this.#manager.has(cwd) && input.replace !== true) {
+      const active = this.#manager.get(cwd).id;
+      throw new SessionBusyError(
+        `A debug session ('${active}') is already active for '${cwd}' — one run per project at a ` +
+          `time. Read what it is doing with get_findings({session_id:'${active}'}), close it with ` +
+          `end_session({session_id:'${active}'}), or take the project over with ` +
+          'start_debug({…, replace:true}), which ends that run first. describe() reports this id ' +
+          'at any time, so a lost session id never wedges the project.',
       );
     }
     // Before anything is launched: a run built from config the caller has already
@@ -276,7 +328,7 @@ export class DebugService implements DebugApi {
    * project's profile lock.
    */
   async #launch(
-    { target, goal, criteria, url, as }: StartInput,
+    { target, goal, criteria, url, as, replace }: StartInput,
     deadline: number,
     signal: AbortSignal,
   ): Promise<StartResult> {
@@ -285,6 +337,9 @@ export class DebugService implements DebugApi {
     const remaining = (): number => Math.max(0, deadline - this.#now());
 
     await this.#assertNoForeignRun(cwd);
+    // The caller asked to take the project over. Before the breadcrumb, so the
+    // takeover's `clear()` cannot wipe the record of the run replacing it.
+    if (replace === true) await this.#takeOverActive();
     const id = generateSessionId(this.#now());
     // The breadcrumb goes down BEFORE the launch, not after it: a cold Chrome start
     // takes 5-20s, and until `state.json` exists the run is invisible out-of-band —
@@ -350,6 +405,23 @@ export class DebugService implements DebugApi {
         'is shutting down (SIGTERM, `ui-debugger-mcp stop`, or the MCP client disconnected). ' +
         'Nothing was left running; start again once the server is back.',
     );
+  }
+
+  /**
+   * `replace: true` — end the run this server holds for the project so the new one
+   * can have it. No-op when nothing is active: replacing nothing is just a start.
+   *
+   * Deliberately routed through {@link end}, the very method `end_session` calls,
+   * rather than a private teardown: releasing a target correctly means the managed
+   * browser is STOPPED while an attached one is only DISCONNECTED, the wall-clock
+   * timer is cleared and the breadcrumb dropped — a second implementation of that
+   * would drift, and the drift would show up as a leaked Chrome sitting on the
+   * profile lock. A teardown that throws fails the start, loudly; the manager frees
+   * the slot before closing, so the project is not wedged either way.
+   */
+  async #takeOverActive(): Promise<void> {
+    if (!this.#manager.has(this.#cwd)) return;
+    await this.end({ session_id: this.#manager.get(this.#cwd).id });
   }
 
   /**
@@ -472,6 +544,7 @@ export class DebugService implements DebugApi {
     if (target !== undefined && selected.length === 0) {
       throw new TargetNotFoundError(`target '${target}' not found in config.targets`);
     }
+    const session = this.#currentRun();
     return {
       targets: selected.map(([name, config]) => describeTarget(name, config)),
       models: this.#config.models,
@@ -479,7 +552,25 @@ export class DebugService implements DebugApi {
       // this to the relative evidence paths it gets back, and `./tmp/ui-debugger-mcp`
       // would send it looking one directory short of where anything lands.
       workspace: workspacePaths(this.#cwd, this.#config.workspace).root,
+      ...(session && { session }),
     };
+  }
+
+  /**
+   * The run this server holds for the project — the active one, or the retained
+   * snapshot of the last run that auto-ended (both are readable and both are
+   * `end_session`-able by their id). `undefined` when there is none.
+   *
+   * This is the in-band answer to a lost `session_id`: without it, a caller whose
+   * context was compacted mid-conversation could neither read the run nor close
+   * it, and the only recovery left was `ui-debugger-mcp stop` in a shell the
+   * caller may not have. A start still in flight is deliberately not reported —
+   * it has no id to hand out yet, and the busy error says to wait for it.
+   */
+  #currentRun(): RunInfo | undefined {
+    const session = this.#manager.has(this.#cwd) ? this.#manager.get(this.#cwd) : this.#retained;
+    if (session === undefined) return undefined;
+    return { id: session.id, status: session.status, goal: session.story };
   }
 
   /**
@@ -590,6 +681,10 @@ function describeTarget(name: string, target: Target): TargetInfo {
     adapter: target.adapter,
     mode: isAttach(target) ? 'attach' : 'managed',
     operational: true,
+    // What the project declares is EXPECTED of this app — the driver already gets
+    // it in its prompt; the caller sees it here so "the table is empty" coming back
+    // as a non-finding is explainable without opening the config file.
+    ...(target.notes !== undefined && { notes: target.notes }),
   };
   if (target.adapter === 'browser') {
     // Persona NAMES are the discoverable half — a caller can pick a valid `as`
