@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-07-27
+
+### Changed
+
+- **`init` now prints `@developerz.ai/ui-debugger-mcp@latest`** in the `.mcp.json`
+  snippet, and every doc that shows an `npx` invocation is pinned to match.
+  `npx -y <pkg>` REUSES a cached install when one exists, so a bare spec keeps
+  launching whatever version first landed in `~/.npm/_npx` — with no signal that
+  anything is stale. Observed: a client still booting 1.4.0 days after 1.5.0
+  shipped. There is no auto-update — nothing in the server checks the registry —
+  so the pin IS the update mechanism. A test now asserts the printed snippet
+  carries it.
+
+  Already stuck on an old version: `rm -rf ~/.npm/_npx`, then reconnect the
+  server (`/mcp` in Claude Code). New troubleshooting entry in the README covers it.
+
 ## [1.5.1] - 2026-07-27
 
 Prompt token diet. The driver's system prompt is resent on every step of every
