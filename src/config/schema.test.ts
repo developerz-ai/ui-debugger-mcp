@@ -5,6 +5,7 @@ import {
   ConfigSchema,
   DesktopTargetSchema,
   ModelsSchema,
+  TARGET_NOTES_MAX_CHARS,
   TargetSchema,
   WebTargetSchema,
 } from './schema.js';
@@ -105,6 +106,53 @@ test('ConfigSchema: personas survive the discriminated union', () => {
   });
   const target = parsed.targets.dashboard;
   expect(target?.adapter === 'browser' && target.auth?.admin?.submit).toBe('Sign in');
+});
+
+// --- target notes (standing preconditions) ----------------------------------
+
+test('every adapter takes `notes` — a wizard on first launch is not a web-only fact', () => {
+  const notes = 'needs seeded data — empty tables are expected on /new';
+  expect(WebTargetSchema.parse({ adapter: 'browser', url: 'http://x.test', notes }).notes).toBe(
+    notes,
+  );
+  expect(DesktopTargetSchema.parse({ adapter: 'desktop', launch: 'app', notes }).notes).toBe(notes);
+  expect(AndroidTargetSchema.parse({ adapter: 'android', avd: 'my-avd', notes }).notes).toBe(notes);
+  // Optional everywhere, and never empty — a blank section would be prompt weight
+  // for nothing.
+  expect(WebTargetSchema.parse({ adapter: 'browser', url: 'http://x.test' }).notes).toBeUndefined();
+  expect(
+    WebTargetSchema.safeParse({ adapter: 'browser', url: 'http://x.test', notes: '' }).success,
+  ).toBe(false);
+});
+
+test('notes over the cap fail at config validation, saying why', () => {
+  // The prompt carrying notes is resent on EVERY step, so an essay pasted here is
+  // paid for per step for the whole run. Bounded loud at the boundary, never
+  // silently truncated — a caller must know which half the driver was told.
+  const base = { adapter: 'browser', url: 'http://x.test' };
+  expect(
+    WebTargetSchema.safeParse({ ...base, notes: 'x'.repeat(TARGET_NOTES_MAX_CHARS) }).success,
+  ).toBe(true);
+  const over = WebTargetSchema.safeParse({
+    ...base,
+    notes: 'x'.repeat(TARGET_NOTES_MAX_CHARS + 1),
+  });
+  expect(over.success).toBe(false);
+  expect(over.error?.issues[0]?.message).toContain(`${TARGET_NOTES_MAX_CHARS} characters`);
+  expect(over.error?.issues[0]?.message).toContain('every step');
+});
+
+test('ConfigSchema: notes survive the discriminated union', () => {
+  const parsed = ConfigSchema.parse({
+    targets: {
+      dashboard: {
+        adapter: 'browser',
+        url: 'http://localhost:5173',
+        notes: 'dark mode by default',
+      },
+    },
+  });
+  expect(parsed.targets.dashboard?.notes).toBe('dark mode by default');
 });
 
 test('DesktopTargetSchema: launch required; window match and display optional', () => {

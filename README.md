@@ -199,10 +199,10 @@ It's a **conversation**, not a remote control — five fat tools, not one-per-cl
 
 | Tool | What it does |
 |------|--------------|
-| `start_debug` | Open a run: `{ target, goal, url?, as?, criteria?, timeout? }`. `url` is required when the target has no configured url; `as` names a login persona. The small agent drives autonomously. Returns `{ session_id }`. |
+| `start_debug` | Open a run: `{ target, goal, url?, as?, replace?, criteria?, timeout? }`. `url` is required when the target has no configured url; `as` names a login persona; `replace: true` takes over a project that already has a run. The small agent drives autonomously. Returns `{ session_id }`. |
 | `get_findings` | Poll status + structured findings (functional bugs + visual issues) + evidence. Long-poll with `wait`. A whole-object read caps each list at 20 and says so in `truncated` (`{returned, total}` per field) — pass `fields` for the full lists. |
 | `send_message` | Talk to the running agent mid-flight — add work, redirect, or answer a question. |
-| `describe` | List the configured targets + models for this project — including each target's auth `personas[]`. |
+| `describe` | List the configured targets + models for this project — including each target's auth `personas[]` and `notes` — plus `session`: the run this project currently holds. |
 | `end_session` | Close the run, free the browser/profile. |
 
 A run is **always time-capped**: `start_debug`'s `timeout` (seconds) overrides the
@@ -240,6 +240,39 @@ fails loud listing the valid names, and a login that does not take fails the run
 rather than handing back a session that will report every page behind it as empty.
 Use dev/seed credentials — this file is committed. Details in
 [`docs/idea/config.md`](docs/idea/config.md).
+
+### Telling it what's expected — `notes`
+
+A freshly-migrated app with no seed data renders empty states everywhere, and the
+driver reports *"the table is empty"* as the run's headline bug. It is right, and
+it is useless. Say what's expected once, in the target:
+
+```jsonc
+"targets": {
+  "dashboard": {
+    "adapter": "browser",
+    "url": "http://localhost:5173",
+    "notes": "needs seeded data — empty tables are expected on /new\nfirst load shows an onboarding modal; dismiss it\ndark mode is the default theme"
+  }
+}
+```
+
+One fact per line, on any target (web, desktop, android). Unlike the per-run
+`goal`, `notes` is config: it is composed into the driver's prompt once, as its
+own *"Known about this app"* section — treat these as expected, never report one
+as a defect, and a screen that **contradicts** one is still worth reporting.
+Capped at 1000 characters, enforced when the config loads (the prompt carrying it
+is resent to the model on every step, so an essay here is paid for per step).
+
+### If a run is already open
+
+One run per project (cwd), so a forgotten `end_session` used to wedge it. It
+doesn't any more: `describe` reports the run this project holds
+(`session: { id, status, goal }`), so a caller that lost its `session_id` — a
+compacted context, a restarted client — can read it, close it, or take it over
+with `start_debug({ …, replace: true })`. Being refused is still the default, and
+the refusal spells out all three calls; a silent takeover would kill a healthy run
+somebody else is watching.
 
 Every tool result carries **both** a pretty-printed text block and a typed
 `structuredContent` payload validated against a declared `outputSchema` — parse

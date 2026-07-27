@@ -116,6 +116,49 @@ test('composeSystemPrompt: omits the signed-in section for a run with no persona
   expect(prompt).not.toContain('## Signed in');
 });
 
+// --- the target's standing notes (what is EXPECTED of this app) --------------
+
+test('composeSystemPrompt: states the project notes as expected, not as defects', () => {
+  // The false positive this exists for: a freshly-migrated app with no seed data
+  // renders empty states everywhere, and the driver files "the table is empty" as
+  // the run's headline bug.
+  const prompt = composeSystemPrompt({
+    target: 'web',
+    story: 'Open /users and check the table.',
+    selfLook: false,
+    notes: ['needs seeded data — empty tables are expected on /new', 'dark mode by default'],
+  });
+  expect(prompt).toContain('## Known about this app');
+  expect(prompt).toContain('- needs seeded data — empty tables are expected on /new');
+  expect(prompt).toContain('- dark mode by default');
+  expect(prompt).toMatch(/NEVER\s+`report` one as a bug/);
+  // …but a note is not a gag order: something contradicting one is still a finding.
+  expect(prompt).toMatch(/CONTRADICTS/);
+});
+
+test('composeSystemPrompt: omits the notes section when the target declares none', () => {
+  expect(composeSystemPrompt({ target: 'web', story: 'Test.', selfLook: false })).not.toContain(
+    '## Known about this app',
+  );
+  expect(
+    composeSystemPrompt({ target: 'web', story: 'Test.', selfLook: false, notes: [] }),
+  ).not.toContain('## Known about this app');
+});
+
+test('composeSystemPrompt: notes are app context, so they precede the run goal', () => {
+  // Ordering is the whole point of "stated once": the driver reads what is true of
+  // the app, THEN what it is being asked to do this run.
+  const prompt = composeSystemPrompt({
+    target: 'web',
+    story: 'Open /users.',
+    selfLook: false,
+    notes: ['seed data is required'],
+  });
+  expect(prompt.indexOf('## Known about this app')).toBeLessThan(
+    prompt.indexOf('## Your goal for this session'),
+  );
+});
+
 test('composeSystemPrompt: includes criteria when provided', () => {
   const criteria = ['No JS errors in the console', 'Checkout button is visible and enabled'];
   const prompt = composeSystemPrompt({

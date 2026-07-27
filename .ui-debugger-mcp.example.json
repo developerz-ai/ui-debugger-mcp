@@ -10,6 +10,7 @@
       "adapter": "browser",
       "url": "http://localhost:3000",
       "headless": true,
+      "notes": "needs seeded data — empty tables are expected on /new\nfirst load shows an onboarding modal; dismiss it\ndark mode is the default theme",
       "debugLogin": { "param": "debug-ai" },
       "auth": {
         "admin": {

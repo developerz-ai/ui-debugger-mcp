@@ -189,10 +189,14 @@ export function resolveRunTarget(target: Target, name: string, url: string | und
   return target;
 }
 
-/** Split a free-text criteria blob into per-line rules; `undefined` when empty/absent. */
-function splitCriteria(criteria: string | undefined): string[] | undefined {
-  if (criteria === undefined) return undefined;
-  const lines = criteria
+/**
+ * Split a free-text blob into per-line entries; `undefined` when empty/absent.
+ * Backs both the run's `criteria` and the target's standing `notes` — each is one
+ * rule/fact per line, rendered as a list in the composed prompt.
+ */
+function splitLines(blob: string | undefined): string[] | undefined {
+  if (blob === undefined) return undefined;
+  const lines = blob
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
@@ -275,7 +279,7 @@ export async function buildSession(
   // and drop the rest, so the workspace stops growing forever. `protect` pins this
   // run's dir even if the clock moved backwards since the previous one.
   await pruneSessions(workspace, { keep: SESSION_RETENTION, protect: id });
-  const criteriaLines = splitCriteria(criteria);
+  const criteriaLines = splitLines(criteria);
   const address = openAddress(targetConfig);
   const origin = runOrigin(targetConfig);
   await writeFile(paths.storyMd, renderStoryMd(target, address, goal, criteriaLines), 'utf8');
@@ -309,6 +313,10 @@ export async function buildSession(
     address: origin ? address : undefined,
     // Name + path only — never the field values. The prompt is resent every step.
     ...(auth && { auth: { persona: auth.name, loginPath: auth.persona.path } }),
+    // The target's standing preconditions: config-level, so they are stated once
+    // here instead of re-pasted into every `goal`. Length is capped at the config
+    // boundary — this section rides along on every step.
+    notes: splitLines(targetConfig.notes),
   });
 
   const appendAgentLog = (line: string): Promise<string> =>

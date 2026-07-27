@@ -367,4 +367,32 @@ describe('integration: real MCP server + outer tools + fake DebugService', () =>
     // The manager still holds the first session.
     expect(manager.has(CWD)).toBe(true);
   });
+
+  test('describe hands back the active session id, and start_debug replace:true takes it over', async () => {
+    // The end-to-end recovery for a caller that lost its session_id: ask describe
+    // who holds the project, then adopt (get_findings / end_session) or replace it.
+    // listTools first, so the client validates every payload below against the
+    // declared outputSchema — an undeclared `session` key would fail right here.
+    await client.listTools();
+    const first = callResult(
+      await client.callTool({ name: 'start_debug', arguments: { target: 'web', goal: 'first' } }),
+    );
+    const { session_id } = first.structuredContent as { session_id: string };
+
+    const described = callResult(await client.callTool({ name: 'describe', arguments: {} }));
+    expect(described.structuredContent).toMatchObject({
+      session: { id: session_id, status: 'running', goal: 'first' },
+    });
+
+    const replaced = callResult(
+      await client.callTool({
+        name: 'start_debug',
+        arguments: { target: 'web', goal: 'second', replace: true },
+      }),
+    );
+    expect(replaced.isError).toBeFalsy();
+    const taken = (replaced.structuredContent as { session_id: string }).session_id;
+    expect(taken).not.toBe(session_id);
+    expect(manager.get(CWD).id).toBe(taken);
+  });
 });

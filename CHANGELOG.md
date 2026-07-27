@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-07-27
+
+Two ways a run went wrong before it started: the project was still held by a run
+nobody could name any more, or the driver had never been told that this app's
+empty tables are the point.
+
+### Added
+
+- **`describe` reports the run the project holds, and `start_debug({replace:true})`
+  takes it over.** One run per cwd, so a caller that crashed, was compacted, or
+  simply forgot `end_session` was locked out — the next `start_debug` refused and
+  the only way back was the out-of-band `ui-debugger-mcp stop`, in a shell an MCP
+  client may not have. Now `describe` returns `session: { id, status, goal }` (the
+  active run, or the retained snapshot of one that auto-ended), so the lost
+  `session_id` is one read-only call away — adopt it with `get_findings`, close it
+  with `end_session`. And `replace: true` ends the active run and starts yours.
+
+  **Refusing stays the default**, and the refusal now names the id plus each of
+  those calls verbatim. A silent takeover is the wrong default: it kills a healthy
+  run whose own caller is still watching it. The takeover goes through the very
+  method `end_session` calls — managed Chrome stopped, an attached browser only
+  disconnected, timer cleared, profile lock freed — because a second teardown
+  implementation would drift, and the drift would be a leaked browser sitting on
+  the lock. It only ever replaces a run *this* server owns: one held by another
+  live server is still refused (that browser is not ours to close), and so is a
+  start still in flight (it owns no slot to hand over yet).
+
+- **`notes` on a target — what is EXPECTED of this app.** A freshly-migrated app
+  with no seed data renders empty states everywhere, and the driver reports "the
+  table is empty" as the run's headline defect. It is right, and it is useless.
+
+  ```jsonc
+  "web": {
+    "adapter": "browser",
+    "url": "http://localhost:3000",
+    "notes": "needs seeded data — empty tables are expected on /new\nfirst load shows an onboarding modal; dismiss it"
+  }
+  ```
+
+  One fact per line, on any adapter. Unlike the per-run `goal`, this is config: it
+  is composed into the system prompt once, as its own `## Known about this app`
+  section ahead of the goal — *treat as expected, never `report` one as a bug; a
+  screen that CONTRADICTS one still is a finding*. Notes are context, not a gag
+  order.
+
+  Bounded at 1000 characters and enforced when the config loads, naming the cap:
+  that section rides along on every step (the prompt is resent each time), so an
+  essay is paid for per step for the whole run. Never silently truncated — a
+  caller has to know exactly what the driver was told. `describe` returns each
+  target's `notes` verbatim.
+
 ## [1.6.0] - 2026-07-27
 
 Almost every interesting screen is behind a login, so "how to log into this app"

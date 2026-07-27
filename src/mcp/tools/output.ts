@@ -51,6 +51,26 @@ const TargetInfoSchema = z.object({
       'Named auth personas — the valid start_debug({as}) values for this target. Names only; ' +
         'the credentials stay in .ui-debugger-mcp.json and never reach the driver.',
     ),
+  notes: z
+    .string()
+    .optional()
+    .describe(
+      'Standing preconditions the project declares for this app (e.g. "needs seeded data — ' +
+        'empty tables are expected"). Composed into the driver\'s prompt, so it treats these ' +
+        'as expected rather than reporting them as defects.',
+    ),
+});
+
+/** The run this server holds for the project — how a caller that lost its session id gets back in. */
+const RunInfoSchema = z.object({
+  id: z
+    .string()
+    .min(1)
+    .describe('Session id — pass to get_findings, send_message and end_session.'),
+  status: z
+    .enum(['running', 'passed', 'failed'])
+    .describe('running, or the verdict it settled on (still readable, still holding the project).'),
+  goal: z.string().describe('The goal this run was started with.'),
 });
 
 /** `describe` output — the target catalog plus the resolved models + workspace. */
@@ -64,4 +84,9 @@ export const DescribeResultSchema = z.object({
     })
     .describe('Resolved per-role model ids.'),
   workspace: z.string().describe('Per-project workspace path; evidence lands under it.'),
+  session: RunInfoSchema.optional().describe(
+    'The run this project currently holds (or the last one, kept readable until it is ended or ' +
+      'superseded). Absent when there is none. Use it to adopt a run whose session_id you lost — ' +
+      'or to end it — instead of being blocked by start_debug.',
+  ),
 }) satisfies z.ZodType<DescribeResult>;

@@ -26,8 +26,12 @@ export function startDebugTool(service: DebugApi): McpTool {
             'Open a debug session: hand the small driver agent a goal for a configured target ' +
             '(e.g. "web"). It drives the UI autonomously and gathers findings (functional bugs + ' +
             'visual feedback). One run per project at a time. Returns { session_id }; then poll ' +
-            'get_findings, steer with send_message, and close with end_session.',
+            'get_findings, steer with send_message, and close with end_session. A run is already ' +
+            'active? The error names its session_id and how to read, close or replace it — and ' +
+            'describe reports that id too.',
           annotations: {
+            // Stays `false`: the one destructive path (`replace: true`, which ends
+            // the active run) is never taken unless the caller asks for it by name.
             destructiveHint: false,
             openWorldHint: true,
           },
@@ -59,6 +63,16 @@ export function startDebugTool(service: DebugApi): McpTool {
                   "target's auth map — see describe.targets[].personas). The login runs " +
                   'out-of-band, so it costs the driver no steps and the credentials never enter ' +
                   'its context. Omit to run signed out; an unknown name fails loud.',
+              ),
+            replace: z
+              .boolean()
+              .optional()
+              .describe(
+                'Take the project over when a run is already active: end that run (closing its ' +
+                  'browser and freeing the profile) and start yours. Default false — the start is ' +
+                  'refused instead, naming the active session_id. Use this when the active run is ' +
+                  'yours and you lost its id, or it is stuck; it kills a run that may still be ' +
+                  'working. A run held by another ui-debugger-mcp server is never replaced.',
               ),
             criteria: z
               .string()

@@ -317,6 +317,77 @@ const CHROME = findChrome();
   },
 );
 
+// --- target notes (standing preconditions) ----------------------------------
+
+/**
+ * Capture what the driver model is actually sent, then stop the loop at once.
+ * The prompt is the only place `notes` can be observed — it is composed, not
+ * stored — so this drives one real (mock-backed) step to read it back.
+ */
+function capturingDriver(seen: string[]): MockLanguageModelV3 {
+  return new MockLanguageModelV3({
+    doGenerate: async ({ prompt }) => {
+      seen.push(JSON.stringify(prompt));
+      return {
+        content: [{ type: 'text' as const, text: 'done' }],
+        finishReason: { unified: 'stop' as const, raw: 'stop' },
+        usage: {
+          inputTokens: {
+            total: 1,
+            noCache: 1 as number | undefined,
+            cacheRead: undefined,
+            cacheWrite: undefined,
+          },
+          outputTokens: { total: 1, text: 1 as number | undefined, reasoning: undefined },
+        },
+        warnings: [] as [],
+      };
+    },
+  });
+}
+
+test("buildSession composes the target's notes into the driver's system prompt", async () => {
+  const seen: string[] = [];
+  const notes = 'needs seeded data — empty tables are expected on /new';
+  const d: SessionBuilderDeps = {
+    ...deps(),
+    models: { ...deps().models, driver: capturingDriver(seen) },
+    config: {
+      ...CONFIG,
+      targets: { ...CONFIG.targets, screen: { adapter: 'desktop', launch: 'myapp', notes } },
+    },
+  };
+
+  const built = await buildSession(d, { id: 'notes1', target: 'screen', goal: 'open settings' });
+  await built.run({
+    inbox: { drain: () => [] },
+    progress: { writeFindings: async () => 'findings.json' },
+    signal: new AbortController().signal,
+  });
+
+  // Config-level, so the caller never had to paste it into the goal — and it
+  // arrives as its own section, not smuggled into the story.
+  expect(seen[0]).toContain('Known about this app');
+  expect(seen[0]).toContain(notes);
+});
+
+test('buildSession sends no notes section for a target that declares none', async () => {
+  const seen: string[] = [];
+  const d: SessionBuilderDeps = {
+    ...deps(),
+    models: { ...deps().models, driver: capturingDriver(seen) },
+  };
+
+  const built = await buildSession(d, { id: 'notes2', target: 'screen', goal: 'open settings' });
+  await built.run({
+    inbox: { drain: () => [] },
+    progress: { writeFindings: async () => 'findings.json' },
+    signal: new AbortController().signal,
+  });
+
+  expect(seen[0]).not.toContain('Known about this app');
+});
+
 // --- named auth personas (`start_debug({as})`) ------------------------------
 
 /** A web target carrying two personas; `executablePath` is never reached in these. */

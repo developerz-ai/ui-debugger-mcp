@@ -11,8 +11,9 @@
  *   2. Target addendum           (web/desktop/android specifics)
  *   3. Address (optional)        (which app — and only that app — is under test)
  *   4. Signed in (optional)      (which auth persona the run opened as)
- *   5. Session story             (what the smart agent wants done)
- *   6. Criteria (optional)       (pass/fail rules for this run)
+ *   5. Known about this app (optional) (the target's standing `notes` — what is expected)
+ *   6. Session story             (what the smart agent wants done)
+ *   7. Criteria (optional)       (pass/fail rules for this run)
  */
 
 import { ANDROID_ADDENDUM_PROMPT } from './android-addendum.js';
@@ -62,6 +63,17 @@ export interface ComposeOptions {
    * What the driver needs is not the recipe, it is knowing it is already inside.
    */
   auth?: { persona: string; loginPath: string };
+  /**
+   * The target's standing `notes`, one fact per line — what is EXPECTED of this
+   * app, so the driver stops filing it as a defect.
+   *
+   * Observed: a freshly-migrated app with no seed data renders empty states
+   * everywhere, and the driver correctly-but-uselessly reports "the table is
+   * empty" as the run's headline bug. Config-level, so it is stated once instead
+   * of pasted into every `goal`; capped at the config boundary
+   * (`TARGET_NOTES_MAX_CHARS`) because this section is resent every step.
+   */
+  notes?: string[];
 }
 
 /**
@@ -71,7 +83,7 @@ export interface ComposeOptions {
  * model can orient itself without relying on positional context.
  */
 export function composeSystemPrompt(options: ComposeOptions): string {
-  const { target, story, criteria, selfLook, address, auth } = options;
+  const { target, story, criteria, selfLook, address, auth, notes } = options;
 
   const addendum = TARGET_ADDENDA[target];
 
@@ -101,6 +113,19 @@ means the session dropped: that is a bug — \`report\` it, never retry the form
 `
     : '';
 
+  const notesSection =
+    notes && notes.length > 0
+      ? `\
+## Known about this app
+
+Stated by the project, not observed by you. Treat each as TRUE and EXPECTED — NEVER
+\`report\` one as a bug (an empty table you were told to expect is not a defect). A
+screen that CONTRADICTS one IS worth reporting.
+
+${notes.map((note) => `- ${note}`).join('\n')}
+`
+      : '';
+
   const storySection = `\
 ## Your goal for this session
 
@@ -123,6 +148,7 @@ ${criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}
     addendum,
     addressSection,
     authSection,
+    notesSection,
     storySection,
     criteriaSection,
   ]

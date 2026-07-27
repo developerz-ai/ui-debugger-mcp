@@ -30,10 +30,10 @@ no matter how complex the debugging gets.
 
 | Tool | Input | Returns |
 |------|-------|---------|
-| `start_debug`   | `{ target, goal, criteria?, url?, as?, timeout? }` | `session_id` |
+| `start_debug`   | `{ target, goal, criteria?, url?, as?, replace?, timeout? }` | `session_id` |
 | `send_message`  | `{ session_id, message }`     | ack — inject work mid-run |
 | `get_findings`  | `{ session_id, wait?, fields? }` | status + findings + evidence paths (+ `truncated`) |
-| `describe`      | `{}` or `{ target }`          | targets catalog + config (lazy), incl. `personas[]` |
+| `describe`      | `{}` or `{ target }`          | targets catalog + config (lazy), incl. `personas[]`, `notes`, and the active `session` |
 | `end_session`   | `{ session_id }`              | closes it |
 
 ### `as` — sign in without spending steps
@@ -45,6 +45,26 @@ model's context; the prompt gets a name-only "you are already signed in as
 `admin`" section. An unknown name fails loud listing the valid ones — never a
 silently signed-out run. `describe` lists the names per target, so a caller
 discovers them without reading the config file.
+
+### A lost `session_id` is a detour, not a dead end
+
+One run per project (cwd), so a forgotten `end_session` used to wedge it: the next
+`start_debug` was refused and the only recovery was the out-of-band
+`ui-debugger-mcp stop` — a shell the caller (an AI whose context just got
+compacted) may not have. Two in-band ways back:
+
+- **`describe` reports `session`** — `{ id, status, goal }` for the run this
+  project holds, active or just-settled. Read it with `get_findings`, close it
+  with `end_session`, or decide it is stale.
+- **`start_debug({ replace: true })`** — take the project over: the active run is
+  ended first (the `end_session` path — managed Chrome stopped, an attached
+  browser only disconnected, profile lock freed), then the new run starts.
+
+The refusal stays the default, and it names the id plus each of those calls. A
+silent takeover is the wrong default: it kills a healthy run whose own caller is
+still watching it. Replace only ever touches a run **this** server owns — one
+held by another live server is still refused, because its browser is not ours to
+close.
 
 ### Truncation is structural, not just prose
 
@@ -139,8 +159,9 @@ competent model behave the same.
   the loop, when to `observe` vs `act`, what a finding must contain, pass/fail
   rules, when to ask the smart agent vs proceed.
 - **Composed, not monolithic.** Base debug-agent prompt + target addendum
-  (web/desktop/android specifics) + the session's `story` + `criteria`. Same
-  composition pattern as `../ai-task-master` subagents.
+  (web/desktop/android specifics) + the app's address + the signed-in persona +
+  the target's `notes` (what is expected of this app) + the session's `story` +
+  `criteria`. Same composition pattern as `../ai-task-master` subagents.
 - **Provider-agnostic.** No vendor-specific tricks. Swap deepseek↔GLM↔Llama via
   any OpenAI-compatible router and the prompt still drives the same loop.
 

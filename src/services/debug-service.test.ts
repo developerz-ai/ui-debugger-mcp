@@ -189,6 +189,77 @@ test('two concurrent starts: the second fails busy without launching a second bu
   expect(manager.has(CWD)).toBe(true); // the winner's run is live
 });
 
+test('the busy refusal names the active run and every way out of it', async () => {
+  // A caller that lost its session id used to have no in-band recovery at all —
+  // the only door left was `ui-debugger-mcp stop` in a shell it may not have.
+  const svc = makeService(fakeBuilder().build);
+  const { session_id } = await svc.start({ target: 'web', goal: 'first' });
+
+  const err = (await svc
+    .start({ target: 'web', goal: 'second' })
+    .catch((e: unknown) => e)) as Error;
+
+  expect(err).toBeInstanceOf(SessionBusyError);
+  expect(err.message).toContain(session_id);
+  expect(err.message).toContain(`get_findings({session_id:'${session_id}'})`);
+  expect(err.message).toContain(`end_session({session_id:'${session_id}'})`);
+  expect(err.message).toContain('replace:true');
+  expect(err.message).toContain('describe()');
+});
+
+// --- start({replace}) — the explicit takeover -------------------------------
+
+test('replace:true ends the active run through the end_session path, then starts', async () => {
+  const { build, log } = fakeBuilder();
+  const svc = makeService(build);
+  const first = await svc.start({ target: 'web', goal: 'first' });
+
+  const second = await svc.start({ target: 'web', goal: 'second', replace: true });
+
+  expect(second.session_id).not.toBe(first.session_id);
+  // The replaced run was released, not abandoned: its adapter is closed (managed
+  // Chrome stopped, profile lock freed) exactly as `end_session` would have.
+  expect(log.adapters[0]?.closeCalls).toBe(1);
+  expect(log.adapters[1]?.closeCalls).toBe(0);
+  expect(manager.get(CWD).id).toBe(second.session_id);
+  // The old id is gone the moment the new run owns the project.
+  await expect(svc.getFindings({ session_id: first.session_id })).rejects.toThrow(
+    SessionNotFoundError,
+  );
+  expect((await svc.getFindings({ session_id: second.session_id })).status).toBe('running');
+});
+
+test('replace:true with nothing active is just a start', async () => {
+  const { build, log } = fakeBuilder();
+  const svc = makeService(build);
+
+  const { session_id } = await svc.start({ target: 'web', goal: 'x', replace: true });
+
+  expect(manager.get(CWD).id).toBe(session_id);
+  expect(log.params).toHaveLength(1);
+});
+
+test('replace:true does not slip past the in-flight guard (a launching run is not replaceable)', async () => {
+  // A start still opening owns no manager slot to hand over, and racing its
+  // teardown is how a half-launched Chrome ends up orphaned on the profile lock.
+  const { build } = fakeBuilder();
+  const slowBuild: SessionBuilder = async (params) => {
+    await tick(20);
+    return build(params);
+  };
+  const svc = makeService(slowBuild);
+
+  const [first, second] = await Promise.allSettled([
+    svc.start({ target: 'web', goal: 'first' }),
+    svc.start({ target: 'web', goal: 'second', replace: true }),
+  ]);
+
+  expect(first.status).toBe('fulfilled');
+  expect(second.status).toBe('rejected');
+  expect((second as PromiseRejectedResult).reason).toBeInstanceOf(SessionBusyError);
+  expect(((second as PromiseRejectedResult).reason as Error).message).toContain('already starting');
+});
+
 test('start tears the session down and frees the lock when open fails', async () => {
   const { build, log } = fakeBuilder({ openFails: true });
   const svc = makeService(build);
@@ -372,6 +443,44 @@ test('start forwards the auth persona to the builder', () => {
   return svc.start({ target: 'web', goal: 'open audit', as: 'admin' }).then(() => {
     expect(log.params[0]?.as).toBe('admin');
   });
+});
+
+test("describe surfaces a target's standing notes verbatim", () => {
+  const notes = 'needs seeded data — empty tables are expected on /new';
+  const withNotes: ResolvedConfig = {
+    ...CONFIG,
+    targets: { web: { adapter: 'browser', url: 'http://x.test', headless: true, notes } },
+  };
+  const svc = new DebugService({
+    manager,
+    config: withNotes,
+    cwd: CWD,
+    build: fakeBuilder().build,
+  });
+
+  expect(svc.describe({ target: 'web' }).targets[0]?.notes).toBe(notes);
+  // A target that declares none carries no key at all — absent, not empty.
+  expect(
+    makeService(fakeBuilder().build).describe({ target: 'web' }).targets[0],
+  ).not.toHaveProperty('notes');
+});
+
+test('describe reports the run this project holds — the way back to a lost session id', async () => {
+  const svc = makeService(fakeBuilder().build);
+  expect(svc.describe({})).not.toHaveProperty('session'); // nothing running: no key at all
+
+  const { session_id } = await svc.start({ target: 'web', goal: 'open Audit' });
+
+  expect(svc.describe({}).session).toEqual({
+    id: session_id,
+    status: 'running',
+    goal: 'open Audit',
+  });
+  // Narrowing to one target must not hide the run — the id is the point of the call.
+  expect(svc.describe({ target: 'web' }).session?.id).toBe(session_id);
+
+  await svc.end({ session_id });
+  expect(svc.describe({})).not.toHaveProperty('session');
 });
 
 test('describe narrows to one named target, and rejects an unknown one', () => {
