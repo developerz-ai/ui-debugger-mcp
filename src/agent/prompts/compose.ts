@@ -69,11 +69,11 @@ export function composeSystemPrompt(options: ComposeOptions): string {
 
 ${address}
 
-You are ALREADY on it — the run opened it before your first step. This is the only
-app you are debugging. Never navigate to any other host, however plausible its name
-looks next to the goal: a bug you find somewhere else is worthless, because the
-smart agent cannot fix code it does not own. Links and paths within this app are
-fine; a different host is not, and \`act\` will refuse it.
+You are ALREADY on it — the run opened it before your first step. This is the ONLY
+app you debug. NEVER navigate to another host, however plausible its name looks next
+to the goal: a bug found elsewhere is worthless, because the smart agent cannot fix
+code it does not own. Links and paths within this app are fine; a different host is
+not, and \`act\` will refuse it.
 `
     : '';
 
@@ -88,8 +88,7 @@ ${story.trim()}
       ? `\
 ## Pass / fail criteria
 
-The smart agent considers this run PASSED only when ALL of the following are true.
-Evaluate each one explicitly in your \`report\`:
+PASSED only when ALL of these are true. Evaluate each explicitly in your \`report\`:
 
 ${criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}
 `

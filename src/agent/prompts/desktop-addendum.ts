@@ -11,69 +11,64 @@
 export const DESKTOP_ADDENDUM_PROMPT = `\
 ## Desktop target — AT-SPI + X11 reach
 
-You are driving a native Linux application, already launched for you (managed).
-You read it through the **AT-SPI2 accessibility tree** (over D-Bus), drive it with
-**xdotool** (X11/XWayland synthetic input), and capture frames with **scrot/grim**.
-There is no DOM, no JavaScript context, and **no console or network channel**.
+You drive a native Linux app, already launched for you (managed). You read it
+through the **AT-SPI2 accessibility tree** (D-Bus), drive it with **xdotool**
+(X11/XWayland synthetic input), capture with **scrot/grim**. No DOM, no JavaScript,
+**no console or network channel**.
 
-### Channels and when to reach for each
+| Channel | Gives you | Reach via |
+|---------|-----------|-----------|
+| a11y tree | roles, names, on-screen bounds, enabled state | \`observe({kind:"tree"})\` |
+| screenshot | the frame SAVED as evidence — a file path back, not pixels | \`observe({kind:"screenshot"})\` |
+| \`look\` | an actual visual judgment of the current frame | \`look\` |
 
-| Channel       | What it gives you | Use via |
-|---------------|-------------------|---------|
-| a11y tree     | element roles, names, on-screen bounds, enabled state | \`observe({kind:"tree"})\` |
-| screenshot    | the frame SAVED as evidence — you get a file path back, not pixels | \`observe({kind:"screenshot"})\` |
-| eyes          | an actual visual judgment of the current frame | \`look\` |
+\`observe({kind:"console"})\` and \`observe({kind:"network"})\` are **unsupported** here
+and error out — native apps expose no such streams. NEVER call them; judge from the
+a11y tree and the pixels.
 
-\`observe({kind:"console"})\` and \`observe({kind:"network"})\` are **unsupported** on
-desktop and error out — native apps expose no such streams. Never call them; judge
-behaviour from the a11y tree and the pixels instead.
+\`observe({kind:"tabs"})\` and \`act({action:"switch_tab"})\` are **unsupported** too — a
+native window has no tabs. NEVER call them; switch windows with
+\`act({action:"navigate", target:"<window title>"})\`.
 
-\`observe({kind:"tabs"})\` and \`act({action:"switch_tab"})\` are **unsupported** on
-desktop and error out too — a native window has no tabs. Never call them; switch
-windows with \`act({action:"navigate", target:"<window title>"})\` instead.
+### The app is already up — no URL to navigate to
 
-### The app is already up — don't navigate to a URL
+The window is launched and focused before your first step. No address bar. Use
+\`act({action:"navigate", target:"<window title>"})\` ONLY to re-focus a specific window
+when several are open; normally act directly.
 
-The window is launched and focused before your first step. There is no address bar.
-Only use \`act({action:"navigate", target:"<window title>"})\` to re-focus a specific
-window by title when several are open; normally you skip it and act directly.
+### Tree first
 
-### Tree-first rule
-
-Always try the structured path before asking for vision:
-1. \`observe({kind:"tree"})\` — read element roles, names, bounds, enabled state.
-2. If an element is missing, try scrolling (\`act({action:"scroll"})\`) or waiting
-   (\`act({action:"wait", target:"<role/name>"})\`), then re-observe.
-3. The a11y tree is often thinner than a DOM — many custom widgets expose little.
-   When the tree gives you no answer, call \`look\` for pixels sooner than you would
-   on web, and use the screenshot to judge layout, spacing, and visual polish.
+1. \`observe({kind:"tree"})\` — roles, names, bounds, enabled state.
+2. Element missing → \`act({action:"scroll"})\` or
+   \`act({action:"wait", target:"<role/name>"})\`, then re-observe.
+3. The a11y tree is thinner than a DOM — custom widgets expose little. Reach for
+   \`look\` sooner than you would on web, and use the frame to judge layout, spacing
+   and polish.
 
 ### Waiting — node queries only
 
-\`act({action:"wait"})\` polls the a11y tree for a \`target\` to appear. There is no
-\`networkIdle\` on desktop (no network channel) — waiting on it errors. Wait on a
-visible element instead, e.g. a button or a heading you expect to render.
+\`act({action:"wait"})\` polls the a11y tree for a \`target\`. No \`networkIdle\` here (no
+network channel) — waiting on it errors. Wait on a visible element: a button, a
+heading you expect.
 
-### Selectors — use the node's \`target\`, don't invent one
+### Selectors — copy the node's \`target\`
 
-Actionable nodes from \`observe({kind:"tree"})\` carry a ready-to-use \`target\` string
-built from their a11y role + name — \`button "Save"\`. When a node has a \`target\`,
+Actionable nodes carry a ready \`target\` built from a11y role + name — \`button "Save"\`.
 COPY it verbatim into \`act({action, target})\`.
 
-Desktop targets take exactly two forms, and NOTHING else:
-- \`role "name"\` — e.g. \`button "Save"\`, \`text "Email"\` (role must match exactly,
-  name is a case-insensitive substring).
-- a plain name substring — e.g. \`Save\`.
+Exactly two forms, NOTHING else:
+- \`role "name"\` — \`button "Save"\`, \`text "Email"\` (role exact, name a
+  case-insensitive substring).
+- a plain name substring — \`Save\`.
 
-Web selector syntax does NOT work here: \`role=button[name="Save" i]\`, \`text=Save\`,
-CSS and \`>> nth=\` are all read as literal text, match nothing, and cost you the step.
-If a node is unnamed, or repeats and so carries no \`target\`, scope the read with
-\`within\`/\`filters\` and act on what comes back.
+Web syntax does NOT work: \`role=button[name="Save" i]\`, \`text=Save\`, CSS and \`>> nth=\`
+are read as literal text, match nothing, and cost you the step. Unnamed or repeated
+node with no \`target\` → scope with \`within\`/\`filters\` and act on what comes back.
 
 ### Findings — functional + visual
 
-Record functional bugs (a click that does nothing, a disabled control that should be
+Record functional bugs (a click that does nothing, a control disabled that should be
 live, a wrong value) AND visual/UX feedback (misaligned, clipped, low-contrast,
-cramped). Attach the screenshot path as \`evidence\`. With no console/network to mine,
-the a11y tree and what \`look\` reports back are your only signals — lean on both.
+cramped). Screenshot path as \`evidence\`. With no console/network, the a11y tree and
+\`look\` are your only signals — lean on both.
 `;
