@@ -57,6 +57,7 @@ import {
   NAV_TIMEOUT_MS,
   resolveLaunchBinary,
   resolveTargetUrl,
+  unreachableFailure,
 } from './launch.js';
 import { locateAcrossFrames, regionAcrossFrames, waitAcrossFrames } from './locate.js';
 import { normalizeQuery } from './query.js';
@@ -67,7 +68,12 @@ import { normalizeQuery } from './query.js';
 export type { RawNode } from './extractor.js';
 export { applyNodeFilters, NODE_FILTER_KEYS } from './filters.js';
 export { isFrameGone, isOutsideViewport, scrollDelta } from './geometry.js';
-export { appendDebugLogin, resolveLaunchBinary, resolveTargetUrl } from './launch.js';
+export {
+  appendDebugLogin,
+  resolveLaunchBinary,
+  resolveTargetUrl,
+  unreachableFailure,
+} from './launch.js';
 
 /** Default cap on `readState` so the tree stays small (overridable via `limit`). */
 const DEFAULT_LIMIT = 200;
@@ -226,8 +232,14 @@ export class BrowserAdapter implements Adapter {
     await this.#run('open', async () => {
       const resolved = resolveTargetUrl(target, this.#config.url);
       const url = appendDebugLogin(resolved, this.#config.debugLogin);
-      // The first navigation spends the run's budget, not a fresh 30s of its own.
-      await this.#page.goto(url, { timeout: capWait(NAV_TIMEOUT_MS, timeoutMs) });
+      try {
+        // The first navigation spends the run's budget, not a fresh 30s of its own.
+        await this.#page.goto(url, { timeout: capWait(NAV_TIMEOUT_MS, timeoutMs) });
+      } catch (error) {
+        // A target that is not serving is not a UI bug — say so here, naming the
+        // port, instead of letting the run report an empty page for 300 seconds.
+        throw unreachableFailure(error, url) ?? error;
+      }
     });
   }
 

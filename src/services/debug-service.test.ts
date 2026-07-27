@@ -62,6 +62,7 @@ interface BuildLog {
     goal: string;
     criteria?: string;
     url?: string;
+    as?: string;
     timeoutMs?: number;
   }>;
   adapters: FakeAdapter[];
@@ -324,6 +325,52 @@ test('describe reports a browser attach target (cdpUrl set) as mode "attach"', (
     operational: true,
     url: undefined,
     headless: true,
+  });
+});
+
+test("describe surfaces a target's persona NAMES, and nothing else about them", () => {
+  // A caller must be able to pick a valid `as` without opening the config file —
+  // and must never receive the credentials while doing it.
+  const withAuth: ResolvedConfig = {
+    ...CONFIG,
+    targets: {
+      dashboard: {
+        adapter: 'browser',
+        url: 'http://localhost:5173',
+        headless: true,
+        auth: {
+          admin: {
+            path: '/login',
+            fields: { email: 'a@dev.local', password: 'hunter2' },
+            submit: 'Sign in',
+          },
+          user: {
+            path: '/login',
+            fields: { email: 'u@dev.local', password: 'u' },
+            submit: 'Sign in',
+          },
+        },
+      },
+      screen: { adapter: 'desktop', launch: 'myapp' },
+    },
+  };
+  const svc = new DebugService({ manager, config: withAuth, cwd: CWD, build: fakeBuilder().build });
+
+  const [dashboard, screen] = svc.describe({}).targets;
+  expect(dashboard?.personas).toEqual(['admin', 'user']);
+  expect(JSON.stringify(dashboard)).not.toContain('hunter2');
+  // A target with no `auth` block carries no key at all — absent, not empty.
+  expect(screen).not.toHaveProperty('personas');
+  expect(
+    makeService(fakeBuilder().build).describe({ target: 'web' }).targets[0],
+  ).not.toHaveProperty('personas');
+});
+
+test('start forwards the auth persona to the builder', () => {
+  const { build, log } = fakeBuilder();
+  const svc = makeService(build);
+  return svc.start({ target: 'web', goal: 'open audit', as: 'admin' }).then(() => {
+    expect(log.params[0]?.as).toBe('admin');
   });
 });
 

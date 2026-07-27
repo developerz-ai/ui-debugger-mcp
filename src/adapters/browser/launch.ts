@@ -96,6 +96,42 @@ export function appendDebugLogin(target: string, debugLogin?: { param: string })
   return url.toString();
 }
 
+/**
+ * Chrome's "nothing answered" navigation errors — the dev server is not up, or the
+ * host does not resolve. Not the same class as "the page rendered wrong".
+ */
+const UNREACHABLE =
+  /net::ERR_(CONNECTION_REFUSED|CONNECTION_RESET|CONNECTION_TIMED_OUT|CONNECTION_CLOSED|NAME_NOT_RESOLVED|ADDRESS_UNREACHABLE|SOCKET_NOT_CONNECTED|EMPTY_RESPONSE)/;
+
+/**
+ * Recast a "nothing is listening" navigation failure as an error that names the
+ * address, or `null` when the failure was something else.
+ *
+ * `describe.operational` only ever meant "this adapter is wired" — it says nothing
+ * about whether `http://localhost:5173` is actually serving. So a dev server that
+ * is down used to spend a whole run: the driver launched, navigated, read an empty
+ * page, and reported it as a broken UI — indistinguishable, to the caller, from a
+ * real defect. This is that run ending on step zero instead, with the port in the
+ * message.
+ */
+export function unreachableFailure(error: unknown, url: string): AdapterError | null {
+  const detail = error instanceof Error ? error.message : String(error);
+  const code = UNREACHABLE.exec(detail)?.[0];
+  if (code === undefined) return null;
+  let where = url;
+  try {
+    where = new URL(url).host;
+  } catch {
+    // Keep the raw target — a URL we cannot parse is still the best hint we have.
+  }
+  return new AdapterError(
+    `open: nothing is serving ${url} (${code}). Start the app on ${where} — or point ` +
+      "start_debug's `url` at one that is running — and start the run again. This is the " +
+      'target being unreachable, NOT a UI bug: a run against a dead server only ever reports ' +
+      'an empty page.',
+  );
+}
+
 // --- Not poisoning the next run ---------------------------------------------
 
 /** A Playwright handle opened by a lifecycle: the context (managed) or the browser (attach). */

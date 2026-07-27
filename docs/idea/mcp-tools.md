@@ -30,11 +30,28 @@ no matter how complex the debugging gets.
 
 | Tool | Input | Returns |
 |------|-------|---------|
-| `start_debug`   | `{ target, goal, criteria?, url?, timeout? }` | `session_id` |
+| `start_debug`   | `{ target, goal, criteria?, url?, as?, timeout? }` | `session_id` |
 | `send_message`  | `{ session_id, message }`     | ack — inject work mid-run |
-| `get_findings`  | `{ session_id, wait?, fields? }` | status + findings + evidence paths |
-| `describe`      | `{}` or `{ target }`          | targets catalog + config (lazy) |
+| `get_findings`  | `{ session_id, wait?, fields? }` | status + findings + evidence paths (+ `truncated`) |
+| `describe`      | `{}` or `{ target }`          | targets catalog + config (lazy), incl. `personas[]` |
 | `end_session`   | `{ session_id }`              | closes it |
+
+### `as` — sign in without spending steps
+
+`as` names a configured auth persona (`targets.<t>.auth.<name>` —
+[`config.md`](config.md)). The run signs in **out-of-band** before the driver's
+first step, so the login costs zero steps and the credentials never enter the
+model's context; the prompt gets a name-only "you are already signed in as
+`admin`" section. An unknown name fails loud listing the valid ones — never a
+silently signed-out run. `describe` lists the names per target, so a caller
+discovers them without reading the config file.
+
+### Truncation is structural, not just prose
+
+A whole-object `get_findings` caps each list at 20 and says so **in the payload**:
+`truncated: { steps: { returned: 20, total: 57 } }`, alongside the text note
+pointing at `fields=[…]` (a projected read is never capped). Prose alone let a
+caller that skipped the note conclude the run found exactly 20 issues.
 
 ### Why plain few-tools, not the 3-tool meta-dispatcher
 

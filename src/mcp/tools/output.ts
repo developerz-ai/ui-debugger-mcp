@@ -44,6 +44,13 @@ const TargetInfoSchema = z.object({
   operational: z.boolean().describe('Whether this adapter is wired and usable.'),
   url: z.string().optional().describe('Entry url (web targets only).'),
   headless: z.boolean().optional().describe('Headless flag (web targets only).'),
+  personas: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Named auth personas — the valid start_debug({as}) values for this target. Names only; ' +
+        'the credentials stay in .ui-debugger-mcp.json and never reach the driver.',
+    ),
 });
 
 /** `describe` output — the target catalog plus the resolved models + workspace. */

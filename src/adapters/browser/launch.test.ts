@@ -1,6 +1,43 @@
 import { expect, test } from 'bun:test';
 import { AdapterError } from '../../errors.js';
-import { closeOnFailure, createFailure } from './launch.js';
+import { closeOnFailure, createFailure, unreachableFailure } from './launch.js';
+
+// --- a target that is not serving is not a UI bug ----------------------------
+
+test('unreachableFailure names the address and the code when nothing is listening', () => {
+  const error = new Error(
+    'page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:5173/\nCall log: …',
+  );
+  const recast = unreachableFailure(error, 'http://localhost:5173/');
+  expect(recast).toBeInstanceOf(AdapterError);
+  // The port is the whole point: "empty page" and "dev server is down" are
+  // indistinguishable to a caller reading findings.
+  expect(recast?.message).toContain('localhost:5173');
+  expect(recast?.message).toContain('ERR_CONNECTION_REFUSED');
+  expect(recast?.message).toContain('NOT a UI bug');
+});
+
+test('unreachableFailure covers DNS and the other no-answer codes', () => {
+  for (const code of ['ERR_NAME_NOT_RESOLVED', 'ERR_CONNECTION_RESET', 'ERR_EMPTY_RESPONSE']) {
+    const recast = unreachableFailure(
+      new Error(`net::${code} at https://app.test/`),
+      'https://app.test/',
+    );
+    expect(recast?.message).toContain(code);
+  }
+});
+
+test('unreachableFailure leaves every other navigation failure alone', () => {
+  // A real timeout on a server that IS answering is the run's problem to report,
+  // not something to relabel as "nothing is serving".
+  expect(unreachableFailure(new Error('Timeout 30000ms exceeded'), 'http://x.test/')).toBeNull();
+  expect(unreachableFailure(new Error('net::ERR_ABORTED'), 'http://x.test/')).toBeNull();
+});
+
+test('unreachableFailure falls back to the raw target when the URL will not parse', () => {
+  const recast = unreachableFailure(new Error('net::ERR_CONNECTION_REFUSED'), 'not-a-url');
+  expect(recast?.message).toContain('not-a-url');
+});
 
 // --- closeOnFailure ---------------------------------------------------------
 

@@ -5,6 +5,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-07-27
+
+Almost every interesting screen is behind a login, so "how to log into this app"
+was being retyped into every `goal` string — burning driver steps before the real
+goal started and putting credentials into a free-text field that gets logged.
+Now it lives in config and costs nothing.
+
+### Added
+
+- **Named auth personas.** A web target takes an `auth` map:
+
+  ```jsonc
+  "auth": {
+    "admin": { "path": "/login", "fields": { "email": "admin@dev.local", "password": "admin" }, "submit": "Sign in" }
+  }
+  ```
+
+  and `start_debug({ target: "dashboard", as: "admin", goal: "open Audit and …" })`
+  opens the run already signed in. Field keys are matched most-specific first
+  (`name` → `id`/`type` → `data-testid` → `aria-label` → `placeholder` → accessible
+  name), and a key that already looks like a selector is used verbatim. Optional
+  `expect` pins an explicit proof of success.
+
+  **The login runs out-of-band**, between the first navigation and the driver's
+  first step — the driver never performs it and never receives the values. A recipe
+  in the system prompt would be resent to the provider on *every* step (the standing
+  rule here is that a secret never enters the model's context), and an in-trail
+  login spends 4-8 steps on work with one correct answer. The trail stays honest:
+  the login's actions are recorded as steps, marked as the pre-run sign-in, with
+  lengths where the values were.
+
+  Everything fails loud and before the run: an unknown `as` is a `ConfigError`
+  listing the valid names, and an unresolvable field/submit — or a submit that left
+  the run still on the login page — is an `AuthError`. There is no path to a
+  silently signed-out run, which would report every screen behind the login as an
+  empty page.
+
+  Persona values are redacted from every log line the run writes (`agent.log`,
+  `network.log`, `console.log`), including the percent-encoded, `+`-for-space and
+  JSON-escaped spellings a form POST produces. `describe` reports persona **names**
+  per target, so a caller can pick a valid `as` without opening the config file.
+
+- **`truncated` on a capped `get_findings` read.** A whole-object read still caps
+  each list at 20, but now says so structurally — `truncated: { "steps": { "returned":
+  20, "total": 57 } }` in the typed payload, declared in the output schema — not only
+  in a prose note a caller can skip and conclude the run found exactly 20 issues.
+
+### Changed
+
+- **A dead dev server no longer costs a whole run.** `describe.operational` only
+  ever meant "this adapter is wired"; it said nothing about whether
+  `http://localhost:5173` was serving. A connection-refused / DNS navigation failure
+  now ends the run at step zero with an error naming the address, instead of a
+  driver reading an empty page and reporting it as a UI bug.
+
 ## [1.5.2] - 2026-07-27
 
 ### Changed

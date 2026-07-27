@@ -60,8 +60,9 @@ picks the binary via `executablePath`/`emulatorPath`.
 
 ## MCP tools (few, fat — not playwright-mcp)
 A **conversation**, not a remote control. Small agent owns the clicking loop.
-- `start_debug` — open a session with a goal `{ target, goal, criteria?, timeout? }`
+- `start_debug` — open a session with a goal `{ target, goal, criteria?, as?, timeout? }`
   (`timeout` seconds; always capped — default 300s — so a run never hangs forever).
+  `as` names a configured auth persona; the run signs in before the first step.
 - `send_message` — talk to the small agent **mid-run** (add work, redirect, answer).
 - `get_findings` — poll status + structured findings (functional + visual) + evidence.
 - `describe` — list targets/config for this project (lazy schema).
@@ -106,7 +107,7 @@ project (cwd) → no run selector needed.
 ```
 models:  { driver, vision, summary? }   per-role; defaults: deepseek (text), glm (image)
 targets:
-  web:     { adapter: "browser", url, headless, debugLogin, executablePath, profile, cdpUrl }
+  web:     { adapter: "browser", url, headless, debugLogin, auth, executablePath, profile, cdpUrl }
   desktop: { adapter: "desktop", launch }
   mobile:  { adapter: "android", adbSerial }            attach — a real device
   mobile:  { adapter: "android", avd, emulatorPath? }   managed — `avd` only here
@@ -137,6 +138,26 @@ the prune. Two editor windows on two apps never see each other
 `?debug-ai=true` escape hatch in the app under test. Skips **captcha only**, not
 auth. Gate behind `ALLOW_AI_DEBUG_LOGIN` so it's off in prod. Captchas are the #1
 blocker for headless agents.
+
+## Auth — named personas (`start_debug({as})`)
+`targets.<t>.auth.<name> = { path, fields, submit, expect? }` (web only). The
+recipe lives in config, not in every `goal` string.
+
+**Out-of-band, not in-trail.** The login runs between `adapter.open()` and the
+loop's first step (`services/login.ts`) — the driver never performs it. Steps are
+the scarce resource, and the prompt is resent every step, so a recipe in it would
+ship the password to the provider on each one. The prompt gets a NAME-only
+"already signed in as X" section; the trail gets the login's steps, marked as the
+pre-run sign-in, with lengths where the values were.
+
+Fail loud, always before the run: unknown `as` (ConfigError listing valid names),
+unresolvable field/submit, or a submit that left the run still on `path`
+(AuthError). NEVER a silently signed-out run — that reports every screen behind
+the login as an empty page.
+
+**Redaction.** `createSecretRedactor` (`browser/log-format.ts`) is bound per run to
+the persona's values and wraps every `logs/*.log` sink — plain, percent-encoded,
+`+`-for-space and JSON-escaped spellings. `describe` exposes names only.
 
 ## Commands
 ```

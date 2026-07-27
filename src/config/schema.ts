@@ -18,12 +18,45 @@ const DebugLoginSchema = z.strictObject({
   param: z.string(), // query param name, e.g. "debug-ai" → `?debug-ai=true`
 });
 
+/**
+ * One named login persona — how to sign into THIS app as THIS user.
+ *
+ * The recipe lives in config, not in every `start_debug` goal string: almost
+ * every interesting screen is behind a login, so re-teaching the flow in prose
+ * per run burned driver steps before the real goal started and put credentials
+ * into a free-text field that gets logged. `start_debug({as:"admin"})` names one
+ * instead; the run signs in out-of-band before the driver's first step and the
+ * values never enter the model's context (see `docs/idea/config.md`).
+ */
+const AuthPersonaSchema = z.strictObject({
+  /** Login page — a path resolved against the target url (`/login`) or an absolute URL. */
+  path: z.string().min(1),
+  /**
+   * Field hint → value. The KEY locates the control (`name`/`id`/`type`/
+   * `data-testid`/`aria-label`/`placeholder`, in that order, or a selector when it
+   * looks like one); the VALUE is typed into it and is redacted everywhere it
+   * would otherwise be written down.
+   */
+  fields: z.record(z.string().min(1), z.string()).refine((f) => Object.keys(f).length > 0, {
+    message: 'needs at least one field to type',
+  }),
+  /** The control that submits the form — a button/link label, or a selector. */
+  submit: z.string().min(1),
+  /**
+   * Proof the login WORKED — a selector/text that only exists once signed in.
+   * Omit and the run instead requires that submitting left `path`; an app that
+   * signs in without navigating must set this, or the login reads as a failure.
+   */
+  expect: z.string().min(1).optional(),
+});
+
 /** Web target — CDP-driven browser. Managed (default) unless `cdpUrl` attaches. */
 export const WebTargetSchema = z.strictObject({
   adapter: z.literal('browser'),
   url: z.url().optional(), // optional: the caller ("boss") can supply it per-run via start_debug
   headless: z.boolean().default(true), // docs/idea/config.md promises headless by default
   debugLogin: DebugLoginSchema.optional(),
+  auth: z.record(z.string().min(1), AuthPersonaSchema).optional(), // personas, keyed by `as`
   executablePath: z.string().nullish(), // null = auto-detect Chrome/Chromium (managed)
   // Persistent profile dir, resolved against the workspace root (absolute path used
   // as-is); unset = `chrome-user-data/`. Managed mode only — attach keeps its own.
@@ -96,6 +129,7 @@ export const ConfigSchema = z.strictObject({
 });
 
 export type Models = z.infer<typeof ModelsSchema>;
+export type AuthPersona = z.infer<typeof AuthPersonaSchema>;
 export type WebTarget = z.infer<typeof WebTargetSchema>;
 export type DesktopTarget = z.infer<typeof DesktopTargetSchema>;
 export type AndroidTarget = z.infer<typeof AndroidTargetSchema>;

@@ -11,6 +11,19 @@
       "url": "http://localhost:3000",
       "headless": true,
       "debugLogin": { "param": "debug-ai" },
+      "auth": {
+        "admin": {
+          "path": "/login",
+          "fields": { "email": "admin@dev.local", "password": "admin" },
+          "submit": "Sign in"
+        },
+        "user": {
+          "path": "/login",
+          "fields": { "email": "user@dev.local", "password": "user" },
+          "submit": "Sign in",
+          "expect": "text=Sign out"
+        }
+      },
       "executablePath": null,
       "profile": "chrome-user-data",
       "cdpUrl": null

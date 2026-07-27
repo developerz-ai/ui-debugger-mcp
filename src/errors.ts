@@ -82,6 +82,22 @@ export class AdbError extends AdapterError {
   }
 }
 
+/**
+ * A configured auth persona could not sign in — the login page never rendered, a
+ * field/submit control did not resolve, or submitting left the run signed out.
+ *
+ * Loud on purpose and thrown BEFORE the driver takes a step: a run that silently
+ * continues logged out reports "the page is empty" for every screen behind the
+ * login, which is indistinguishable from a real UI bug. Never carries a credential.
+ */
+export class AuthError extends UiDebuggerError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthError';
+    Object.setPrototypeOf(this, AuthError.prototype);
+  }
+}
+
 /** The per-project workspace could not be managed — e.g. old session dirs that refuse to prune. */
 export class WorkspaceError extends UiDebuggerError {
   constructor(message: string) {

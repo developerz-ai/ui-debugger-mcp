@@ -66,6 +66,13 @@ Per-project. Lives in the repo, travels with it. Describes the app + targets.
       "url": "http://localhost:3000",
       "headless": true,                            // optional — defaults to true
       "debugLogin": { "param": "debug-ai" },      // skip captcha, not auth
+      "auth": {                                    // named login personas — see below
+        "admin": {
+          "path": "/login",
+          "fields": { "email": "admin@dev.local", "password": "admin" },
+          "submit": "Sign in"
+        }
+      },
       // --- managed mode (default): server launches + owns Chrome ---
       "executablePath": null,                      // null = auto-detect Chrome/Chromium
       "profile": "chrome-user-data",               // persistent profile dir under the workspace
@@ -89,6 +96,63 @@ Per-project. Lives in the repo, travels with it. Describes the app + targets.
   }
 }
 ```
+
+## `auth` — named login personas (web)
+
+`debugLogin` skips a **captcha**, never auth. `auth` is where "how to sign into
+this app" lives, so it is written once instead of re-typed into every `goal`.
+
+```jsonc
+"auth": {
+  "admin": { "path": "/login", "fields": {…}, "submit": "Sign in" },
+  "user":  { "path": "/login", "fields": {…}, "submit": "Sign in", "expect": "text=Sign out" }
+}
+```
+
+Then `start_debug({ target: "dashboard", as: "admin", goal: "open Audit and …" })`.
+
+| Key | Meaning |
+|-----|---------|
+| `path` | login page — relative to the target `url`, or absolute |
+| `fields` | hint → value. The KEY locates the control, the VALUE is typed |
+| `submit` | the control that submits — a button/link label, or a selector |
+| `expect` | optional proof of success: something only a signed-in page renders |
+
+**Field keys** are tried most-specific first: `name`, then `id`/`type`, then
+`data-testid`, then `aria-label`, then `placeholder`, then the accessible name.
+A key that already looks like a selector (`#user`, `[data-testid='email']`,
+`input[name=u]`, `css=…`) is used verbatim.
+
+**The login runs out-of-band**, between the first navigation and the driver's
+first step — the driver never performs it and never receives the values. Two
+reasons: a recipe in the system prompt would be resent to the provider on *every*
+step (the repo's rule is that a secret never enters the model's context), and an
+in-trail login spends 4-8 of the run's steps on work with one correct answer. The
+trail stays honest — the login's actions are recorded as steps, marked as the
+pre-run sign-in, with lengths where the values were.
+
+**Everything fails loud, before the run:**
+
+| Situation | What happens |
+|-----------|--------------|
+| `as` names no configured persona | `ConfigError` listing the valid names |
+| `as` on a non-web target | `ConfigError` |
+| a field / the submit control does not resolve | `AuthError` naming it and the URL |
+| submitting left the run on `path` | `AuthError` — never a signed-out run |
+| `expect` set but never appears | `AuthError` |
+
+The last two matter most: a run that silently continues logged out reports every
+screen behind the login as an empty page, which reads to the caller exactly like
+a real UI bug.
+
+**Redaction.** Persona values never reach the system prompt, and every line this
+run writes to `logs/agent.log`, `logs/network.log` and `logs/console.log` is
+passed through a value-keyed redactor first (`<redacted, N chars>`), including the
+percent-encoded, `+`-for-space and JSON-escaped spellings a form POST produces.
+`describe` reports persona **names** only.
+
+**These are dev credentials in a committed file.** Point `auth` at a local/seeded
+environment, never at production secrets — same posture as any seed fixture.
 
 ## Browser session: managed vs attach
 
