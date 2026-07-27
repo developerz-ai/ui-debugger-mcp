@@ -64,7 +64,7 @@ test('composeSystemPrompt: states the app under test and forbids leaving it', ()
   });
   expect(prompt).toContain('## The app under test');
   expect(prompt).toContain('http://127.0.0.1:5179');
-  expect(prompt).toMatch(/never navigate to any other host/i);
+  expect(prompt).toMatch(/never navigate to (any other|another) host/i);
 });
 
 test('composeSystemPrompt: omits the address section for targets without one', () => {
@@ -194,11 +194,10 @@ test('composeSystemPrompt: both eye modes share the rest of the prompt', () => {
   const self = composeSystemPrompt({ ...base, selfLook: true });
   expect(vision).not.toBe(self);
   for (const shared of [
-    '## Your tool belt',
+    '## Tool belt',
     '- `observe` — read state',
-    '- `report` — emit the final structured findings and STOP.',
-    '## Structure-first rule',
-    'Never screenshot for information you can read from the tree or logs.',
+    '- `report` — emit final findings and STOP.',
+    '## Structure first — never screenshot what you can read',
     '## Terminal `report` call',
     WEB_ADDENDUM_PROMPT.slice(0, 80),
   ]) {

@@ -3,11 +3,11 @@
 Bun · TypeScript · Vercel AI SDK · OpenAI-compatible router (OpenRouter default).
 MCP server that debugs UIs autonomously.
 
-A smart agent hands a goal (a "story") to a small fast agent inside this server.
-The small agent drives browser/desktop, gathers evidence, reports findings.
-Smart agent fixes code, asks again. Loop until the UI works. No human clicking.
+Smart agent hands a goal (a "story") to a small fast agent inside this server. The
+small agent drives the target, gathers evidence, reports findings. Smart agent fixes
+code, asks again. Loop until the UI works. No human clicking.
 
-**Goal: stuff WORKS + LOOKS NICE.** Three actors cooperate (`docs/idea/models.md`):
+**Goal: stuff WORKS + LOOKS NICE.** Three actors (`docs/idea/models.md`):
 - **smart agent** — the boss (Claude/caller): sets goals, fixes code, loops.
 - **fast guy** — the driver (fast, text-only, blind): controls the target.
 - **vision guy** — the eyes (multimodal): describes screenshots, judges looks.
@@ -34,7 +34,9 @@ Smart agent fixes code, asks again. Loop until the UI works. No human clicking.
 - `src/agent/` — debug agent (Vercel AI SDK loop). The **fast guy** (driver) +
   the **vision guy** (eyes via `look`). Models per role via OpenAI-compatible
   router (OpenRouter default). Defaults: deepseek (text), glm (image).
-  - `prompts/` — OUR system prompts (in-repo, versioned, tested). Provider-agnostic. Never rely on a 3rd-party model's defaults. Teaches the bits + why CDP.
+  - `prompts/` — OUR system prompts: in-repo, versioned, tested, provider-agnostic.
+    NEVER rely on a 3rd-party model's defaults. Written compressed — they are
+    resent every step (`../../sebyx07/claude-code-bible/docs/11-compressed-config.md`).
 - `src/adapters/` — target control behind one shared contract.
   - `browser/` — web via CDP (headless default). ✅ shipped.
   - `desktop/` — X11/Wayland windows. Covers desktop app AND mobile emulator. ✅ shipped.
@@ -52,9 +54,9 @@ Smart agent fixes code, asks again. Loop until the UI works. No human clicking.
 
 Three adapters, one shared contract. Story names the target. iOS out of scope on Linux.
 
-Each adapter runs **managed** (server launches + owns the target) or **attach**
-(connect to a running one — `cdpUrl` for web, `adbSerial` for android — never
-start/stop it). Managed picks the binary via `executablePath`/`emulatorPath`.
+**managed** = server launches + owns the target; **attach** = connects to a running
+one (`cdpUrl` for web, `adbSerial` for android) and NEVER starts/stops it. Managed
+picks the binary via `executablePath`/`emulatorPath`.
 
 ## MCP tools (few, fat — not playwright-mcp)
 A **conversation**, not a remote control. Small agent owns the clicking loop.
@@ -65,38 +67,36 @@ A **conversation**, not a remote control. Small agent owns the clicking loop.
 - `describe` — list targets/config for this project (lazy schema).
 - `end_session` — close it.
 
-Never ship click/type/screenshot as separate tools. That floods context.
+NEVER ship click/type/screenshot as separate tools — that floods context.
 Findings carry BOTH functional bugs AND visual/UX feedback ("how it looks").
 
-Two tool layers (see `docs/idea/mcp-tools.md`): outer = few conversational MCP tools
-(smart Claude). Inner = the debug agent's belt (`observe`/`act`/`look`/`report`),
-SQL-like, heavily parameterized (`query`/`fields`/`filters`), one `act` not six.
-`look` = the eyes: sends a screenshot to the **vision guy** for visual judgment.
+Two layers (`docs/idea/mcp-tools.md`): outer = few conversational MCP tools (smart
+Claude); inner = the debug agent's belt (`observe`/`act`/`look`/`report`), SQL-like,
+heavily parameterized (`query`/`fields`/`filters`), one `act` not six. `look` = the
+eyes: sends a screenshot to the **vision guy**.
 
 `observe({kind})` reads `tree | screenshot | console | network | tabs`.
 `act({action})` does `click | type | key | scroll | navigate | wait | switch_tab`,
 and returns the tab list whenever more than one is open — a click that opens a tab
 otherwise reads to a blind driver as "nothing happened".
 
-A default `network` read hides *successful* static assets and reports `hidden` +
-how to see them (measured on a Vite dev server: 45 script loads to 3 API calls, so
-an unfiltered tail of 50 returned zero API traffic). Failed requests are never
-hidden, whatever their type.
+A default `network` read hides *successful* static assets and reports `hidden` + how
+to see them. Measured on a Vite dev server: 45 script loads to 3 API calls, so an
+unfiltered tail of 50 returned zero API traffic. Failed requests are never hidden.
 
 ## CLI (bin: `ui-debugger-mcp`)
 - no args → run the stdio MCP server (default).
-- `init` → scaffold a project: create `./tmp/ui-debugger-mcp/`, write a starter
-  `.ui-debugger-mcp.json` (deepseek/glm defaults + `web` stub) if absent, add
-  `tmp/` to `.gitignore`, print the `.mcp.json` snippet. Never writes the API key.
-- `status` → print the active run for this cwd: session id, target, goal, server
-  pid (+ alive?), verdict, finding counts. Reads `state.json` + the session's
-  `findings.json`; no API key needed.
-- `stop` → tear the active run down: SIGTERM the recorded server pid (graceful —
-  the server ends the run, closes the browser, frees the profile), mark `stopped`.
+- `init` → scaffold: create `./tmp/ui-debugger-mcp/`, write a starter
+  `.ui-debugger-mcp.json` (deepseek/glm defaults + `web` stub) if absent, add `tmp/`
+  to `.gitignore`, print the `.mcp.json` snippet. NEVER writes the API key.
+- `status` → the active run for this cwd: session id, target, goal, server pid
+  (+ alive?), verdict, finding counts. Reads `state.json` + `findings.json`. No API key.
+- `stop` → SIGTERM the recorded server pid (graceful — the server ends the run,
+  closes the browser, frees the profile), mark `stopped`.
 
 The server drops `<workspace>/state.json` (pid + active session) on start so these
-out-of-band commands work from a separate process; SIGTERM/SIGINT also end the run
-cleanly. One run per project (cwd), so no run selector is needed.
+work from a separate process; SIGTERM/SIGINT also end the run cleanly. One run per
+project (cwd) → no run selector needed.
 
 ## Config split
 - `.mcp.json` — how to LAUNCH server (command, model API key + base url). Gitignored. Secret.
@@ -134,9 +134,9 @@ the prune. Two editor windows on two apps never see each other
 (`src/session/isolation.test.ts`).
 
 ## Login bypass (captcha)
-Add `?debug-ai=true` escape hatch in the app under test. Skips **captcha only**,
-not auth. Gate behind `ALLOW_AI_DEBUG_LOGIN` env so it's off in prod.
-Captchas are the #1 blocker for headless agents.
+`?debug-ai=true` escape hatch in the app under test. Skips **captcha only**, not
+auth. Gate behind `ALLOW_AI_DEBUG_LOGIN` so it's off in prod. Captchas are the #1
+blocker for headless agents.
 
 ## Commands
 ```
@@ -166,22 +166,21 @@ bun run lint:fix       # biome auto-fix
 - Fail fast. Surface errors loud. No silent fallback.
 
 ## Adapter contract (the one real seam)
-Browser and desktop behind one interface so the agent loop is adapter-blind:
+One interface so the agent loop is adapter-blind:
 `open · find · click · type · readState · screenshot · waitFor · console · network`,
 plus optional `tabs · selectTab` (web only — the belt says "unsupported" elsewhere).
 Web → DOM. Desktop/mobile → a11y tree, fall back to vision/screenshots.
 
 **Web reads cross document boundaries.** `readState` extracts from every frame,
-translating child-frame bounds into page coordinates and tagging nodes with
-`frame`; selector actions fall through the frames to whichever one holds the
-element. Iframe content is otherwise invisible to page-level locators.
+translating child-frame bounds into page coordinates and tagging nodes with `frame`;
+selector actions fall through to whichever frame holds the element. Iframe content is
+otherwise invisible to page-level locators.
 
-**Network entries are whole exchanges**, not just status lines: `durationMs`,
-plus `requestBody`/`responseBody`/`requestHeaders`/`responseHeaders` for
-`fetch`/`xhr`. Credential header values are redacted to `<redacted, N chars>` —
-presence is diagnostic, the secret must never enter the model's context or the
-logs. A failing request without its response body is a dead end; that is the
-whole reason this exists.
+**Network entries are whole exchanges**, not status lines: `durationMs`, plus
+`requestBody`/`responseBody`/`requestHeaders`/`responseHeaders` for `fetch`/`xhr`.
+A failing request without its response body is a dead end — that is why this exists.
+Credential header values are redacted to `<redacted, N chars>`: presence is
+diagnostic, the secret must NEVER enter the model's context or the logs.
 
 ## See also
 - `docs/idea/overview.md` — the problem + the idea.
@@ -196,4 +195,6 @@ whole reason this exists.
 
 ## Note
 
-Do not use git worktrees — work directly in this checkout. If a task is big enough to need subagents, run them as a team in this same checkout: split the work into disjoint pieces so no two agents touch the same files.
+NEVER use git worktrees — work directly in this checkout. Task big enough for
+subagents → run them in this same checkout, split into disjoint pieces so no two
+agents touch the same files.

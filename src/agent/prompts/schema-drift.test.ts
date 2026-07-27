@@ -146,7 +146,7 @@ test('the native addenda do not sell `observe({kind:"screenshot"})` as vision', 
 });
 
 test('the base prompt\'s "act" belt line lists exactly ACT_ACTIONS, in order', () => {
-  const match = debugAgentPrompt(false).match(/`act` — take action: ([^.]+)\./);
+  const match = debugAgentPrompt(false).match(/`act` — ([^.]+)\./);
   expect(match).not.toBeNull();
   const verbs = (match?.[1] ?? '').split(',').map((verb) => verb.trim());
   expect(verbs).toEqual([...ACT_ACTIONS]);

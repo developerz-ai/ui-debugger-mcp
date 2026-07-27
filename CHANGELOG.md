@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-07-27
+
+Prompt token diet. The driver's system prompt is resent on every step of every
+run, so its size is a per-step tax — this cuts ~20% off it without dropping a
+single rule.
+
+### Changed
+
+- **In-repo system prompts compressed** — driver base, all three target addenda
+  (web/desktop/android), the vision guy, and the summary guy. Method is the
+  compressed-config discipline from `claude-code-bible/docs/11-compressed-config.md`:
+  lead with the rule not the reason, fragments over sentences, tables for
+  structured data, value-words (`NEVER`/`ALWAYS`/`fails when`) over rhetoric, and
+  code/selectors/tool syntax left byte-for-byte intact.
+
+  | Composed system prompt | Before | After |
+  |---|---|---|
+  | web | 15,579 | 12,543 (−19.5%) |
+  | desktop | 11,237 | 8,932 (−20.5%) |
+  | android | 11,908 | 9,556 (−19.7%) |
+  | vision guy | 2,669 | 2,122 (−20.5%) |
+  | summary guy | 887 | 811 (−8.6%) |
+
+  Every behavioural rule survives, including the ones added in 1.4.0 after real
+  failures: the cross-origin ban, `clear: true` on re-typed fields, the
+  false-positive bug bar, per-adapter selector dialects, and the
+  unreported-run warning. The `schema-drift` tests — which run the real belt and
+  assert the emitted selector/action strings appear verbatim in the matching
+  prompt — caught three of the rewrites and were the gate on the rest.
+
+  **Not validated against a live model run.** The rules and the drift tests are
+  static guarantees; prompt quality is not. Watch the first runs after upgrading.
+
+- `CLAUDE.md` trimmed (it was already compressed — ~2%).
+
 ## [1.5.0] - 2026-07-27
 
 The workspace stops growing forever, and you can read it. Plus one real defect:
