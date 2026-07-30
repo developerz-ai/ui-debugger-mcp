@@ -56,7 +56,7 @@ describe('AndroidAdapter integration', () => {
     serial = SERIAL ?? (await firstOnlineDevice()) ?? '';
     if (!serial) return;
     adapter = AndroidAdapter.create({
-      config: { adapter: 'android', avd: 'integration_avd', adbSerial: serial },
+      config: { adapter: 'android', headless: true, avd: 'integration_avd', adbSerial: serial },
     });
   });
 

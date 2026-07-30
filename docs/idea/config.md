@@ -91,6 +91,8 @@ Per-project. Lives in the repo, travels with it. Describes the app + targets.
       // --- managed mode (default): server boots the emulator ---
       "avd": "my-avd",                             // emulator @my-avd
       "emulatorPath": null,                        // null = auto-detect from SDK
+      "headless": true,                            // default; -no-window + software GL + -no-audio
+      "emulatorArgs": [],                          // appended verbatim, e.g. ["-http-proxy", "…"]
       // --- attach mode: talk to an already-running device/emulator ---
       "adbSerial": null                            // e.g. "emulator-5554" or "host:5555" → attach, no start/stop
     }

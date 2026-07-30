@@ -39,6 +39,7 @@
       "adapter": "android",
       "avd": "my-avd",
       "emulatorPath": null,
+      "headless": true,
       "adbSerial": null
     },
     "phone": {

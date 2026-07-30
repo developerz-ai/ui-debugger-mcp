@@ -53,6 +53,7 @@ import {
   tapPointOf,
   textArgs,
 } from './commands.js';
+import { emulatorLaunchArgs } from './launch.js';
 import { emulatorSerial, pickEmulatorPort } from './ports.js';
 import { AdbUiAutomator, shapeNodes, type UiAutomatorSource } from './uiautomator.js';
 
@@ -423,7 +424,15 @@ export class AndroidAdapter implements Adapter {
       const port = await this.#pickPort();
       this.#serial = emulatorSerial(port);
       if (this.#bind) this.#transport = this.#bind(this.#serial);
-      const child = this.#spawn(bin, [`@${avd}`, '-port', String(port)]);
+      const child = this.#spawn(
+        bin,
+        emulatorLaunchArgs({
+          avd,
+          port,
+          headless: this.#config.headless,
+          ...(this.#config.emulatorArgs ? { extraArgs: this.#config.emulatorArgs } : {}),
+        }),
+      );
       this.#emulatorDown = null;
       // Both fire async (later tick): without a listener a bad `emulatorPath` would
       // crash the whole server via an unhandled 'error' event. Capture the failure

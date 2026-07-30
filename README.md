@@ -81,11 +81,16 @@ One project can expose several debug targets. A large app can have all three:
 |---------|--------------------------------------------------|-------|
 | web     | **CDP** (Chrome DevTools Protocol), headless by default | DOM |
 | desktop | **X11 / Wayland** input + AT-SPI                 | a11y tree / vision |
-| mobile  | **ADB** (uiautomator + screencap), Android       | view hierarchy / vision |
+| mobile  | **ADB** (uiautomator + screencap), Android, headless by default | view hierarchy / vision |
 
 Three adapters, one shared contract. Each runs **managed** (server launches the
 target) or **attach** (connect to a running one via `cdpUrl` / `adbSerial`).
 Linux first. iOS is out of scope on Linux (macOS-only tooling).
+
+A managed android run boots the emulator windowless — `-no-window` **with**
+`-gpu swiftshader_indirect -no-audio`, because `-no-window` alone still opens a
+host GL context and dies on a box with no display. Set `"headless": false` on
+the target to watch it in a window; append anything else with `emulatorArgs`.
 
 ## Setup
 

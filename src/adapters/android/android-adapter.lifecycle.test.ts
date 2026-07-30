@@ -94,7 +94,7 @@ describe('AndroidAdapter managed teardown', () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     const adapter = AndroidAdapter.create({
-      config: { adapter: 'android', avd: 'test_avd' },
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
       adb: new FakeAdb(),
       ui: new FakeUi([]),
       spawn: () => child,
@@ -126,7 +126,7 @@ describe('AndroidAdapter managed boot', () => {
     // itself rather than spawning `emulator @undefined`.
     let spawns = 0;
     const adapter = AndroidAdapter.create({
-      config: { adapter: 'android' },
+      config: { adapter: 'android', headless: true },
       adb: new FakeAdb(),
       ui: new FakeUi([]),
       spawn: () => {
@@ -147,7 +147,38 @@ describe('AndroidAdapter managed boot', () => {
     const ui = new FakeUi([]);
     let spawned: string[] = [];
     const adapter = AndroidAdapter.create({
-      config: { adapter: 'android', avd: 'test_avd' },
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui,
+      spawn: (bin, args) => {
+        spawned = [bin, ...args];
+        return makeFakeEmulator();
+      },
+      pickPort: async () => 5554,
+      bootWaitMs: 2000,
+    });
+    await adapter.open('com.example');
+    expect(spawned).toEqual([
+      'emulator',
+      '@test_avd',
+      '-port',
+      '5554',
+      '-no-window',
+      '-gpu',
+      'swiftshader_indirect',
+      '-no-audio',
+      '-no-boot-anim',
+    ]);
+    expect(adb.calls.some((c) => c.method === 'adb' && c.args[0] === 'get-state')).toBe(true);
+    expect(adb.calls.some((c) => c.args[0] === 'monkey')).toBe(true);
+  });
+
+  test('headless:false boots a windowed emulator — nothing but the AVD and the port', async () => {
+    const adb = new FakeAdb();
+    const ui = new FakeUi([]);
+    let spawned: string[] = [];
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: false, avd: 'test_avd' },
       adb,
       ui,
       spawn: (bin, args) => {
@@ -159,8 +190,31 @@ describe('AndroidAdapter managed boot', () => {
     });
     await adapter.open('com.example');
     expect(spawned).toEqual(['emulator', '@test_avd', '-port', '5554']);
-    expect(adb.calls.some((c) => c.method === 'adb' && c.args[0] === 'get-state')).toBe(true);
-    expect(adb.calls.some((c) => c.args[0] === 'monkey')).toBe(true);
+  });
+
+  test('emulatorArgs reach the spawned emulator, after the headless flags', async () => {
+    const adb = new FakeAdb();
+    const ui = new FakeUi([]);
+    let spawned: string[] = [];
+    const adapter = AndroidAdapter.create({
+      config: {
+        adapter: 'android',
+        headless: true,
+        avd: 'test_avd',
+        emulatorArgs: ['-wipe-data'],
+      },
+      adb,
+      ui,
+      spawn: (bin, args) => {
+        spawned = [bin, ...args];
+        return makeFakeEmulator();
+      },
+      pickPort: async () => 5554,
+      bootWaitMs: 2000,
+    });
+    await adapter.open('com.example');
+    expect(spawned.at(-1)).toBe('-wipe-data');
+    expect(spawned).toContain('-no-window');
   });
 
   test('spawn failure (bad emulatorPath) rejects loud instead of crashing the process', async () => {
@@ -169,7 +223,12 @@ describe('AndroidAdapter managed boot', () => {
     adb.setResponse('adb get-state', 'unknown');
     const child = makeFakeEmulator();
     const adapter = AndroidAdapter.create({
-      config: { adapter: 'android', avd: 'test_avd', emulatorPath: '/nope/emulator' },
+      config: {
+        adapter: 'android',
+        headless: true,
+        avd: 'test_avd',
+        emulatorPath: '/nope/emulator',
+      },
       adb,
       ui: new FakeUi([]),
       spawn: () => {
@@ -189,7 +248,7 @@ describe('AndroidAdapter managed boot', () => {
     adb.setResponse('adb get-state', 'unknown');
     const child = makeFakeEmulator();
     const adapter = AndroidAdapter.create({
-      config: { adapter: 'android', avd: 'broken_avd' },
+      config: { adapter: 'android', headless: true, avd: 'broken_avd' },
       adb,
       ui: new FakeUi([]),
       spawn: () => {
@@ -208,7 +267,7 @@ describe('AndroidAdapter managed boot', () => {
     const adb = new FakeAdb();
     adb.setResponse('adb get-state', 'unknown'); // never becomes 'device'
     const adapter = AndroidAdapter.create({
-      config: { adapter: 'android', avd: 'test_avd' },
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
       adb,
       ui: new FakeUi([]),
       spawn: () => makeFakeEmulator(),
@@ -228,7 +287,7 @@ describe('AndroidAdapter managed boot', () => {
       adb: async (args) => (args[0] === 'get-state' ? await getState() : ''),
     };
     return AndroidAdapter.create({
-      config: { adapter: 'android', avd: 'test_avd' },
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
       adb,
       ui: new FakeUi([]),
       spawn: () => makeFakeEmulator(undefined),
@@ -289,7 +348,7 @@ describe('AndroidAdapter device binding', () => {
     const spawns: string[][] = [];
     let next = 0;
     const adapter = AndroidAdapter.create({
-      config: { adapter: 'android', avd: 'test_avd' },
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
       adb: (serial) => {
         const adb = new FakeAdb(serial);
         bound.push(adb);
@@ -311,7 +370,19 @@ describe('AndroidAdapter device binding', () => {
   test('managed open spawns on a picked port and binds adb to that serial', async () => {
     const { adapter, bound, spawns } = makeBoundAdapter([5560]);
     await adapter.open('com.example');
-    expect(spawns).toEqual([['emulator', '@test_avd', '-port', '5560']]);
+    expect(spawns).toEqual([
+      [
+        'emulator',
+        '@test_avd',
+        '-port',
+        '5560',
+        '-no-window',
+        '-gpu',
+        'swiftshader_indirect',
+        '-no-audio',
+        '-no-boot-anim',
+      ],
+    ]);
     expect(bound.map((a) => a.serial)).toEqual(['emulator-5560']);
     // Every device call went through the bound transport — nothing is left to `-e`.
     expect(bound[0]?.calls.some((c) => c.args[0] === 'monkey')).toBe(true);
@@ -341,7 +412,7 @@ describe('AndroidAdapter device binding', () => {
   test('attach binds the transport to the configured serial', () => {
     const bound: FakeAdb[] = [];
     AndroidAdapter.create({
-      config: { adapter: 'android', avd: 'test_avd', adbSerial: 'emulator-5582' },
+      config: { adapter: 'android', headless: true, avd: 'test_avd', adbSerial: 'emulator-5582' },
       adb: (serial) => {
         const adb = new FakeAdb(serial);
         bound.push(adb);
@@ -356,7 +427,7 @@ describe('AndroidAdapter device binding', () => {
     const adb = new FakeAdb('emulator-5582');
     let spawns = 0;
     const adapter = AndroidAdapter.create({
-      config: { adapter: 'android', avd: 'test_avd', adbSerial: 'emulator-5582' },
+      config: { adapter: 'android', headless: true, avd: 'test_avd', adbSerial: 'emulator-5582' },
       adb,
       ui: new FakeUi([]),
       spawn: () => {

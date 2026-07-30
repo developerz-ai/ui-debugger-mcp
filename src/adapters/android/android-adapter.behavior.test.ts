@@ -317,7 +317,7 @@ describe('AndroidAdapter error wrapping', () => {
       },
     };
     const adapter = AndroidAdapter.create({
-      config: { adapter: 'android', avd: 'test_avd' },
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
       adb,
       ui,
     });
@@ -332,7 +332,7 @@ describe('AndroidAdapter error wrapping', () => {
       },
     };
     const adapter = AndroidAdapter.create({
-      config: { adapter: 'android', avd: 'test_avd' },
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
       adb,
       ui,
     });
