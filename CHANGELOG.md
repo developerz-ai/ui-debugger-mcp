@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **A managed android run is headless by default.** The adapter used to spawn
+  `emulator @avd -port <p>` and nothing else, which opens a window on a desktop
+  and *fails to boot at all* on a box with no display — `-no-window` on its own
+  is not enough either, since the emulator still asks for a host GL context.
+  Managed boot now passes `-no-window -gpu swiftshader_indirect -no-audio
+  -no-boot-anim`, matching the web adapter's headless-by-default posture.
+
+  Watching a run in a window is `"headless": false` on the target.
+
+### Added
+
+- `headless` (boolean, default `true`) and `emulatorArgs` (string[], appended
+  verbatim) on android targets. Both are managed-only — attach binds to a
+  serial and never launches anything.
+
 ## [1.7.0] - 2026-07-27
 
 Two ways a run went wrong before it started: the project was still held by a run

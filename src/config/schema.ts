@@ -136,6 +136,8 @@ export const AndroidTargetSchema = z
     avd: z.string().optional(), // required in managed mode (see the refinement below)
     emulatorPath: z.string().nullish(), // null = auto-detect from SDK (managed)
     adbSerial: z.string().nullish(), // set → attach to a running device, no start/stop
+    headless: z.boolean().default(true), // managed-only; same default as the web target
+    emulatorArgs: z.array(z.string()).optional(), // managed-only, appended to the emulator argv
   })
   .superRefine((target, ctx) => {
     if (target.adbSerial == null && target.avd === undefined) {

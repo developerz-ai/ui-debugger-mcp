@@ -36,7 +36,7 @@ test('createAdapter throws TargetNotFoundError for a target name absent from con
 });
 
 test('createAdapter names only the requested target, not the ones that DO exist', async () => {
-  const config = baseConfig({ mobile: { adapter: 'android', avd: 'pixel' } });
+  const config = baseConfig({ mobile: { adapter: 'android', headless: true, avd: 'pixel' } });
   await expect(createAdapter('web', config, '/tmp/profile')).rejects.toThrow(TargetNotFoundError);
 });
 
@@ -78,7 +78,7 @@ test('createAdapter dispatches a `desktop` target to DesktopAdapter', async () =
 });
 
 test('createAdapter dispatches an `android` target to AndroidAdapter', async () => {
-  const target = { adapter: 'android' as const, avd: 'pixel_7' };
+  const target = { adapter: 'android' as const, headless: true, avd: 'pixel_7' };
   const config = baseConfig({ mobile: target });
 
   const adapter = await createAdapter('mobile', config, '/tmp/unused-profile');

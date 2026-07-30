@@ -33,7 +33,7 @@ const CONFIG: ResolvedConfig = {
   targets: {
     web: { adapter: 'browser', url: 'http://localhost:3000', headless: true },
     screen: { adapter: 'desktop', launch: 'myapp' },
-    phone: { adapter: 'android', avd: 'pixel', adbSerial: 'emulator-5554' },
+    phone: { adapter: 'android', headless: true, avd: 'pixel', adbSerial: 'emulator-5554' },
   },
   provider: { apiKey: 'sk-test', baseUrl: 'https://openrouter.ai/api/v1' },
 };

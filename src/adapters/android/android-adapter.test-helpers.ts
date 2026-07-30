@@ -111,7 +111,7 @@ export function makeAdapter(opts: Partial<AndroidAdapterInit> & { nodes?: Androi
   const adb = new FakeAdb();
   const ui = new FakeUi(opts.nodes ?? []);
   const adapter = AndroidAdapter.create({
-    config: opts.config ?? { adapter: 'android', avd: 'test_avd' },
+    config: opts.config ?? { adapter: 'android', headless: true, avd: 'test_avd' },
     adb,
     ui,
   });
@@ -125,7 +125,7 @@ export function makeAttachAdapter(
   const adb = new FakeAdb();
   const ui = new FakeUi(nodes);
   const adapter = AndroidAdapter.create({
-    config: { adapter: 'android', avd: 'test_avd', adbSerial: serial },
+    config: { adapter: 'android', headless: true, avd: 'test_avd', adbSerial: serial },
     adb,
     ui,
   });
