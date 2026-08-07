@@ -1,0 +1,44 @@
+# yaml-language-server: $schema=https://developerz.ai/schemas/maintainer.v1.json
+# developerz.ai maintainer policy — developerz-ai/ui-debugger-mcp
+#
+# Second repo onboarded to the maintainer loops after developerz-ai/wurk.
+# Deliberately minimal: everything not set here rides the schema defaults
+# (packages/policy/src/defaults.ts). Only the values below are pinned, and each
+# is pinned for a stated reason.
+version: 1
+
+pr:
+  # PINNED OFF. The schema default is `true`, so omitting this key ENABLES
+  # auto-merge — the opposite of what a first onboarding should do on a public
+  # repo. Matches the posture on developerz-ai/wurk (wurk#345): the bot watches
+  # CI and reports, a human merges.
+  #
+  # `pr.approval` stays at its default (false) for the same reason: an approving
+  # bot review can satisfy a "1 required review" branch protection all by
+  # itself, which would put a merge entirely in bot hands.
+  auto_merge: false
+
+handoff:
+  # Grants the fleet-dispatch capability so a qualified task can be claimed by a
+  # BYOVM box. Without this the mode defaults to `none` and the coding loop —
+  # the thing this onboarding exists to exercise — never runs.
+  mode: webhook
+  # Validation placeholder only. The fleet `direct` sink claims the durable
+  # tasks row and never fires an external webhook
+  # (developerz-ai/developerz.ai#1026). Same pattern as wurk's live policy.
+  # Omitting it makes the WHOLE file fail semantic validation and be silently
+  # discarded — which is exactly what happened on wurk for weeks (wurk#345).
+  webhook_ref: wh_fleet_placeholder
+
+review:
+  # No `force: true` here, unlike wurk. That flag exists to beat the incumbent
+  # check when CodeRabbit is active; this repo has zero CodeRabbit activity and
+  # no `.coderabbit.yaml`, so there is no incumbent to defer to and the native
+  # lane engages on its own.
+  learnings: false # no KB write-back from a public repo yet
+  anti_noise:
+    # All three keys set together: the schema default for `anti_noise` is a
+    # whole object, so a partial override is not a merge.
+    severity_floor: minor
+    max_comments: 10 # 10, not the schema's 30 — first live pass, keep it quiet
+    dedupe: true
