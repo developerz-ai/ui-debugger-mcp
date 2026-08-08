@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=https://developerz.ai/schemas/maintainer.v1.json
+# developerz.ai maintainer policy — developerz-ai/ui-debugger-mcp
+#
+# Second repo onboarded to the maintainer loops after developerz-ai/wurk.
+# Deliberately minimal: everything not set here rides the schema defaults
+# (packages/policy/src/defaults.ts). Only the values below are pinned, and each
+# is pinned for a stated reason.
+version: 1
+
+pr:
+  # PINNED OFF. The schema default is `true` (dz#101), so omitting this key
+  # ENABLES auto-merge — the opposite of what a first onboarding should do on a
+  # public repo. Matches developerz-ai/wurk (wurk#345): the bot watches CI and
+  # reports, a human merges.
+  #
+  # The bot also never posts an approving review here: that knob is
+  # `review.approval` (default false), NOT `pr.approval` — `PrSchema` is a plain
+  # `z.object`, so an unknown `pr.approval` key would be silently stripped and
+  # look set while doing nothing.
+  auto_merge: false
+
+handoff:
+  # `fleet`, not `webhook`. Both grant the same `HandoffWebhook` capability
+  # (packages/tools/src/policy-gate.ts:83), so MCP `task_create` enqueues onto
+  # the fleet `direct` sink either way. The difference is what the issue loop
+  # says out loud: under `webhook` it first promises a public reporter "I can
+  # hand this off to the maintainer's coding agent"
+  # (packages/agent/src/prompts/issue-loop.md:162) — `handoff.ask_reporter_first`
+  # defaults TRUE — and then, because a placeholder `webhook_ref` resolves to no
+  # registered webhook, raises `WebhookRefNotFoundError`, labels `ready-for-human`
+  # and ends `escalated` (:182-190). A promise we cannot keep, on a public issue.
+  # `fleet` takes the truthful weaker copy ("I'll scope it and flag it for the
+  # maintainer", :165-167) and needs no placeholder ref at all (dz#1026).
+  mode: fleet
+
+review:
+  # Native review stays OFF until switching it on is a decision somebody makes.
+  #
+  # It would be inert today regardless: CodeRabbit is the incumbent on this repo
+  # (it reviewed #51 on 2026-07-30 and commented on #57), so `planReview` returns
+  # `defer: coderabbit_active` (packages/review/src/dispatch.ts:211) and every
+  # other `review:` key is dead config. But that gate is a rolling 14-day
+  # ACTIVITY window (dispatch.ts:96-112), not a posture — fourteen quiet days and
+  # the native reviewer starts reviewing this public repo's PRs with nobody
+  # having chosen that. `enabled: false` is checked first in `planReview` (:177),
+  # ahead of every other gate, so the skip can never depend on the incumbent
+  # staying alive. Same fence the platform repo's own policy uses.
+  #
+  # To run the native lane here, set `enabled: true` + `force: true` together
+  # (force is what beats an active incumbent) — deliberately, not by lapse.
+  enabled: false
