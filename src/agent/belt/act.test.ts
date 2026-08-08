@@ -622,17 +622,20 @@ test('a failed act drains too, so its loads never surface on the next step', asy
   expect(res.navigated).toBeUndefined();
 });
 
-test('a failing takeUnrequestedLoads() never fails an otherwise-good act', async () => {
+test('a failing takeUnrequestedLoads() surfaces — an unverified act is not a success', async () => {
+  // If the load queue can't be drained, whether the act replaced the document is
+  // unknown. Failing loud beats a false `ok: true` the driver would `report` a page
+  // it never observed against (fail fast, no silent fallback).
   const { adapter } = fakeAdapter(button);
   const flaky: Adapter = {
     ...adapter,
     takeUnrequestedLoads: async () => {
-      throw new Error('page closed');
+      throw new AdapterError('page closed');
     },
   };
-  const res = await runAct(flaky, fakeRecorder().recorder, { action: 'click', target: 'Save' });
-  expect(res.ok).toBe(true);
-  expect(res.navigated).toBeUndefined();
+  await expect(
+    runAct(flaky, fakeRecorder().recorder, { action: 'click', target: 'Save' }),
+  ).rejects.toThrow(AdapterError);
 });
 
 // --- concurrency: a step's batched acts must not interleave -----------------

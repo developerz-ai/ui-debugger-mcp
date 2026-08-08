@@ -396,6 +396,11 @@ function loadablePage(url: string) {
     ...fakePage(),
     url: () => url,
     bringToFront: async () => undefined,
+    // Real `goto` resolves on its OWN `load` — fire it so `open`'s own-load trim is
+    // exercised (the fake `fakePage().goto` is inert and never would).
+    goto: async () => {
+      for (const h of listeners) h(page);
+    },
     on: (event: string, handler: (page: unknown) => void) => {
       if (event === 'load') listeners.add(handler);
     },
@@ -411,8 +416,8 @@ function loadablePage(url: string) {
   };
 }
 
-test('a load the driver did not ask for is queued, and reading it drains', async () => {
-  const { page, fireLoad } = loadablePage('http://localhost:5173/?email=a%40b.com');
+test('a load the driver did not ask for is queued credential-redacted, and reading it drains', async () => {
+  const { page, fireLoad } = loadablePage('http://localhost:5173/reset?token=super-secret-value');
   const chromium = fakeLauncher({
     launchPersistentContext: async () => ({ pages: () => [page], close: async () => undefined }),
   });
@@ -422,14 +427,18 @@ test('a load the driver did not ask for is queued, and reading it drains', async
     chromium,
   });
 
-  fireLoad(); // the page submitted a form without preventDefault
+  fireLoad(); // the page replaced its document on its own (form submit / redirect)
 
-  expect(await adapter.takeUnrequestedLoads()).toEqual(['http://localhost:5173/?email=a%40b.com']);
+  // The credential in the URL never enters the queue — it feeds the driver's context
+  // and the durable findings, the same posture `network.log` holds for `?token=`.
+  const [surfaced] = await adapter.takeUnrequestedLoads();
+  expect(surfaced).not.toContain('super-secret-value');
+  expect(surfaced).toContain('token=<redacted,');
   // Drained: the next act must not be blamed for a reload it did not cause.
   expect(await adapter.takeUnrequestedLoads()).toEqual([]);
 });
 
-test('a navigation the driver ASKED for is not reported as unrequested', async () => {
+test('open drops only its OWN load, keeping a pre-existing unrequested one', async () => {
   const { page, fireLoad } = loadablePage('http://localhost:5173/next');
   const chromium = fakeLauncher({
     launchPersistentContext: async () => ({ pages: () => [page], close: async () => undefined }),
@@ -440,13 +449,17 @@ test('a navigation the driver ASKED for is not reported as unrequested', async (
     chromium,
   });
 
-  // Real `goto` resolves on `load`, so the deliberate navigation's own entry is
-  // already queued when `open` returns — and `open` is what drops it.
-  await adapter.open('/next');
+  // A load the page performed on its own BEFORE the driver asked to navigate — a
+  // surprise that must survive the upcoming `open`.
   fireLoad();
-  await adapter.open('/again');
+  // The driver now navigates; real `goto` resolves on its OWN `load` (the fake fires
+  // it too), which `open` drops — without discarding the pre-existing surprise.
+  await adapter.open('/next');
 
-  expect(await adapter.takeUnrequestedLoads()).toEqual([]);
+  // Exactly one left: the pre-existing surprise. `goto`'s own entry was trimmed and
+  // the surprise was not — the old `this.#loads = []` wiped both. (Both carry the
+  // fake's single url, so the COUNT is the signal: 0 = over-cleared, 2 = under-trimmed.)
+  expect(await adapter.takeUnrequestedLoads()).toEqual(['http://localhost:5173/next']);
 });
 
 test('selectTab moves the load watch, so a background tab’s reload is not the flow’s', async () => {

@@ -310,6 +310,10 @@ export interface Adapter {
    *
    * {@link open} drains its own load before returning, so a navigation the
    * driver ASKED for never surfaces here — what is left is exactly the surprise.
+   *
+   * Returned URLs are credential-redacted (a query secret like `?code=`/`?token=`
+   * becomes `<redacted, N chars>`): this list reaches the model's context and the
+   * durable findings, the same posture the network capture holds for its URLs.
    */
   takeUnrequestedLoads?(): Promise<string[]>;
 

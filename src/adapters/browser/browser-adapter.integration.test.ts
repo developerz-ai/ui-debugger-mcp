@@ -117,6 +117,8 @@ const FIXTURE_HTML = `<!DOCTYPE html>
        with it. Nothing on screen distinguishes that from a click that did nothing. -->
   <form id="newsletter" action="/">
     <input id="newsletter-email" name="email" value="a@b.com">
+    <!-- A credential rides the GET query — the reload URL must reach the run redacted. -->
+    <input name="token" type="hidden" value="super-secret-token">
     <button id="newsletter-go" type="submit">Subscribe</button>
   </form>
   <!-- enabled-state matrix: native disabled/readonly, inherited fieldset, ARIA -->
@@ -713,7 +715,11 @@ const FRAME2_HTML = `<!DOCTYPE html>
 
     const loads = await adapter.takeUnrequestedLoads();
     expect(loads.length).toBe(1);
-    expect(loads[0]).toContain('email=a%40b.com');
+    // The submit reloaded the document with a credential in the query. The load is
+    // surfaced (a blind driver would otherwise call the submit a success), but the
+    // secret is redacted before it reaches the driver's context or the findings.
+    expect(loads[0]).not.toContain('super-secret-token');
+    expect(loads[0]).toContain('token=<redacted,');
     // Drained by that read: the next act must not inherit this reload.
     expect(await adapter.takeUnrequestedLoads()).toEqual([]);
   }, 20_000);

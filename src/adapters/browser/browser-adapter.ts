@@ -60,6 +60,7 @@ import {
   unreachableFailure,
 } from './launch.js';
 import { locateAcrossFrames, regionAcrossFrames, waitAcrossFrames } from './locate.js';
+import { redactUrl } from './log-format.js';
 import { normalizeQuery } from './query.js';
 
 // The adapter stays the one import surface its callers (and tests) know: the
@@ -142,12 +143,17 @@ export class BrowserAdapter implements Adapter {
    * {@link Adapter.takeUnrequestedLoads}. `load` fires once per new document and
    * never for a same-document history change, which is the distinction that
    * matters: a SPA route change keeps the driver's state, a new document does not.
+   *
+   * URLs are credential-redacted as they enter ({@link redactUrl}). This queue
+   * reaches the driver's context and the durable findings, and `page.url()` can
+   * carry an OAuth `?code=`, a reset `?token=` or a presigned `?signature=` — the
+   * same secrets `network.log` already keeps out of both.
    */
   #loads: string[] = [];
 
   /** Bound once so {@link BrowserAdapter.selectTab} can move it between pages. */
   readonly #onLoad = (page: Page): void => {
-    this.#loads.push(page.url());
+    this.#loads.push(redactUrl(page.url()));
   };
 
   private constructor(handles: AdapterHandles) {
@@ -246,6 +252,12 @@ export class BrowserAdapter implements Adapter {
     await this.#run('open', async () => {
       const resolved = resolveTargetUrl(target, this.#config.url);
       const url = appendDebugLogin(resolved, this.#config.debugLogin);
+      // `goto` resolves on `load`, so this navigation's own entry lands at the TAIL
+      // of the queue. Snapshot the depth first, then drop only what this call adds:
+      // a load the page performed on its own BEFORE we were asked to navigate is
+      // still a surprise the driver must hear about, so it survives the trim.
+      // Wiping the whole queue here (`this.#loads = []`) lost that pre-existing load.
+      const before = this.#loads.length;
       try {
         // The first navigation spends the run's budget, not a fresh 30s of its own.
         await this.#page.goto(url, { timeout: capWait(NAV_TIMEOUT_MS, timeoutMs) });
@@ -254,10 +266,7 @@ export class BrowserAdapter implements Adapter {
         // port, instead of letting the run report an empty page for 300 seconds.
         throw unreachableFailure(error, url) ?? error;
       }
-      // `goto` resolves on `load`, so this navigation's own entry is already
-      // queued. Drop it: the queue reports what the driver did NOT ask for, and
-      // this one it asked for. One seam — nothing downstream re-filters by action.
-      this.#loads = [];
+      this.#loads.length = before;
     });
   }
 

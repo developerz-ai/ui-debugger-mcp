@@ -135,6 +135,10 @@ export interface ActResult {
    *
    * A navigation the driver ASKED for never lands here — {@link Adapter.open}
    * drains its own load, so this is only ever the surprise.
+   *
+   * Credential-redacted at the adapter (see {@link Adapter.takeUnrequestedLoads}),
+   * so both this field and the trail note carry no query secret — the values reach
+   * the driver's context and the persisted findings.
    */
   navigated?: string[];
 }
@@ -386,8 +390,10 @@ export async function runAct(
   } catch (error) {
     // Drain on the failure path too. The queue is cumulative, so a load left
     // behind by a failed act would be reported by the NEXT one — pinning the
-    // reload on an action that did not cause it.
-    await takeLoads(adapter);
+    // reload on an action that did not cause it. Best-effort here: the act has
+    // already failed, so a drain that also throws must not mask the real error
+    // nor skip the trail record below.
+    await takeLoads(adapter).catch(() => undefined);
     trail?.record({ step: label, ok: false, note: failureNote(error) });
     throw error;
   } finally {
@@ -399,17 +405,18 @@ export async function runAct(
 
 /**
  * The full-document loads this act caused without being asked to, draining the
- * adapter's queue — see {@link ActResult.navigated}. Never fails an otherwise-good
- * act: a target with no document concept, or one that throws mid-teardown, reports
- * none. Called on the failure path too, so nothing bleeds into the next step.
+ * adapter's queue — see {@link ActResult.navigated}. A target with no document
+ * concept reports none.
+ *
+ * A drain FAILURE propagates (fail loud, never a silent fallback): if the queue
+ * can't be read, whether this act replaced the document is unknown, and an
+ * unverified act must not reach the driver as a success — it would `report` a page
+ * it never actually observed. The failure path drains best-effort (see
+ * {@link runAct}), where the act is already known-failed.
  */
 async function takeLoads(adapter: Adapter): Promise<string[]> {
   if (!adapter.takeUnrequestedLoads) return [];
-  try {
-    return await adapter.takeUnrequestedLoads();
-  } catch {
-    return [];
-  }
+  return adapter.takeUnrequestedLoads();
 }
 
 /**
