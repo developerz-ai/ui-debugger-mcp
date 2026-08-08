@@ -296,6 +296,23 @@ export interface Adapter {
    */
   selectTab?(index: number): Promise<void>;
 
+  /**
+   * URLs of full-document loads the driven target performed on its own, oldest
+   * first — DRAINED by reading, so each caller gets only what happened since the
+   * last read. OPTIONAL: implemented by targets with a document concept (web).
+   *
+   * A new document wipes every bit of in-page state, and nothing on screen says
+   * so: a form that submits without `preventDefault`, a click on a plain link,
+   * a session that expires into a redirect. The driver reads the fresh page,
+   * finds its own earlier work undone, and reports the action it just took as
+   * having done nothing — or, worse, as having worked. The queue is what lets
+   * the belt say "the page reloaded" on the step that caused it.
+   *
+   * {@link open} drains its own load before returning, so a navigation the
+   * driver ASKED for never surfaces here — what is left is exactly the surprise.
+   */
+  takeUnrequestedLoads?(): Promise<string[]>;
+
   /** Release the target: stop a **managed** process; for **attach**, disconnect only — never stop it. */
   close(): Promise<void>;
 }

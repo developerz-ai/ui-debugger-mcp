@@ -547,6 +547,94 @@ test('a failing tabs() never fails an otherwise-good act', async () => {
   expect(res.tabs).toBeUndefined();
 });
 
+// --- unrequested full-document loads ----------------------------------------
+
+/**
+ * Adapter whose driven page loaded a new document during the act — the shape a
+ * form submit with no `preventDefault`, or a click on a plain link, produces.
+ * The queue drains on read, exactly like the real adapter's.
+ */
+function loadingAdapter(
+  urls: string[],
+  found: Node | null = button,
+): { adapter: Adapter; drains: number } {
+  const { adapter } = fakeAdapter(found);
+  const queue = [...urls];
+  const state = { drains: 0 };
+  return {
+    adapter: {
+      ...adapter,
+      takeUnrequestedLoads: async () => {
+        state.drains += 1;
+        return queue.splice(0, queue.length);
+      },
+    },
+    get drains() {
+      return state.drains;
+    },
+  };
+}
+
+test('act reports a full-document load the driver did not ask for', async () => {
+  const { adapter } = loadingAdapter(['http://x/?email=a%40b.com']);
+  const res = await runAct(adapter, fakeRecorder().recorder, {
+    action: 'click',
+    target: 'Subscribe',
+  });
+  expect(res.navigated).toEqual(['http://x/?email=a%40b.com']);
+});
+
+test('the reloaded step carries the load on the trail, still ok', async () => {
+  const { adapter } = loadingAdapter(['http://x/?email=a%40b.com']);
+  const trail = createActTrail();
+  await runAct(adapter, fakeRecorder().recorder, { action: 'click', target: 'Subscribe' }, trail);
+  const [step] = await trail.settled();
+  expect(step?.ok).toBe(true);
+  expect(step?.note).toContain('http://x/?email=a%40b.com');
+  expect(step?.note).toMatch(/state was lost/i);
+});
+
+test('act stays silent when nothing navigated', async () => {
+  const { adapter } = loadingAdapter([]);
+  const res = await runAct(adapter, fakeRecorder().recorder, { action: 'click', target: 'Save' });
+  expect(res.navigated).toBeUndefined();
+});
+
+test('a deliberate navigate is not reported as unrequested', async () => {
+  // The adapter drains its own `open`, so nothing is left to report — but the
+  // drain must still HAPPEN, or the next act inherits this navigation.
+  const loader = loadingAdapter([]);
+  const res = await runAct(loader.adapter, fakeRecorder().recorder, {
+    action: 'navigate',
+    target: 'http://x/next',
+  });
+  expect(res.navigated).toBeUndefined();
+  expect(loader.drains).toBe(1);
+});
+
+test('a failed act drains too, so its loads never surface on the next step', async () => {
+  // A bare `wait` throws inside performAct, so the act fails with the surprise
+  // load already queued from whatever happened before it.
+  const loader = loadingAdapter(['http://x/gone']);
+  const recorder = fakeRecorder().recorder;
+  await expect(runAct(loader.adapter, recorder, { action: 'wait' })).rejects.toThrow(AgentError);
+  const res = await runAct(loader.adapter, recorder, { action: 'click', target: 'Save' });
+  expect(res.navigated).toBeUndefined();
+});
+
+test('a failing takeUnrequestedLoads() never fails an otherwise-good act', async () => {
+  const { adapter } = fakeAdapter(button);
+  const flaky: Adapter = {
+    ...adapter,
+    takeUnrequestedLoads: async () => {
+      throw new Error('page closed');
+    },
+  };
+  const res = await runAct(flaky, fakeRecorder().recorder, { action: 'click', target: 'Save' });
+  expect(res.ok).toBe(true);
+  expect(res.navigated).toBeUndefined();
+});
+
 // --- concurrency: a step's batched acts must not interleave -----------------
 
 test('the act tool serializes concurrent calls — batched types never interleave', async () => {

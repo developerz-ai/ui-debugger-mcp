@@ -381,3 +381,92 @@ test('scroll: an off-viewport `within` Node fails loud instead of scrolling blin
     /outside the viewport/,
   );
 });
+
+// --- unrequested full-document loads -----------------------------------------
+
+/**
+ * A fake page whose `load` listeners can actually be fired, so a test can stage
+ * the thing the real adapter watches for: the page replacing its own document.
+ * `fakePage`'s `on`/`off` are inert stubs — every other suite only needs the
+ * adapter not to crash while wiring them.
+ */
+function loadablePage(url: string) {
+  const listeners = new Set<(page: unknown) => void>();
+  const page = {
+    ...fakePage(),
+    url: () => url,
+    bringToFront: async () => undefined,
+    on: (event: string, handler: (page: unknown) => void) => {
+      if (event === 'load') listeners.add(handler);
+    },
+    off: (event: string, handler: (page: unknown) => void) => {
+      if (event === 'load') listeners.delete(handler);
+    },
+  };
+  return {
+    page,
+    fireLoad: () => {
+      for (const h of listeners) h(page);
+    },
+  };
+}
+
+test('a load the driver did not ask for is queued, and reading it drains', async () => {
+  const { page, fireLoad } = loadablePage('http://localhost:5173/?email=a%40b.com');
+  const chromium = fakeLauncher({
+    launchPersistentContext: async () => ({ pages: () => [page], close: async () => undefined }),
+  });
+  const adapter = await BrowserAdapter.create({
+    config: webTarget(),
+    profileDir: '/tmp/unused-profile',
+    chromium,
+  });
+
+  fireLoad(); // the page submitted a form without preventDefault
+
+  expect(await adapter.takeUnrequestedLoads()).toEqual(['http://localhost:5173/?email=a%40b.com']);
+  // Drained: the next act must not be blamed for a reload it did not cause.
+  expect(await adapter.takeUnrequestedLoads()).toEqual([]);
+});
+
+test('a navigation the driver ASKED for is not reported as unrequested', async () => {
+  const { page, fireLoad } = loadablePage('http://localhost:5173/next');
+  const chromium = fakeLauncher({
+    launchPersistentContext: async () => ({ pages: () => [page], close: async () => undefined }),
+  });
+  const adapter = await BrowserAdapter.create({
+    config: webTarget(),
+    profileDir: '/tmp/unused-profile',
+    chromium,
+  });
+
+  // Real `goto` resolves on `load`, so the deliberate navigation's own entry is
+  // already queued when `open` returns — and `open` is what drops it.
+  await adapter.open('/next');
+  fireLoad();
+  await adapter.open('/again');
+
+  expect(await adapter.takeUnrequestedLoads()).toEqual([]);
+});
+
+test('selectTab moves the load watch, so a background tab’s reload is not the flow’s', async () => {
+  const first = loadablePage('http://localhost:5173/one');
+  const second = loadablePage('http://localhost:5173/two');
+  const chromium = fakeLauncher({
+    launchPersistentContext: async () => ({
+      pages: () => [first.page, second.page],
+      close: async () => undefined,
+    }),
+  });
+  const adapter = await BrowserAdapter.create({
+    config: webTarget(),
+    profileDir: '/tmp/unused-profile',
+    chromium,
+  });
+
+  await adapter.selectTab(1);
+  first.fireLoad(); // the tab we left reloads itself — not the driver's business
+  second.fireLoad(); // the tab we drive reloads — it is
+
+  expect(await adapter.takeUnrequestedLoads()).toEqual(['http://localhost:5173/two']);
+});

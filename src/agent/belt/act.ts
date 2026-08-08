@@ -122,6 +122,21 @@ export interface ActResult {
    * nothing on the single-tab pages that are the norm.
    */
   tabs?: TabInfo[];
+  /**
+   * URLs of full-document loads this act caused without being asked to — present
+   * ONLY when there were any.
+   *
+   * A new document resets the page: typed fields are empty, a cart counter is
+   * back to zero, a session may be gone. Nothing on screen distinguishes that
+   * from "my click did nothing", so a driver that cannot see it reports the
+   * reload-causing action as a success and then reasons about a page it has
+   * never observed. Measured on `dummy/web`: a Subscribe click reloaded the
+   * document and the run's summary called the newsletter working (#60).
+   *
+   * A navigation the driver ASKED for never lands here — {@link Adapter.open}
+   * drains its own load, so this is only ever the surprise.
+   */
+  navigated?: string[];
 }
 
 /**
@@ -352,16 +367,27 @@ export async function runAct(
     label = await performAct(adapter, input, origin);
     const png = await adapter.screenshot();
     const screenshot = await recorder.saveScreenshot(label, png);
+    const navigated = await takeLoads(adapter);
     await recorder.appendLog('agent', `act ${label} → ${screenshot}`);
-    trail?.record({ step: label, ok: true, screenshot });
+    trail?.record({
+      step: label,
+      ok: true,
+      screenshot,
+      ...(navigated.length > 0 ? { note: reloadNote(navigated) } : {}),
+    });
     return {
       action: input.action,
       label,
       ok: true,
       screenshot,
+      ...(navigated.length > 0 ? { navigated } : {}),
       ...(await extraTabs(adapter)),
     };
   } catch (error) {
+    // Drain on the failure path too. The queue is cumulative, so a load left
+    // behind by a failed act would be reported by the NEXT one — pinning the
+    // reload on an action that did not cause it.
+    await takeLoads(adapter);
     trail?.record({ step: label, ok: false, note: failureNote(error) });
     throw error;
   } finally {
@@ -369,6 +395,30 @@ export async function runAct(
     // that is missing the very step it waited for.
     settle?.();
   }
+}
+
+/**
+ * The full-document loads this act caused without being asked to, draining the
+ * adapter's queue — see {@link ActResult.navigated}. Never fails an otherwise-good
+ * act: a target with no document concept, or one that throws mid-teardown, reports
+ * none. Called on the failure path too, so nothing bleeds into the next step.
+ */
+async function takeLoads(adapter: Adapter): Promise<string[]> {
+  if (!adapter.takeUnrequestedLoads) return [];
+  try {
+    return await adapter.takeUnrequestedLoads();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * What the step trail says about a reload. Names the destination and the
+ * consequence — the driver's next read is against a page it has not seen, and
+ * anything it had typed, added or signed into is gone.
+ */
+function reloadNote(urls: string[]): string {
+  return `the page loaded a new document (${urls.join(', ')}) — in-page state was lost, re-read the page before trusting anything observed before this step`;
 }
 
 /**
@@ -419,7 +469,7 @@ export function createActTool(
 
   return tool({
     description:
-      'Drive the target with one action, chosen by action: click | type | key | scroll | navigate | wait | switch_tab. Resolves target via find, then routes to the adapter (click/type/open/waitFor) and records a step to agent.log plus a post-action screenshot. Returns tabs when more than one is open — a click may have opened one. Use observe to read state before and after.',
+      'Drive the target with one action, chosen by action: click | type | key | scroll | navigate | wait | switch_tab. Resolves target via find, then routes to the adapter (click/type/open/waitFor) and records a step to agent.log plus a post-action screenshot. Returns tabs when more than one is open — a click may have opened one. Returns navigated when the action reloaded the document without being asked to (a form that submits without preventDefault, a plain link, an expired session): the page was replaced and every bit of in-page state is gone, so re-read before concluding anything — and treat a submit that only reloads as a bug, not a success. Use observe to read state before and after.',
     inputSchema: ActInputSchema,
     execute: (input) => {
       // Enter the trail's gate NOW, not when this act's turn on the queue comes up.
