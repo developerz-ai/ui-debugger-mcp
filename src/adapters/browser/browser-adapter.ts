@@ -60,6 +60,7 @@ import {
   unreachableFailure,
 } from './launch.js';
 import { locateAcrossFrames, regionAcrossFrames, waitAcrossFrames } from './locate.js';
+import { redactUrl } from './log-format.js';
 import { normalizeQuery } from './query.js';
 
 // The adapter stays the one import surface its callers (and tests) know: the
@@ -137,6 +138,24 @@ export class BrowserAdapter implements Adapter {
   readonly #mode: 'managed' | 'attach';
   readonly #capture: CdpCapture;
 
+  /**
+   * Full-document loads the page performed on its own, oldest first — see
+   * {@link Adapter.takeUnrequestedLoads}. `load` fires once per new document and
+   * never for a same-document history change, which is the distinction that
+   * matters: a SPA route change keeps the driver's state, a new document does not.
+   *
+   * URLs are credential-redacted as they enter ({@link redactUrl}). This queue
+   * reaches the driver's context and the durable findings, and `page.url()` can
+   * carry an OAuth `?code=`, a reset `?token=` or a presigned `?signature=` — the
+   * same secrets `network.log` already keeps out of both.
+   */
+  #loads: string[] = [];
+
+  /** Bound once so {@link BrowserAdapter.selectTab} can move it between pages. */
+  readonly #onLoad = (page: Page): void => {
+    this.#loads.push(redactUrl(page.url()));
+  };
+
   private constructor(handles: AdapterHandles) {
     this.#config = handles.config;
     this.#context = handles.context;
@@ -144,6 +163,7 @@ export class BrowserAdapter implements Adapter {
     this.#browser = handles.browser;
     this.#mode = handles.mode;
     this.#capture = handles.capture;
+    this.#page.on('load', this.#onLoad);
   }
 
   /** Open the adapter: attach over `cdpUrl` when set, else launch a managed persistent context. */
@@ -232,6 +252,12 @@ export class BrowserAdapter implements Adapter {
     await this.#run('open', async () => {
       const resolved = resolveTargetUrl(target, this.#config.url);
       const url = appendDebugLogin(resolved, this.#config.debugLogin);
+      // `goto` resolves on `load`, so this navigation's own entry lands at the TAIL
+      // of the queue. Snapshot the depth first, then drop only what this call adds:
+      // a load the page performed on its own BEFORE we were asked to navigate is
+      // still a surprise the driver must hear about, so it survives the trim.
+      // Wiping the whole queue here (`this.#loads = []`) lost that pre-existing load.
+      const before = this.#loads.length;
       try {
         // The first navigation spends the run's budget, not a fresh 30s of its own.
         await this.#page.goto(url, { timeout: capWait(NAV_TIMEOUT_MS, timeoutMs) });
@@ -240,6 +266,7 @@ export class BrowserAdapter implements Adapter {
         // port, instead of letting the run report an empty page for 300 seconds.
         throw unreachableFailure(error, url) ?? error;
       }
+      this.#loads.length = before;
     });
   }
 
@@ -459,12 +486,23 @@ export class BrowserAdapter implements Adapter {
           `no tab at index ${index} — ${pages.length} open (0…${Math.max(0, pages.length - 1)})`,
         );
       }
+      this.#page.off('load', this.#onLoad);
       this.#page = page;
       // Capture is page-scoped: without this the new tab records no console or
       // network activity at all, while the old one keeps recording unseen.
       this.#capture.rebind(page);
+      // Load watching is page-scoped for the same reason, and moves with the same
+      // rule: only the DRIVEN tab's reloads are the driver's business. A background
+      // tab refreshing itself is not a surprise navigation of the flow under test.
+      page.on('load', this.#onLoad);
       await page.bringToFront();
     });
+  }
+
+  async takeUnrequestedLoads(): Promise<string[]> {
+    const loads = this.#loads;
+    this.#loads = [];
+    return loads;
   }
 
   /** Run a Playwright call, re-throwing any failure as a loud {@link AdapterError}. */

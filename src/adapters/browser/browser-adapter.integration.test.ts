@@ -112,6 +112,15 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   <!-- Opens a second tab: the adapter must still be driving the first one. -->
   <a id="popup" href="/" target="_blank">Open in new tab</a>
   <button id="submit">Submit</button>
+  <!-- No onsubmit and no preventDefault, so clicking Subscribe makes the browser
+       submit NATIVELY: the document is replaced and every bit of in-page state goes
+       with it. Nothing on screen distinguishes that from a click that did nothing. -->
+  <form id="newsletter" action="/">
+    <input id="newsletter-email" name="email" value="a@b.com">
+    <!-- A credential rides the GET query — the reload URL must reach the run redacted. -->
+    <input name="token" type="hidden" value="super-secret-token">
+    <button id="newsletter-go" type="submit">Subscribe</button>
+  </form>
   <!-- enabled-state matrix: native disabled/readonly, inherited fieldset, ARIA -->
   <input id="plain" value="editable">
   <!-- Pre-filled PAST the element's center, so a click parks the caret mid-string. -->
@@ -691,4 +700,27 @@ const FRAME2_HTML = `<!DOCTYPE html>
   test('tabs: selecting a nonexistent tab fails loud', async () => {
     await expect(adapter.selectTab(99)).rejects.toThrow(AdapterError);
   });
+
+  // The one link no fake can prove: that a native form submit really does raise
+  // Chrome's `load`, and that the adapter turns it into a reportable surprise.
+  // Without it the driver reads the reloaded page as an unchanged one and calls
+  // the submit a success — measured on dummy/web before this existed (#60).
+  test('a form that submits without preventDefault surfaces as an unrequested load', async () => {
+    // `beforeEach` navigated here deliberately, so the queue starts empty — a
+    // navigation the driver asked for is never a surprise.
+    expect(await adapter.takeUnrequestedLoads()).toEqual([]);
+
+    await adapter.click('#newsletter-go');
+    await adapter.waitFor({ networkIdle: true, timeout: 10_000 });
+
+    const loads = await adapter.takeUnrequestedLoads();
+    expect(loads.length).toBe(1);
+    // The submit reloaded the document with a credential in the query. The load is
+    // surfaced (a blind driver would otherwise call the submit a success), but the
+    // secret is redacted before it reaches the driver's context or the findings.
+    expect(loads[0]).not.toContain('super-secret-token');
+    expect(loads[0]).toContain('token=<redacted,');
+    // Drained by that read: the next act must not inherit this reload.
+    expect(await adapter.takeUnrequestedLoads()).toEqual([]);
+  }, 20_000);
 });
