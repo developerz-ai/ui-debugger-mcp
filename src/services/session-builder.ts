@@ -183,7 +183,7 @@ export function resolveRunTarget(target: Target, name: string, url: string | und
   }
   if (target.adapter === 'browser' && !target.url) {
     throw new ConfigError(
-      `web target '${name}' has no URL — pass 'url' to start_debug or set it in .ui-debugger-mcp.json`,
+      `web target '${name}' has no URL — pass 'url' to start_debug or set it in the project config (.dz/ui-debugger/ui-debugger-mcp.json or root .ui-debugger-mcp.json)`,
     );
   }
   return target;

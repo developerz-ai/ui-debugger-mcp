@@ -77,7 +77,7 @@ export function resolveAuth(
       : `target '${targetName}' has no 'auth' block`;
   throw new ConfigError(
     `unknown auth persona '${as}' for target '${targetName}' — ${known}. ` +
-      `Add it under targets.${targetName}.auth in .ui-debugger-mcp.json, or omit 'as' to run signed out.`,
+      `Add it under targets.${targetName}.auth in the project config (.dz/ui-debugger/ui-debugger-mcp.json or root .ui-debugger-mcp.json), or omit 'as' to run signed out.`,
   );
 }
 

@@ -179,7 +179,7 @@ export function visionUnavailableMessage(modelId: string, providerMessage: strin
     `look is unavailable for this run: vision model '${modelId}' rejected image input ` +
     `(provider said: ${JSON.stringify(truncate(providerMessage, 140))}). The configured ` +
     'models.vision appears to be text-only — set it to a multimodal model in ' +
-    '.ui-debugger-mcp.json. Do NOT call look again this run; verify what you can from ' +
+    'the project config. Do NOT call look again this run; verify what you can from ' +
     'observe (tree/console/network) and state in your report summary that visual checks ' +
     'could not be performed.'
   );

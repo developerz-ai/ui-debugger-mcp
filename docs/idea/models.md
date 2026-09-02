@@ -63,7 +63,8 @@ one does the moving and asks — *"is the cup to my left?"* — and acts on the 
 
 ## Config — model roles (defaults: deepseek text, glm image)
 
-`.ui-debugger-mcp.json`:
+The project config (`.dz/ui-debugger/ui-debugger-mcp.json`, or root
+`.ui-debugger-mcp.json`):
 ```jsonc
 "models": {
   "driver":  "deepseek/deepseek-v4-flash",        // fast guy — text, controls

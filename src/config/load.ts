@@ -1,8 +1,10 @@
 /**
  * Config loader + resolution order.
  *
- * Reads `./.ui-debugger-mcp.json` (cwd), Zod-validates it, and resolves a fully
- * defaulted `ResolvedConfig`. Layering follows `idea/config.md`:
+ * Resolves the project config (`.dz/ui-debugger/ui-debugger-mcp.json` first,
+ * falling back to the root `.ui-debugger-mcp.json` — see {@link CONFIG_CANDIDATES}),
+ * Zod-validates it, and resolves a fully defaulted `ResolvedConfig`.
+ * Layering follows `idea/config.md`:
  *
  *   built-in defaults  <  project file  <  env
  *
@@ -13,16 +15,25 @@
  * runtime concern, not the file loader's — out of scope here.
  *
  * Bad config fails fast and loud via `ConfigError` — never a silent fallback.
+ * That includes a bad `.dz/` copy: it errors, never falls through to root.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { ConfigError } from '../errors.js';
 import type { Target } from './schema.js';
 import { ConfigSchema } from './schema.js';
 
-/** Committed, per-project debug config filename, resolved against the cwd. */
+/** Committed, per-project debug config filename (the legacy root location). */
 export const CONFIG_FILENAME = '.ui-debugger-mcp.json';
+
+/**
+ * Where the per-repo config may live, in resolution order: the `.dz/`
+ * consolidation location first, the repo-root file as the legacy fallback.
+ * Every config read/write resolves through {@link resolveConfigPath}, so this
+ * array is the ONE place the order lives.
+ */
+export const CONFIG_CANDIDATES = ['.dz/ui-debugger/ui-debugger-mcp.json', CONFIG_FILENAME] as const;
 
 /** Default base url — OpenRouter. Override with env `OPENAI_BASE_URL`. */
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
@@ -72,17 +83,47 @@ export interface LoadOptions {
 }
 
 /**
+ * The config path this project actually uses, resolved against `cwd`:
+ *
+ *  - the first candidate FILE that exists — `.dz/` wins when both do
+ *  - when neither exists, the path a fresh `init` should WRITE: the `.dz/`
+ *    location if the repo already has a `.dz/` dir, else the root file.
+ */
+export function resolveConfigPath(cwd: string): string {
+  for (const candidate of CONFIG_CANDIDATES) {
+    const path = join(cwd, candidate);
+    if (existsSync(path)) return path;
+  }
+  return join(cwd, existsSync(join(cwd, '.dz')) ? CONFIG_CANDIDATES[0] : CONFIG_FILENAME);
+}
+
+/**
+ * The shadowed root filename when BOTH candidates exist — what callers print as
+ * the one-line "you have two configs" notice (`.dz/` wins). `null` otherwise.
+ */
+export function ignoredRootConfig(cwd: string): string | null {
+  if (!existsSync(join(cwd, CONFIG_CANDIDATES[0]))) return null;
+  return existsSync(join(cwd, CONFIG_FILENAME)) ? CONFIG_FILENAME : null;
+}
+
+/** The candidate as the user writes it (relative to `cwd`) — for messages. */
+function configName(cwd: string, path: string): string {
+  return relative(cwd, path) || CONFIG_FILENAME;
+}
+
+/**
  * Load, validate, and resolve the project config. Throws `ConfigError` if the
  * file is missing, not JSON, fails the schema, or `OPENAI_API_KEY` is unset.
  */
 export function loadConfig(opts: LoadOptions = {}): ResolvedConfig {
   const cwd = opts.cwd ?? process.cwd();
   const env = opts.env ?? process.env;
-  const path = join(cwd, CONFIG_FILENAME);
+  const path = resolveConfigPath(cwd);
 
   if (!existsSync(path)) {
     throw new ConfigError(
-      `\`${CONFIG_FILENAME}\` not found in ${cwd}. Run \`ui-debugger-mcp init\` to scaffold it.`,
+      `No project config in ${cwd} — tried \`${CONFIG_CANDIDATES[0]}\` then \`${CONFIG_FILENAME}\`. ` +
+        'Run `ui-debugger-mcp init` to scaffold it.',
     );
   }
 
@@ -91,11 +132,11 @@ export function loadConfig(opts: LoadOptions = {}): ResolvedConfig {
     raw = readFileSync(path, 'utf8');
   } catch (e) {
     throw new ConfigError(
-      `Failed to read \`${CONFIG_FILENAME}\`: ${e instanceof Error ? e.message : String(e)}`,
+      `Failed to read \`${configName(cwd, path)}\`: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 
-  const project = parseProject(raw);
+  const project = parseProject(raw, configName(cwd, path));
 
   return {
     models: {
@@ -119,7 +160,7 @@ export function loadConfig(opts: LoadOptions = {}): ResolvedConfig {
  * `stop` at the default workspace and report "no run" for a custom-workspace run.
  */
 export function loadWorkspaceDir(cwd: string = process.cwd()): string {
-  const path = join(cwd, CONFIG_FILENAME);
+  const path = resolveConfigPath(cwd);
   if (!existsSync(path)) return DEFAULT_WORKSPACE;
 
   let raw: string;
@@ -127,20 +168,20 @@ export function loadWorkspaceDir(cwd: string = process.cwd()): string {
     raw = readFileSync(path, 'utf8');
   } catch (e) {
     throw new ConfigError(
-      `Failed to read \`${CONFIG_FILENAME}\`: ${e instanceof Error ? e.message : String(e)}`,
+      `Failed to read \`${configName(cwd, path)}\`: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
-  return parseProject(raw).workspace ?? DEFAULT_WORKSPACE;
+  return parseProject(raw, configName(cwd, path)).workspace ?? DEFAULT_WORKSPACE;
 }
 
 /** Parse JSON + Zod-validate the raw file contents into a typed config. */
-function parseProject(raw: string) {
+function parseProject(raw: string, name: string) {
   let data: unknown;
   try {
     data = JSON.parse(raw);
   } catch (e) {
     throw new ConfigError(
-      `\`${CONFIG_FILENAME}\` is not valid JSON: ${e instanceof Error ? e.message : String(e)}`,
+      `\`${name}\` is not valid JSON: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 
@@ -149,7 +190,7 @@ function parseProject(raw: string) {
     const issues = result.error.issues
       .map((i) => `${i.path.map(String).join('.') || '(root)'}: ${i.message}`)
       .join('; ');
-    throw new ConfigError(`\`${CONFIG_FILENAME}\` is invalid: ${issues}`);
+    throw new ConfigError(`\`${name}\` is invalid: ${issues}`);
   }
   return result.data;
 }

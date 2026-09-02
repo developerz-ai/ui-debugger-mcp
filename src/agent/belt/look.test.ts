@@ -268,7 +268,10 @@ test('visionUnavailableMessage names the model and tells the driver to stop call
   );
   expect(msg).toContain("'glm-5.2'");
   expect(msg).toContain('Do NOT call look again');
-  expect(msg).toContain('.ui-debugger-mcp.json');
+  // Names WHERE the vision model is set — "the project config" since the
+  // `.dz/`-first dual read landed (the root filename alone is no longer the
+  // whole truth).
+  expect(msg).toContain('project config');
 });
 
 test('createLookExecute latches VisionUnavailableError: later calls fail fast, no screenshot', async () => {

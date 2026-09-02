@@ -126,8 +126,10 @@ It's also published in the official [MCP Registry](https://modelcontextprotocol.
 `io.github.developerz-ai/ui-debugger-mcp` — any client that browses the registry (instead of a
 hand-written `.mcp.json` entry) can find and install it by that name.
 
-Then add a per-project `.ui-debugger-mcp.json` describing the app to debug
-(models, targets, urls). The fastest way is the `init` command:
+Then add a per-project config describing the app to debug (models, targets,
+urls) — `.dz/ui-debugger/ui-debugger-mcp.json` if your repo keeps agent config
+under `.dz/` (checked first), else the root `.ui-debugger-mcp.json` (legacy).
+The fastest way is the `init` command:
 
 ```bash
 npx @developerz.ai/ui-debugger-mcp@latest init   # in your project root
@@ -137,15 +139,18 @@ npx @developerz.ai/ui-debugger-mcp@latest init   # in your project root
 [`docs/idea/config.md`](docs/idea/config.md)):
 
 - creates the workspace dir `./tmp/ui-debugger-mcp/`
-- writes a starter `.ui-debugger-mcp.json` (default deepseek/glm models, a `web`
-  target stub) if one doesn't already exist
+- writes a starter config (default deepseek/glm models, a `web` target stub) if
+  one doesn't already exist — at `.dz/ui-debugger/ui-debugger-mcp.json` when the
+  repo already has a `.dz/` dir, else at the root `.ui-debugger-mcp.json`
 - adds `tmp/` to `.gitignore`
 - prints the `.mcp.json` snippet to paste (it never writes your API key)
 
 Config files:
 
 - `.mcp.json` → **how to launch** the server (command + secret key). Gitignored.
-- `.ui-debugger-mcp.json` → **how to debug this app** (models, targets). Committed.
+- `.dz/ui-debugger/ui-debugger-mcp.json` (or root `.ui-debugger-mcp.json`) →
+  **how to debug this app** (models, targets). Committed. When both exist the
+  `.dz/` copy wins and the tool prints a notice naming the ignored root file.
 
 Every key of both files is documented in [`docs/idea/config.md`](docs/idea/config.md);
 every tool's exact input/output shape is in [`docs/idea/mcp-tools.md`](docs/idea/mcp-tools.md).
@@ -160,7 +165,7 @@ in your repo and it debugs that repo.
 npx @developerz.ai/ui-debugger-mcp@latest init
 ```
 
-This creates `./tmp/ui-debugger-mcp/`, writes a starter `.ui-debugger-mcp.json`,
+This creates `./tmp/ui-debugger-mcp/`, writes a starter config (`.dz/…` or root),
 and prints the `.mcp.json` snippet to paste.
 
 ```jsonc
@@ -180,7 +185,8 @@ and prints the `.mcp.json` snippet to paste.
 ```
 
 ```jsonc
-// 3. Edit .ui-debugger-mcp.json — set your app's URL
+// 3. Edit the project config (.dz/ui-debugger/ui-debugger-mcp.json or root
+//    .ui-debugger-mcp.json) — set your app's URL
 {
   "targets": {
     "web": { "adapter": "browser", "url": "http://localhost:3000" }
@@ -330,7 +336,7 @@ ui-debugger-mcp stop     # gracefully end the run (frees the browser + profile)
 
 **Chrome not found**
 The web adapter launches Chrome via the system PATH. Install Chrome/Chromium, or
-set `executablePath` in `.ui-debugger-mcp.json`:
+set `executablePath` in the project config (`.dz/…` or root):
 ```jsonc
 "web": { "adapter": "browser", "url": "...", "executablePath": "/usr/bin/chromium-browser" }
 ```
@@ -362,7 +368,7 @@ sorts last. Only the **5 most recent** sessions are kept — each new run prunes
 rest, so evidence from a run six ago is gone by design.
 
 **Run fails instantly: "… is not a valid model ID"**
-The model string in `.ui-debugger-mcp.json` is not a catalog id. OpenRouter takes
+The model string in the project config is not a catalog id. OpenRouter takes
 `provider/model` with optional `:floor` / `:nitro` routing suffixes — a `#…`
 suffix is rejected outright. Use plain ids (`deepseek/deepseek-v4-flash`).
 

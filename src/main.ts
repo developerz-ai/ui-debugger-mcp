@@ -6,7 +6,7 @@ import { runStatus, runStop } from './cli/control.js';
 import { printUsage, runHelp, runVersion } from './cli/help.js';
 import { runInit } from './cli/init.js';
 import { makeConfigWatch } from './config/fingerprint.js';
-import { loadConfig } from './config/load.js';
+import { CONFIG_CANDIDATES, ignoredRootConfig, loadConfig } from './config/load.js';
 import { NAME, VERSION } from './index.js';
 import { startStdioServer } from './mcp/server.js';
 import { outerTools } from './mcp/tools/index.js';
@@ -53,9 +53,17 @@ async function main(): Promise<void> {
   }
 
   try {
-    // Load project config (cwd-keyed)
-    const config = loadConfig();
     const cwd = process.cwd();
+    // Load project config (cwd-keyed)
+    const config = loadConfig({ cwd });
+    // Both candidates on disk: name the ignored root copy ONCE, on stderr —
+    // stdout is the stdio MCP JSON-RPC channel and must stay machine-only.
+    const ignoredRoot = ignoredRootConfig(cwd);
+    if (ignoredRoot) {
+      console.error(
+        `${NAME}: using ${CONFIG_CANDIDATES[0]} — ignoring the root ${ignoredRoot} (remove it to stop this notice)`,
+      );
+    }
 
     // Bootstrap workspace directories (chrome-user-data/, sessions/).
     // A relative workspace anchors at the project root; an absolute (shared) one

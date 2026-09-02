@@ -40,17 +40,30 @@ npx @developerz.ai/ui-debugger-mcp@latest init   # run in the project root
 
 `init` (idempotent — won't clobber existing files):
 1. creates the workspace dir `./tmp/ui-debugger-mcp/`
-2. writes a starter `.ui-debugger-mcp.json` — deepseek/glm model defaults + a
-   `web` target stub (`http://localhost:3000`) — only if absent
+2. writes a starter config — deepseek/glm model defaults + a `web` target stub
+   (`http://localhost:3000`) — only if absent, at `.dz/ui-debugger/ui-debugger-mcp.json`
+   when the repo already has a `.dz/` dir, else at the root `.ui-debugger-mcp.json`
 3. adds `tmp/` to `.gitignore`
 4. prints the `.mcp.json` snippet to paste (never writes your API key)
 
 Then edit targets/urls to match the app. The dir + config are all the server
 needs to start a session for that project.
 
-## `.ui-debugger-mcp.json` — how to debug this app (committed)
+## Project config — how to debug this app (committed)
 
 Per-project. Lives in the repo, travels with it. Describes the app + targets.
+
+Two candidate locations, one shape (see the `Resolution order` below):
+
+1. **`.dz/ui-debugger/ui-debugger-mcp.json`** — for repos that consolidate their
+   agent config under `.dz/`. Checked FIRST; wins when both exist.
+2. **`.ui-debugger-mcp.json`** (repo root) — the original location, now the
+   legacy fallback.
+
+When both exist the `.dz/` copy wins and the tool prints one line naming the
+ignored root file — so root edits that silently do nothing are never a mystery.
+A `.dz/` copy that fails to parse is an error, exactly as a bad root copy is;
+the root file is NOT read in that case.
 
 ```jsonc
 {
@@ -118,7 +131,7 @@ once instead of finding out the expensive way.
 | | `notes` (this) | `goal` (`start_debug`) |
 |---|---|---|
 | Scope | the target — **every** run against this app | one run |
-| Lives in | `.ui-debugger-mcp.json`, committed | the call |
+| Lives in | the project config (`.dz/…` or root), committed | the call |
 | Says | what is always true | what to do this time |
 
 One fact per line. They become a `## Known about this app` section of the composed
@@ -219,7 +232,10 @@ Rules:
 ## Resolution order
 
 1. message from the smart agent (overrides per session)
-2. `.ui-debugger-mcp.json` (project)
+2. project file — `.dz/ui-debugger/ui-debugger-mcp.json` first, falling back to
+   the root `.ui-debugger-mcp.json` (legacy). Both present → `.dz/` wins, with a
+   one-line notice naming the ignored root file; a bad `.dz/` copy errors without
+   reading root.
 3. env (`OPENAI_API_KEY`, `OPENAI_BASE_URL`)
 4. built-in defaults — managed + headless web, OpenRouter base url, and:
    - `driver` → `deepseek/deepseek-v4-flash` (text)
@@ -231,8 +247,8 @@ All Zod-validated. Bad config fails fast and loud.
 ## Why split
 
 - Secrets (`.mcp.json`) stay out of the repo.
-- Debug settings (`.ui-debugger-mcp.json`) stay in the repo, so every dev / agent
-  that opens the project debugs it the same way.
+- Debug settings (the project config, either location) stay in the repo, so
+  every dev / agent that opens the project debugs it the same way.
 - Matches the gold-standards rule: write project knowledge down, per project.
 
 ## Providers — OpenAI-compatible routers
@@ -257,5 +273,5 @@ We talk to **any OpenAI-compatible endpoint**: one `OPENAI_BASE_URL` +
 | `vision`  | `qwen/qwen3-vl-32b-instruct` | multimodal — describes screenshots, judges looks |
 | `summary` | `deepseek/deepseek-v4-flash` | compress findings for the smart agent |
 
-Override any role in `.ui-debugger-mcp.json`. Cheap fast model drives; the
+Override any role in the project config. Cheap fast model drives; the
 vision model is spent only when eyes are needed. No code change to swap.

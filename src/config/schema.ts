@@ -1,5 +1,6 @@
 /**
- * Zod schema for `.ui-debugger-mcp.json` — the committed, per-project debug config.
+ * Zod schema for the committed, per-project debug config — same shape at either
+ * location: `.dz/ui-debugger/ui-debugger-mcp.json` or root `.ui-debugger-mcp.json`.
  * Mirrors `.ui-debugger-mcp.example.json`. Validated at the config boundary; bad
  * config fails fast and loud (see `ConfigError`).
  */
@@ -156,7 +157,7 @@ export const TargetSchema = z.discriminatedUnion('adapter', [
   AndroidTargetSchema,
 ]);
 
-/** Top-level `.ui-debugger-mcp.json` shape. Targets keyed by name (web, desktop, mobile, …). */
+/** Top-level project config shape. Targets keyed by name (web, desktop, mobile, …). */
 export const ConfigSchema = z.strictObject({
   models: ModelsSchema.partial().optional(),
   workspace: z.string().optional(),
