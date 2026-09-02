@@ -12,7 +12,7 @@ USAGE:
   ${NAME} [subcommand] [options]
 
 SUBCOMMANDS:
-  init                  Scaffold a new project (.ui-debugger-mcp.json, workspace)
+  init                  Scaffold a new project (config in .dz/, or root legacy; workspace)
   status                Print the active debug run's state + findings summary
   stop                  Signal the server to tear down the active run gracefully
   (no subcommand)       Boot the stdio MCP server (default, for Claude use)

@@ -91,7 +91,7 @@ src/
     prompts/       — system prompts (versioned in-repo, provider-agnostic)
   adapters/        — target control (browser/desktop/android) + shared contract
   session/         — cwd-keyed session state
-  config/          — load + validate .ui-debugger-mcp.json (Zod)
+  config/          — load + validate the project config (Zod; .dz/ first, root fallback)
   services/        — business logic; handlers stay thin
 docs/
   idea/            — design docs (read before changing architecture)

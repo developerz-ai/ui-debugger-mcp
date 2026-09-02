@@ -42,7 +42,8 @@ code, asks again. Loop until the UI works. No human clicking.
   - `desktop/` — X11/Wayland windows. Covers desktop app AND mobile emulator. ✅ shipped.
   - `android/` — ADB + uiautomator. ✅ shipped.
 - `src/session/` — cwd-keyed session, per-project workspace, state.
-- `src/config/` — load `.ui-debugger-mcp.json`, resolve model/targets.
+- `src/config/` — load the project config (`.dz/ui-debugger/ui-debugger-mcp.json`
+  first, root `.ui-debugger-mcp.json` fallback), resolve model/targets.
 - `src/services/` — business logic. Thin handlers, logic here.
 
 ## Targets (one project, many)
@@ -88,8 +89,9 @@ unfiltered tail of 50 returned zero API traffic. Failed requests are never hidde
 
 ## CLI (bin: `ui-debugger-mcp`)
 - no args → run the stdio MCP server (default).
-- `init` → scaffold: create `./tmp/ui-debugger-mcp/`, write a starter
-  `.ui-debugger-mcp.json` (deepseek/glm defaults + `web` stub) if absent, add `tmp/`
+- `init` → scaffold: create `./tmp/ui-debugger-mcp/`, write a starter config
+  (deepseek/glm defaults + `web` stub) if absent — at `.dz/ui-debugger/ui-debugger-mcp.json`
+  when a `.dz/` dir exists, else root `.ui-debugger-mcp.json` — add `tmp/`
   to `.gitignore`, print the `.mcp.json` snippet. NEVER writes the API key.
 - `status` → the active run for this cwd: session id, target, goal, server pid
   (+ alive?), verdict, finding counts. Reads `state.json` + `findings.json`. No API key.
@@ -102,9 +104,13 @@ project (cwd) → no run selector needed.
 
 ## Config split
 - `.mcp.json` — how to LAUNCH server (command, model API key + base url). Gitignored. Secret.
-- `.ui-debugger-mcp.json` — how to DEBUG this app (models, targets, urls). Committed.
+- Project config — how to DEBUG this app (models, targets, urls). Committed.
+  Two candidate locations, one shape: `.dz/ui-debugger/ui-debugger-mcp.json`
+  (checked FIRST; wins when both exist, with a one-line notice naming the ignored
+  root file) or root `.ui-debugger-mcp.json` (legacy). A bad `.dz/` copy errors
+  without reading root.
 
-`.ui-debugger-mcp.json` shape:
+Project config shape:
 ```
 models:  { driver, vision, summary? }   per-role; defaults: deepseek (text), glm (image)
 targets:
@@ -236,7 +242,7 @@ diagnostic, the secret must NEVER enter the model's context or the logs.
 - `docs/idea/agent-loop.md` — story → findings loop.
 - `docs/idea/mcp-tools.md` — two tool layers, SQL-like params, in-repo system prompts.
 - `docs/idea/models.md` — the three actors (smart agent / fast guy / vision guy), `look`, why CDP.
-- `docs/idea/config.md` — `.mcp.json` + `.ui-debugger-mcp.json`.
+- `docs/idea/config.md` — `.mcp.json` + the project config (`.dz/…` or root).
 - `docs/idea/workspace.md` — per-project space + logs.
 
 ## Note

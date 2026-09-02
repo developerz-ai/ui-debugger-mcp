@@ -1,5 +1,5 @@
 /**
- * Detect that `.ui-debugger-mcp.json` changed after the server read it.
+ * Detect that the project config changed after the server read it.
  *
  * Config is resolved ONCE at boot (`main.ts`): it decides the workspace layout,
  * the provider, the per-role models and the self-look probe, all of which are
@@ -19,12 +19,16 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { CONFIG_FILENAME } from './load.js';
+import { resolveConfigPath } from './load.js';
 
 /**
  * Content fingerprint of the project's config file — `null` when it is absent or
  * unreadable (a project running on defaults has nothing to drift from).
+ *
+ * Follows the boot loader's candidate order (`resolveConfigPath`: `.dz/` first,
+ * root fallback) and keys on CONTENT, not path: identical bytes at either
+ * location are the same config, so relocating the file with no changes is not
+ * drift, while editing a shadowed root copy is invisible — by design.
  *
  * Contents, not mtime: editors and formatters rewrite files without changing
  * anything that matters, and a spurious "restart me" is its own kind of noise.
@@ -38,7 +42,7 @@ import { CONFIG_FILENAME } from './load.js';
 export function configFingerprint(cwd: string): string | null {
   let raw: string;
   try {
-    raw = readFileSync(join(cwd, CONFIG_FILENAME), 'utf8');
+    raw = readFileSync(resolveConfigPath(cwd), 'utf8');
   } catch (err) {
     // Absent config = nothing to drift from. Anything else (permissions, I/O) is a
     // bad assumption, and the house rule is to crash on those rather than run on.

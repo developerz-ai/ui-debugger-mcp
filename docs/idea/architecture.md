@@ -33,7 +33,7 @@
 | Debug agent | Small model in a Vercel AI SDK loop. Owns the clicking. |
 | Adapters    | Drive a target behind one shared contract. |
 | Workspace   | Per-project scratch: profile, screenshots, logs, findings. |
-| Config      | `.ui-debugger-mcp.json` (project) + `.mcp.json` (launch). |
+| Config      | `.dz/ui-debugger/ui-debugger-mcp.json` or root `.ui-debugger-mcp.json` (project) + `.mcp.json` (launch). |
 
 ## Why the brain is inside the server
 

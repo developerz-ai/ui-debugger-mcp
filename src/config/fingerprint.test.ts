@@ -1,9 +1,9 @@
 import { afterEach, expect, test } from 'bun:test';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { configFingerprint, makeConfigWatch } from './fingerprint.js';
-import { CONFIG_FILENAME } from './load.js';
+import { CONFIG_CANDIDATES, CONFIG_FILENAME } from './load.js';
 
 const dirs: string[] = [];
 
@@ -12,6 +12,13 @@ function project(contents?: string): string {
   dirs.push(dir);
   if (contents !== undefined) writeFileSync(join(dir, CONFIG_FILENAME), contents);
   return dir;
+}
+
+/** Write `contents` at a candidate-relative path, creating parent dirs. */
+function writeCandidate(dir: string, candidate: string, contents: string): void {
+  const path = join(dir, candidate);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, contents);
 }
 
 afterEach(() => {
@@ -56,5 +63,20 @@ test('a config created after boot counts as drift', () => {
   expect(changed()).toBe(false);
 
   writeFileSync(join(dir, CONFIG_FILENAME), '{"targets":{}}');
+  expect(changed()).toBe(true);
+});
+
+// Dual candidates: the fingerprint follows the resolved `.dz/`-first order and
+// keys on CONTENT, so editing a shadowed root copy is not drift.
+test('fingerprints the .dz/ copy when both exist; editing the shadowed root file is not drift', () => {
+  const dir = project('{"targets":{"root":true}}');
+  writeCandidate(dir, CONFIG_CANDIDATES[0], '{"targets":{"dz":true}}');
+  const changed = makeConfigWatch(dir);
+  expect(changed()).toBe(false);
+
+  writeFileSync(join(dir, CONFIG_FILENAME), '{"targets":{"root-edited":true}}');
+  expect(changed()).toBe(false); // root is ignored while the .dz/ copy exists
+
+  writeCandidate(dir, CONFIG_CANDIDATES[0], '{"targets":{"dz-edited":true}}');
   expect(changed()).toBe(true);
 });

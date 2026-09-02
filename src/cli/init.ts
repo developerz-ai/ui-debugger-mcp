@@ -6,14 +6,21 @@
  * Steps:
  *  1. mkdir the workspace dir (an existing config's `workspace` wins over the
  *     `./tmp/ui-debugger-mcp` default — see {@link existingWorkspace})
- *  2. write .ui-debugger-mcp.json (only if absent)
+ *  2. write the project config (only if absent) at the location
+ *     {@link resolveConfigPath} picks: `.dz/ui-debugger/ui-debugger-mcp.json`
+ *     when the repo has a `.dz/` dir, else the root `.ui-debugger-mcp.json`
  *  3. add the workspace dir to .gitignore (only if the line is missing)
  *  4. print .mcp.json snippet (never writes the API key)
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
-import { CONFIG_FILENAME, DEFAULT_MODELS, DEFAULT_WORKSPACE } from '../config/load.js';
+import { dirname, join, relative, resolve, sep } from 'node:path';
+import {
+  DEFAULT_MODELS,
+  DEFAULT_WORKSPACE,
+  ignoredRootConfig,
+  resolveConfigPath,
+} from '../config/load.js';
 import { InitError } from '../errors.js';
 
 /** Starter project config written on `init` (only if absent). */
@@ -63,15 +70,16 @@ const MCP_JSON_SNIPPET = `{
 const DEFAULT_IGNORE_LINE = 'tmp/';
 
 /**
- * Read the `workspace` field of an already-present `.ui-debugger-mcp.json`, if any.
- * Deliberately lenient — not a full `ConfigSchema` parse — because `init` only needs
- * to know where to mkdir/gitignore, not validate the whole file; a config with an
+ * Read the `workspace` field of an already-present project config (`.dz/` copy
+ * first, root fallback — the loader's candidate order), if any. Deliberately
+ * lenient — not a full `ConfigSchema` parse — because `init` only needs to know
+ * where to mkdir/gitignore, not validate the whole file; a config with an
  * unrelated schema error must not block re-running `init`. Falls back to
- * {@link DEFAULT_WORKSPACE} when the file is absent, unparseable, or has no string
- * `workspace` field.
+ * {@link DEFAULT_WORKSPACE} when the file is absent, unparseable, or has no
+ * string `workspace` field.
  */
 function existingWorkspace(cwd: string): string {
-  const configPath = join(cwd, CONFIG_FILENAME);
+  const configPath = resolveConfigPath(cwd);
   if (!existsSync(configPath)) return DEFAULT_WORKSPACE;
 
   let raw: string;
@@ -79,7 +87,7 @@ function existingWorkspace(cwd: string): string {
     raw = readFileSync(configPath, 'utf8');
   } catch (e) {
     throw new InitError(
-      `Failed to read ${CONFIG_FILENAME}: ${e instanceof Error ? e.message : String(e)}`,
+      `Failed to read ${relative(cwd, configPath)}: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 
@@ -128,19 +136,29 @@ export function runInit(cwd: string = process.cwd()): void {
   }
   console.log(`✓ workspace  ${workspaceDir}`);
 
-  // 2. write .ui-debugger-mcp.json (only if absent)
-  const configPath = join(cwd, '.ui-debugger-mcp.json');
+  // 2. write the project config (only if absent) — resolveConfigPath owns the
+  // location: an existing `.dz/` or root copy is found, else `.dz/` when the repo
+  // already has a `.dz/` dir, else the root file.
+  const configPath = resolveConfigPath(cwd);
+  const configName = relative(cwd, configPath);
   if (existsSync(configPath)) {
-    console.log(`  (skip)     .ui-debugger-mcp.json already exists`);
+    console.log(`  (skip)     ${configName} already exists`);
+    const ignoredRoot = ignoredRootConfig(cwd);
+    if (ignoredRoot) {
+      console.log(`  (notice)   ${ignoredRoot} also exists — ignored, ${configName} wins`);
+    }
   } else {
     try {
+      // The `.dz/` candidate needs its parent dir; for the root candidate this
+      // is a no-op on the (existing) project root.
+      mkdirSync(dirname(configPath), { recursive: true });
       writeFileSync(configPath, `${STARTER_CONFIG}\n`, 'utf8');
     } catch (e) {
       throw new InitError(
-        `Failed to write .ui-debugger-mcp.json: ${e instanceof Error ? e.message : String(e)}`,
+        `Failed to write ${configName}: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
-    console.log(`✓ created    .ui-debugger-mcp.json`);
+    console.log(`✓ created    ${configName}`);
   }
 
   // 3. add the workspace dir to .gitignore (only if the line is missing)
