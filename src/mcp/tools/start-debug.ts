@@ -40,7 +40,7 @@ export function startDebugTool(service: DebugApi): McpTool {
               .string()
               .min(1)
               .describe(
-                'Configured target name (a key in the project config targets, e.g. "web"). See describe.',
+                'Configured target name (a key in .ui-debugger-mcp.json targets, e.g. "web"). See describe.',
               ),
             goal: z
               .string()

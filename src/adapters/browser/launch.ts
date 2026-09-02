@@ -89,7 +89,7 @@ export function appendDebugLogin(target: string, debugLogin?: { param: string })
     url = new URL(target);
   } catch {
     throw new AdapterError(
-      `cannot append debug-login param to relative target ${JSON.stringify(target)} — set the web target's \`url\` in the project config (.dz/ui-debugger/ui-debugger-mcp.json or root .ui-debugger-mcp.json) so it resolves to an absolute URL`,
+      `cannot append debug-login param to relative target ${JSON.stringify(target)} — set the web target's \`url\` in .ui-debugger-mcp.json so it resolves to an absolute URL`,
     );
   }
   url.searchParams.set(debugLogin.param, 'true');

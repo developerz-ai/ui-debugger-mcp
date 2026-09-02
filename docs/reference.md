@@ -64,7 +64,7 @@ Open a debug session: hand the driver agent a goal for a configured target. One 
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
-| `target` | `string` | yes | Target name from the project config (`.dz/…` or root `.ui-debugger-mcp.json`) (e.g. `"web"`). Use `describe` to list valid values. |
+| `target` | `string` | yes | Target name from `.ui-debugger-mcp.json` (e.g. `"web"`). Use `describe` to list valid values. |
 | `goal` | `string` | yes | The story — what to accomplish in plain language (e.g. `"log in and add item 3 to cart"`). |
 | `criteria` | `string` | no | Explicit pass/fail rules, one per line. Omit to let the agent judge. |
 | `url` | `string` (URL) | no | Where to point the driver for this run (web targets) — e.g. a local dev server, a preview, or production. Overrides the target's configured url; required when the target has none. |
@@ -87,8 +87,7 @@ another live server owns.
 start_debug { target: "web", goal: "re-check the audit table", replace: true }
 ```
 
-Personas are configured per web target in the project config (`.dz/…` or root
-`.ui-debugger-mcp.json`) — see
+Personas are configured per web target in `.ui-debugger-mcp.json` — see
 [`idea/config.md`](idea/config.md#auth--named-login-personas-web) for the shape,
 the field-matching order, and the redaction guarantees.
 

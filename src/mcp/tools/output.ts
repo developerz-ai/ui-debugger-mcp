@@ -49,7 +49,7 @@ const TargetInfoSchema = z.object({
     .optional()
     .describe(
       'Named auth personas — the valid start_debug({as}) values for this target. Names only; ' +
-        'the credentials stay in the project config and never reach the driver.',
+        'the credentials stay in .ui-debugger-mcp.json and never reach the driver.',
     ),
   notes: z
     .string()

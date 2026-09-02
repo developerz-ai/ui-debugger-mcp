@@ -26,7 +26,7 @@
  * already closed) and never participates in the one-run gate.
  */
 
-import { CONFIG_CANDIDATES, CONFIG_FILENAME, type ResolvedConfig } from '../config/load.js';
+import { CONFIG_FILENAME, type ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import {
   ConfigError,
@@ -121,7 +121,7 @@ export interface TargetInfo {
   headless?: boolean;
   /**
    * Named auth personas configured for this target — the valid `start_debug({as})`
-   * values. NAMES ONLY; the credentials never leave the project config.
+   * values. NAMES ONLY; the credentials never leave `.ui-debugger-mcp.json`.
    * Absent when the target has no `auth` block.
    */
   personas?: string[];
@@ -192,7 +192,7 @@ export interface DebugServiceDeps {
   /** Injected clock (epoch ms) for session ids + the run deadline; defaults to `Date.now`. */
   now?: () => number;
   /**
-   * Has the project config changed since boot? Config is resolved once and
+   * Has `.ui-debugger-mcp.json` changed since boot? Config is resolved once and
    * wired into long-lived objects, so a changed file means every later run would
    * silently use the OLD settings — see `config/fingerprint.ts`. Defaults to
    * "never changed" (unit tests hold no file).
@@ -434,8 +434,7 @@ export class DebugService implements DebugApi {
   #assertConfigFresh(): void {
     if (!this.#configChanged()) return;
     throw new ConfigError(
-      `The project config (\`${CONFIG_CANDIDATES[0]}\`, or root \`${CONFIG_FILENAME}\`) changed on disk after this ` +
-        'ui-debugger-mcp server started, so a run now ' +
+      `${CONFIG_FILENAME} changed on disk after this ui-debugger-mcp server started, so a run now ` +
         'would still use the OLD settings (models, targets, urls are read once at boot). ' +
         'Restart the MCP server to pick the new config up — in Claude Code, /mcp → reconnect ' +
         'ui-debugger, or restart the session.',
