@@ -38,9 +38,13 @@ jobs:
       - name: upgrade npm
         run: npm install -g npm@latest
 
+      # Pinned to match ci.yml — see the note there (#70). The version that BUILDS
+      # the published tarball must not drift on its own either: this job runs
+      # `bun run build` and publishes the result, with no test step to catch a
+      # toolchain regression before it reaches npm.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
       - name: install
         run: bun install --frozen-lockfile
