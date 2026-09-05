@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-09-05
+
+### Added
+
+- **The per-repo config is read from `.dz/ui-debugger/ui-debugger-mcp.json`
+  first**, falling back to the root `.ui-debugger-mcp.json`. A repo that has
+  consolidated its agent config under `.dz/` now boots the tool unchanged
+  instead of failing to find a config at all. The two-candidate order lives in
+  one place — `CONFIG_CANDIDATES` in `src/config/load.ts`, reached through
+  `resolveConfigPath(cwd)` by every read and write.
+
+  Resolution is fail-fast in both directions: `.dz/` wins when both files
+  exist, and a *bad* `.dz/` copy raises `ConfigError` rather than silently
+  falling through to the root file. A fresh `init` writes to `.dz/` when the
+  repo already has that directory, and to the root file otherwise.
+
+  This is the release the platform side of the `.dz/` migration waits on
+  (developerz-ai/developerz.ai#2964, epic #2958): until it is on npm, a
+  consumer pinned to `@latest` gets 1.8.0, which knows only the root path.
+
+- `ActResult.navigated`, plus a note on the step that caused it, fed by a new
+  optional adapter method. A full-document load wipes every bit of in-page
+  state and nothing on screen distinguishes that from "my click did nothing" —
+  the driver used to read a reloaded page as an unchanged one and report the
+  reload-causing action as a success.
+
+### Fixed
+
+- `biome.json` no longer carries `"!**/tmp"` in `files.includes`. That pattern
+  is matched against the **absolute** path, so a checkout under `/tmp/...`,
+  `~/tmp/project`, or any container workdir with a `tmp` component matched at
+  the path root and biome pruned the entire tree before reaching the repo.
+
+- **A rejected login now reports in seconds, not after the whole 30s budget.**
+  The no-`expect` proof-of-signin waits for the post-submit navigation to settle
+  before reading the URL that decides — but it was given the ENTIRE remaining
+  login budget for a wait whose result it discards. A page that never reaches
+  network-idle is the normal shape of a *rejected* login (the credentials POST
+  comes back 401 and nothing navigates), so the one case the check exists to
+  catch was also the slowest to report. The settle wait is now a bounded
+  `NAVIGATION_SETTLE_MS` slice, still shortened further by a caller with less
+  budget left.
+
+  This is also why CI was red on `main`: `session-builder.test.ts`'s
+  wrong-credentials story sets its own ceiling to the login budget, so on any
+  runner where the idle wait ran to term the `AuthError` arrived after the
+  harness had already given up. The test was structurally unable to observe the
+  behaviour it asserts and timed out at exactly 30,000ms (run 33647731476,
+  commit 06ec3a07). No test was modified — the code was.
+
 ## [1.8.0] - 2026-07-30
 
 ### Changed

@@ -39,6 +39,31 @@ import type { Step } from '../findings/schema.js';
 /** Whole-login default budget; the run's remaining cap may only shorten it. */
 const LOGIN_TIMEOUT_MS = 30_000;
 
+/**
+ * How long the no-`expect` proof waits for the post-submit navigation to SETTLE,
+ * before reading the URL that actually decides whether the login took.
+ *
+ * A slice, deliberately not the whole login budget. The settle wait's own result
+ * is DISCARDED (`.catch(() => undefined)`) — it exists only to let a redirect
+ * land before the URL is read, and a page that never reaches network-idle is the
+ * normal shape of a REJECTED login: the credentials POST comes back 401, the app
+ * renders an error in place, and nothing navigates. Spending the full budget
+ * there meant the one case this check exists to catch was also the slowest to
+ * report, at 30s of silence per wrong password.
+ *
+ * That is not hypothetical. `session-builder.test.ts`'s "a persona whose
+ * credentials are wrong fails the run instead of opening it signed out" sets its
+ * own ceiling to `LOGIN_TIMEOUT_MS`, so on any runner where the idle wait ran to
+ * term the AuthError arrived after the harness had already given up — the test
+ * was structurally unable to observe the behaviour it asserts, and it timed out
+ * at exactly 30,000ms on `main` (run 33647731476, commit 06ec3a07).
+ *
+ * Five seconds is chosen against what it is waiting for — one redirect hop on an
+ * app that has already answered the login POST — not against the runner. A
+ * caller with less than that left still shortens it via `capWait`.
+ */
+const NAVIGATION_SETTLE_MS = 5_000;
+
 /** What `start_debug({as})` resolved to — the persona plus the key that named it. */
 export interface ResolvedAuth {
   /** The `as` key, as the caller typed it — every failure names it. */
@@ -232,7 +257,9 @@ async function assertSignedIn(
     return;
   }
 
-  await adapter.waitFor({ networkIdle: true, timeout: budget }).catch(() => undefined);
+  await adapter
+    .waitFor({ networkIdle: true, timeout: capWait(NAVIGATION_SETTLE_MS, budget) })
+    .catch(() => undefined);
   const after = await currentUrl(adapter);
   if (after === null) {
     throw new AuthError(
