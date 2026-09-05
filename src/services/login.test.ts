@@ -110,7 +110,7 @@ test('samePage ignores the query a login flow appends', () => {
 // --- performLogin -------------------------------------------------------------
 
 /** A trace entry: what the login asked the adapter to do. */
-type Call = { fn: string; arg?: unknown; text?: string };
+type Call = { fn: string; arg?: unknown; text?: string; timeout?: number };
 
 interface FakeOptions {
   /** Selectors that resolve to a node; everything else resolves to null. */
@@ -155,7 +155,7 @@ function fakeAdapter(options: FakeOptions = {}): { adapter: Adapter; calls: Call
     readState: async () => [],
     screenshot: async () => new Uint8Array(),
     waitFor: async (opts) => {
-      calls.push({ fn: 'waitFor', arg: opts.query ?? 'networkIdle' });
+      calls.push({ fn: 'waitFor', arg: opts.query ?? 'networkIdle', timeout: opts.timeout });
       if (options.waitFails) throw new Error('never became visible');
     },
     console: async () => [],
@@ -194,6 +194,35 @@ test('performLogin opens the login page, fills every field, and submits', async 
   // start — the driver's first step reads that page, not the entry url.
   expect(steps.at(-1)?.step).toBe('signed in as "admin" → http://localhost:5173/dashboard');
   expect(steps.every((s) => s.ok)).toBe(true);
+});
+
+test('the no-`expect` settle wait is a SLICE of the login budget, not all of it', async () => {
+  const { adapter, calls } = fakeAdapter();
+  await performLogin(adapter, OPTS);
+
+  // The proof-of-signin path with no `expect` waits for the post-submit
+  // navigation to settle, then reads the URL that actually decides. That wait's
+  // result is DISCARDED, so its only job is to let a redirect land — and a page
+  // that never reaches network-idle is the NORMAL shape of a rejected login (the
+  // credentials POST answered 401, nothing navigated).
+  //
+  // RED-WHEN-WIDENED: pass the whole budget here again and a wrong password costs
+  // 30s of silence, and `session-builder.test.ts`'s wrong-credentials story — whose
+  // own ceiling IS the login budget — becomes unobservable and times out at exactly
+  // 30,000ms, as it did on main (run 33647731476, commit 06ec3a07).
+  const settle = calls.find((c) => c.fn === 'waitFor' && c.arg === 'networkIdle');
+  expect(settle).toBeDefined();
+  expect(settle?.timeout).toBe(5_000);
+});
+
+test('a caller with less budget left still shortens the settle wait', async () => {
+  const { adapter, calls } = fakeAdapter();
+  await performLogin(adapter, { ...OPTS, timeoutMs: 1_200 });
+
+  // capWait only ever SHORTENS: the slice is a ceiling, never a floor a spent
+  // run has to sit through.
+  const settle = calls.find((c) => c.fn === 'waitFor' && c.arg === 'networkIdle');
+  expect(settle?.timeout).toBe(1_200);
 });
 
 test('performLogin clears each field before typing (type appends, it does not fill)', async () => {

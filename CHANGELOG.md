@@ -38,6 +38,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/tmp/project`, or any container workdir with a `tmp` component matched at
   the path root and biome pruned the entire tree before reaching the repo.
 
+- **A rejected login now reports in seconds, not after the whole 30s budget.**
+  The no-`expect` proof-of-signin waits for the post-submit navigation to settle
+  before reading the URL that decides — but it was given the ENTIRE remaining
+  login budget for a wait whose result it discards. A page that never reaches
+  network-idle is the normal shape of a *rejected* login (the credentials POST
+  comes back 401 and nothing navigates), so the one case the check exists to
+  catch was also the slowest to report. The settle wait is now a bounded
+  `NAVIGATION_SETTLE_MS` slice, still shortened further by a caller with less
+  budget left.
+
+  This is also why CI was red on `main`: `session-builder.test.ts`'s
+  wrong-credentials story sets its own ceiling to the login budget, so on any
+  runner where the idle wait ran to term the `AuthError` arrived after the
+  harness had already given up. The test was structurally unable to observe the
+  behaviour it asserts and timed out at exactly 30,000ms (run 33647731476,
+  commit 06ec3a07). No test was modified — the code was.
+
 ## [1.8.0] - 2026-07-30
 
 ### Changed
