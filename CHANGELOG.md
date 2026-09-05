@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-09-05
+
+### Added
+
+- **The project config is read from `.dz/ui-debugger/ui-debugger-mcp.json`
+  first, falling back to the root `.ui-debugger-mcp.json`.** The `.dz/` home is
+  where the developerz.ai platform now keeps every repo-scoped config, and its
+  setup lane renders this one there. Both locations work; `.dz/` wins outright
+  when both exist, and a malformed `.dz/` copy is an error rather than a
+  fall-through to the root file. A fresh `init` writes to `.dz/` when the repo
+  already has that directory, and to the root otherwise.
+
+  This is the release the platform's own move depends on: before it, a config
+  written under `.dz/` was invisible and the server reported no project config.
+
+### Fixed
+
+- A full-document load the driver did not ask for is now surfaced on the
+  adapter contract rather than silently absorbed, so an act that navigates out
+  from under itself is visible to the belt.
+- `biome` no longer prunes the whole checkout when its path happens to contain
+  a `tmp` directory, which made lint a no-op under some working trees.
+
 ## [1.8.0] - 2026-07-30
 
 ### Changed
