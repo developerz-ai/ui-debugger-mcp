@@ -550,7 +550,27 @@ function serveLoginApp(credentials: { email: string; password: string }) {
       as: 'admin',
     });
     try {
-      await expect(built.open()).rejects.toThrow(AuthError);
+      // Deliberately NOT `await expect(built.open()).rejects.toThrow(AuthError)`.
+      //
+      // Awaiting a long, multi-round-trip browser flow THROUGH the `.rejects`
+      // matcher starves the loop driving it: every CDP call inside the pending
+      // promise then costs ~1s. Measured on this exact login — the same
+      // `performLogin`, same adapter, same page — 1.4s awaited directly, 31.5s
+      // awaited via `.rejects`. That is what timed this test out at exactly
+      // 30,000ms on `main` (runs 33969855127 and 33647731476): not the behaviour
+      // it asserts, but the way it awaited it.
+      //
+      // `.rejects` stays fine everywhere else in this suite — every other use
+      // wraps a call that fails on ONE round trip (or none), where a single
+      // stall costs nothing. The rule is about how much work is in flight, not
+      // about the matcher.
+      let thrown: unknown;
+      try {
+        await built.open();
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(AuthError);
     } finally {
       await built.session.close();
       server.stop(true);
