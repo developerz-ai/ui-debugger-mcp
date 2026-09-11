@@ -14,7 +14,11 @@ jobs:
     name: bun (lint + typecheck + test)
     # Blacksmith 2 vCPU runner — fast on small matrices, plenty for this suite.
     runs-on: blacksmith-2vcpu-ubuntu-2204
-    timeout-minutes: 10
+    # 10 was too tight (run 34577257568 was cancelled at 10m17s mid-install).
+    # 20 now exists for the retry's sake, not to accommodate a hang: three
+    # bounded attempts (3 × 300s) + backoff (20s + 40s) + ~30s for the rest of
+    # the job ≈ 16.5m, so every attempt gets its full budget inside the ceiling.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -41,21 +45,74 @@ jobs:
       # Browser integration tests drive a real Chromium. Cache the Playwright-
       # managed browser (keyed on bun.lock so a playwright-core bump invalidates it)
       # so it isn't re-downloaded each run; the adapter prefers managed Chromium.
+      # v2 because the v1 entry is incomplete and immutable: it holds
+      # chromium-1228 but not chromium_headless_shell-1228, which every headless
+      # launch needs (run 34583721201). v2 lets the first run save a complete
+      # set; the prefix restore-key still falls back to v1.
       - name: cache Playwright Chromium
-        id: playwright-cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
+          key: ${{ runner.os }}-playwright-v2-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ runner.os }}-playwright-
 
+      # No apt on any path. The install fetches the browser binaries from
+      # Playwright's CDN over HTTPS, or fills in what the cache above is missing
+      # — it never touches the Ubuntu mirrors, whose port-80 egress from these
+      # runners is what actually flakes (run 34580929047: one apt attempt
+      # crawled 11m before failing, the second was still crawling when the 20m
+      # ceiling killed the job).
+      # The system libraries `install-deps` would add are already on the stock
+      # image: apt's own plan in that run listed all 14 runtime libs (libnss3,
+      # libgbm1, libasound2, libcups2, …) as UPGRADES, not new installs, and the
+      # only NEW packages were fonts — which affect glyph rendering in
+      # screenshots, and no CI assertion reads rendered output. The launch check
+      # in the next step gates that claim at runtime.
+      # The CLI is the repo-pinned playwright-core's own — NOT `bunx playwright`,
+      # which resolves an unpinned version: run 34583721201 had it exit 0 in
+      # 0.7s without fetching the headless shell the pinned version requires.
+      # Each attempt is bounded: `timeout` kills a wedged or crawling attempt so
+      # the retry actually fires. Exit 124 (or 137 after the KILL fallback) means
+      # the budget was exceeded — logged as such and treated as a failed attempt.
+      # 300s dwarfs the ~19s a healthy install took while leaving 3 attempts +
+      # backoff inside timeout-minutes (a cold full fetch is ~300 MB).
       - name: install chromium
         run: |
-          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
-            bunx playwright install-deps chromium
-          else
-            bunx playwright install --with-deps chromium
-          fi
+          for attempt in 1 2 3; do
+            timeout --kill-after=30 300 node node_modules/playwright-core/cli.js install chromium
+            rc=$?
+            if [ "$rc" -eq 0 ]; then
+              echo "chromium installed (attempt $attempt/3)"
+              exit 0
+            fi
+            if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+              echo "::warning::attempt $attempt/3 exceeded its 300s budget and was killed (exit $rc)"
+            else
+              echo "::warning::chromium install attempt $attempt/3 failed (exit $rc)"
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 20))
+            fi
+          done
+
+          echo "::error::chromium install failed after 3 attempts — see output above"
+          exit 1
+
+      # Runtime gate: prove the launch surface the suite needs is actually
+      # there — both the system libraries (the no-apt claim above) and the
+      # browser set (this is what caught run 34583721201: the cached browser
+      # lacked chrome-headless-shell, which headless launches — the suite's
+      # launchPersistentContext included — resolve to). If anything is missing,
+      # this fails HERE with the error naming it, not as a mystery inside
+      # `bun test`. Not retried: a missing binary or library is not transient.
+      - name: verify chromium launches
+        run: |
+          bun -e '(async () => {
+            const { chromium } = await import("playwright-core");
+            const browser = await chromium.launch({ headless: true });
+            console.log("chromium " + browser.version() + " launched headless, no apt deps");
+            await browser.close();
+          })().catch((err) => { console.error(err); process.exit(1); })'
 
       # bun test runs test files in parallel by default. The low-level BrowserAdapter
       # integration suite flakes under the runner's parallel 2-vCPU load (its own
