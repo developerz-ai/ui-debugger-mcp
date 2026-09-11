@@ -14,9 +14,10 @@ jobs:
     name: bun (lint + typecheck + test)
     # Blacksmith 2 vCPU runner — fast on small matrices, plenty for this suite.
     runs-on: blacksmith-2vcpu-ubuntu-2204
-    # 10 was too tight for a 2-vCPU runner doing an apt install + build +
-    # typecheck + test: one healthy-but-slow run was cancelled at 10m17s
-    # (run 34577257568). 20 fits a full failed-then-retried apt cycle too.
+    # 10 was too tight (run 34577257568 was cancelled at 10m17s mid-install).
+    # 20 now exists for the retry's sake, not to accommodate a hang: three
+    # bounded attempts (3 × 300s) + backoff (20s + 40s) + ~30s for the rest of
+    # the job ≈ 16.5m, so every attempt gets its full budget inside the ceiling.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -45,48 +46,63 @@ jobs:
       # managed browser (keyed on bun.lock so a playwright-core bump invalidates it)
       # so it isn't re-downloaded each run; the adapter prefers managed Chromium.
       - name: cache Playwright Chromium
-        id: playwright-cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ runner.os }}-playwright-
 
-      # The cache above covers only the browser binary. System libraries install
-      # through apt on EVERY run — cache hit or not — and that apt fetch is the
-      # flaky part (2026-09-11: fonts-ipafont-gothic at ~150 kB/s, exit 100
-      # "Unable to fetch some archives"; 8 of the last 15 runs failed). So retry
-      # a bounded 3x, refreshing the package index between attempts (a stale
-      # index is the usual cause of "Unable to fetch some archives"). The final
-      # attempt still fails loudly — nothing is redirected, the tool's own
-      # output above is the error.
+      # No apt on any path. `playwright install chromium` fetches the browser
+      # binary from Playwright's CDN over HTTPS, or no-ops when the cache above
+      # restored it — it never touches the Ubuntu mirrors, whose port-80 egress
+      # from these runners is what actually flakes (run 34580929047: one apt
+      # attempt crawled 11m before failing, the second was still crawling when
+      # the 20m ceiling killed the job).
+      # The system libraries `install-deps` would add are already on the stock
+      # image: apt's own plan in that run listed all 14 runtime libs (libnss3,
+      # libgbm1, libasound2, libcups2, …) as UPGRADES, not new installs, and the
+      # only NEW packages were fonts — which affect glyph rendering in
+      # screenshots, and no CI assertion reads rendered output. The launch check
+      # in the next step gates that claim at runtime.
+      # Each attempt is bounded: `timeout` kills a wedged or crawling attempt so
+      # the retry actually fires. Exit 124 (or 137 after the KILL fallback) means
+      # the budget was exceeded — logged as such and treated as a failed attempt.
+      # 300s dwarfs the ~19s a healthy install took while leaving 3 attempts +
+      # backoff inside timeout-minutes.
       - name: install chromium
         run: |
-          install_chromium() {
-            if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
-              bunx playwright install-deps chromium
-            else
-              bunx playwright install --with-deps chromium
-            fi
-          }
-
           for attempt in 1 2 3; do
-            if install_chromium; then
-              echo "chromium + deps installed (attempt $attempt/3)"
+            timeout --kill-after=30 300 bunx playwright install chromium
+            rc=$?
+            if [ "$rc" -eq 0 ]; then
+              echo "chromium installed (attempt $attempt/3)"
               exit 0
             fi
-            echo "::warning::chromium install attempt $attempt/3 failed"
+            if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+              echo "::warning::attempt $attempt/3 exceeded its 300s budget and was killed (exit $rc)"
+            else
+              echo "::warning::chromium install attempt $attempt/3 failed (exit $rc)"
+            fi
             if [ "$attempt" -lt 3 ]; then
-              echo "refreshing apt package index, retrying in $((attempt * 20))s"
-              # a failed index refresh must not kill the step; the retried
-              # install decides
-              sudo apt-get update || true
               sleep $((attempt * 20))
             fi
           done
 
-          echo "::error::chromium install failed after 3 attempts — see apt output above"
+          echo "::error::chromium install failed after 3 attempts — see output above"
           exit 1
+
+      # Runtime gate on dropping apt above: prove the stock image's libraries
+      # really do launch this Chromium. If one is ever missing, this fails HERE
+      # with the loader/launch error, not as a mystery failure inside `bun test`.
+      # Not retried — a missing library is not transient.
+      - name: verify chromium launches
+        run: |
+          bun -e '(async () => {
+            const { chromium } = await import("playwright-core");
+            const browser = await chromium.launch({ headless: true });
+            console.log("chromium " + browser.version() + " launched headless, no apt deps");
+            await browser.close();
+          })().catch((err) => { console.error(err); process.exit(1); })'
 
       # bun test runs test files in parallel by default. The low-level BrowserAdapter
       # integration suite flakes under the runner's parallel 2-vCPU load (its own
