@@ -2,22 +2,37 @@
 # developerz.ai maintainer policy — developerz-ai/ui-debugger-mcp
 #
 # Second repo onboarded to the maintainer loops after developerz-ai/wurk.
-# Deliberately minimal: everything not set here rides the schema defaults
+# AUTONOMOUS posture since 2026-09-11, authorized by the repo owner (ivndev001):
+# the file is the reconcile of the committed policy to renderAutonomousPolicy's
+# output, as measured by `dz enroll` on 2026-09-11 (developerz.ai#3400) — after
+# it merges, `dz enroll --posture autonomous` should report changes: [].
+# Everything not set here still rides the schema defaults
 # (packages/policy/src/defaults.ts). Only the values below are pinned, and each
 # is pinned for a stated reason.
 version: 1
 
 pr:
-  # PINNED OFF. The schema default is `true` (dz#101), so omitting this key
-  # ENABLES auto-merge — the opposite of what a first onboarding should do on a
-  # public repo. Matches developerz-ai/wurk (wurk#345): the bot watches CI and
-  # reports, a human merges.
+  # PINNED ON — the substantive change of the autonomous adoption, authorized
+  # by the repo owner on 2026-09-11. This is what makes the repo AI-managed
+  # rather than AI-assisted: the bot merges its own PRs once they are green.
+  #
+  # What stands behind that is the repo's own CI and branch protection, NOT
+  # this line: ci.yml (lint + typecheck + test + build) runs on every PR, and
+  # the `main-protection` ruleset requires a PR into main and blocks
+  # force-push and deletion. This key only says who may press the button once
+  # those gates pass — it grants nothing and enforces nothing by itself.
   #
   # The bot also never posts an approving review here: that knob is
-  # `review.approval` (default false), NOT `pr.approval` — `PrSchema` is a plain
-  # `z.object`, so an unknown `pr.approval` key would be silently stripped and
-  # look set while doing nothing.
-  auto_merge: false
+  # `review.approval`, pinned false below — `PrSchema` is a plain `z.object`,
+  # so an unknown `pr.approval` key would be silently stripped and look set
+  # while doing nothing.
+  auto_merge: true
+
+  # Wait on the two bots that review code here. Dependabot is dropped: this
+  # repo has no .github/dependabot.yml, so dependabot never runs on it —
+  # waiting on it would hold a green merge open for a reviewer that is not
+  # coming.
+  wait_for_other_bots: [coderabbit, copilot]
 
 handoff:
   # `fleet`, not `webhook`. Both grant the same `HandoffWebhook` capability
@@ -33,19 +48,48 @@ handoff:
   # maintainer", :165-167) and needs no placeholder ref at all (dz#1026).
   mode: fleet
 
+  # Autonomous posture: hand off without asking the reporter first. Under
+  # `mode: fleet` the handoff path is real, so the ask is a formality — and on
+  # an autonomously maintained repo the answer is already yes.
+  ask_reporter_first: false
+
 review:
-  # Native review stays OFF until switching it on is a decision somebody makes.
+  # Native review ON, deliberately. The fence this file used to keep
+  # (`enabled: false`, checked first in planReview, dispatch.ts:177, ahead of
+  # every other gate) came down the documented way: `enabled: true` +
+  # `force: true` together, force being what beats an active incumbent —
+  # CodeRabbit reviewed #51 on 2026-07-30 and commented on #57, so without
+  # force planReview defers `coderabbit_active` (:211; the activity window is
+  # a rolling 14 days, :96-112).
   #
-  # It would be inert today regardless: CodeRabbit is the incumbent on this repo
-  # (it reviewed #51 on 2026-07-30 and commented on #57), so `planReview` returns
-  # `defer: coderabbit_active` (packages/review/src/dispatch.ts:211) and every
-  # other `review:` key is dead config. But that gate is a rolling 14-day
-  # ACTIVITY window (dispatch.ts:96-112), not a posture — fourteen quiet days and
-  # the native reviewer starts reviewing this public repo's PRs with nobody
-  # having chosen that. `enabled: false` is checked first in `planReview` (:177),
-  # ahead of every other gate, so the skip can never depend on the incumbent
-  # staying alive. Same fence the platform repo's own policy uses.
-  #
-  # To run the native lane here, set `enabled: true` + `force: true` together
-  # (force is what beats an active incumbent) — deliberately, not by lapse.
-  enabled: false
+  # ADVISORY first pass — the shape wurk has run since 2026-08. The native
+  # reviewer runs and comments, but never blocks a merge and never approves
+  # one. Deliberately conservative for a first live pass; the two knobs below
+  # are where blocking would be switched on if the pass earns trust.
+  enabled: true
+  force: true
+  # Comments only, never REQUEST_CHANGES: a request-changes review would put a
+  # first-live-pass reviewer above the green-CI + ruleset gates in the merge
+  # path, which is not what an advisory pass is for.
+  request_changes: false
+  # And no self-approval — the bot never manufactures the review that
+  # satisfies a review requirement on its own PR (schema default is true;
+  # pinned off).
+  approval: false
+
+release:
+  # CORRECTION, not a downgrade. `manager: release-please` implies batched
+  # release PRs driven by `release-please-config.json` and
+  # `.release-please-manifest.json` — neither file exists in this repo, no
+  # release-please PR has ever been opened, and releases are cut by
+  # .github/workflows/release.yml (v1.6.0 through v1.9.0, `on: release:
+  # published` -> npm + MCP registry). `none` means no release MANAGER, which
+  # is what is true here. The same correction wurk made in its #328.
+  manager: "none"
+  # No independent publish path for the agent. In wurk, `channels:
+  # [github-release]` fired on ordinary feature merges and cut seven tags plus
+  # GitHub Releases marked Latest with no gem behind them (wurk#420) — and
+  # `manager: none` alone did NOT stop it; the channel authorized releasing on
+  # its own. release.yml owns the whole lane here too, so there is no channel
+  # for the agent to publish on.
+  channels: []
