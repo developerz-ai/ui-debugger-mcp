@@ -14,7 +14,10 @@ jobs:
     name: bun (lint + typecheck + test)
     # Blacksmith 2 vCPU runner — fast on small matrices, plenty for this suite.
     runs-on: blacksmith-2vcpu-ubuntu-2204
-    timeout-minutes: 10
+    # 10 was too tight for a 2-vCPU runner doing an apt install + build +
+    # typecheck + test: one healthy-but-slow run was cancelled at 10m17s
+    # (run 34577257568). 20 fits a full failed-then-retried apt cycle too.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -49,13 +52,41 @@ jobs:
           key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ runner.os }}-playwright-
 
+      # The cache above covers only the browser binary. System libraries install
+      # through apt on EVERY run — cache hit or not — and that apt fetch is the
+      # flaky part (2026-09-11: fonts-ipafont-gothic at ~150 kB/s, exit 100
+      # "Unable to fetch some archives"; 8 of the last 15 runs failed). So retry
+      # a bounded 3x, refreshing the package index between attempts (a stale
+      # index is the usual cause of "Unable to fetch some archives"). The final
+      # attempt still fails loudly — nothing is redirected, the tool's own
+      # output above is the error.
       - name: install chromium
         run: |
-          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
-            bunx playwright install-deps chromium
-          else
-            bunx playwright install --with-deps chromium
-          fi
+          install_chromium() {
+            if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+              bunx playwright install-deps chromium
+            else
+              bunx playwright install --with-deps chromium
+            fi
+          }
+
+          for attempt in 1 2 3; do
+            if install_chromium; then
+              echo "chromium + deps installed (attempt $attempt/3)"
+              exit 0
+            fi
+            echo "::warning::chromium install attempt $attempt/3 failed"
+            if [ "$attempt" -lt 3 ]; then
+              echo "refreshing apt package index, retrying in $((attempt * 20))s"
+              # a failed index refresh must not kill the step; the retried
+              # install decides
+              sudo apt-get update || true
+              sleep $((attempt * 20))
+            fi
+          done
+
+          echo "::error::chromium install failed after 3 attempts — see apt output above"
+          exit 1
 
       # bun test runs test files in parallel by default. The low-level BrowserAdapter
       # integration suite flakes under the runner's parallel 2-vCPU load (its own
