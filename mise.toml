@@ -1,0 +1,5 @@
+# Paired with .github/workflows/ci.yml — keep both in lockstep when bumping
+# versions, otherwise local dev and CI drift apart on the bun/node pair.
+[tools]
+bun = "1.4.0"
+node = "24"
