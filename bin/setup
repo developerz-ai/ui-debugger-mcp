@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Install this repo's dependencies and build its dummy/web e2e fixture, so
-# `bin/check` can run end-to-end on a fresh checkout.
+# Install this repo's dependencies, build the dummy/web e2e fixture, and install
+# the pinned Chromium so `bin/check` can run end-to-end on a fresh checkout
+# without re-downloading the browser on a re-run.
 #
 # Idempotent: every step is a no-op when its output is already there.
 # Cwd-independent: `cd` to the repo root before running anything, so the
@@ -8,9 +9,23 @@
 #
 # Stages:
 #   1. mise (if installed)  — pin bun + node from .mise.toml / .tool-versions
-#   2. bun install          — root deps, so `bunx tsc` resolves
+#   2. bun install          — root deps, so `bunx tsc` resolves and
+#                             node_modules/playwright-core/cli.js exists
 #   3. dummy/web fixture    — `bun install --frozen-lockfile && bun run build`
 #                             so the e2e suite's static server can find dist/
+#   4. Chromium             — repo-pinned playwright-core's CLI downloads the
+#                             browser binaries from Playwright's CDN over HTTPS
+#                             (NO apt / install-deps on any path), with the
+#                             same bounded retry ci.yml already learned to
+#                             need. Skipped when both the pinned chromium AND
+#                             its headless shell are already in the Playwright
+#                             cache dir, so a re-run with the browser present
+#                             does NOT re-download.
+#   5. Launch check         — playwright-core actually launches the headless
+#                             shell, so a missing binary or system lib fails
+#                             HERE with the error naming it, not as a mystery
+#                             inside `bin/check` / `bun test`. Not retried: a
+#                             missing binary or library is not transient.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -44,5 +59,86 @@ echo "==> dummy/web fixture (install + build)"
   bun install ${CI:+--frozen-lockfile}
   bun run build
 )
+
+# Resolve the cache dir the way playwright-core does internally: default to
+# ~/.cache/ms-playwright unless PLAYWRIGHT_BROWSERS_PATH overrides it.
+CACHE_DIR="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
+
+# Parse the chromium revision the installed playwright-core pins, so the
+# skip-when-cached check below matches what `playwright-core install
+# chromium` would actually download. Different playwright-core versions pin
+# different revisions (the cache here holds chromium-1228, -1234, -1243
+# side-by-side from prior runs), and `browsers.json` is the manifest
+# playwright-core ships in-repo that names the revision this version wants.
+PLAYWRIGHT_REV=$(node -p 'require("./node_modules/playwright-core/browsers.json").browsers.find(b => b.name === "chromium").revision')
+
+# Skip the install entirely when both the pinned chromium AND its headless
+# shell are already on disk. `INSTALLATION_COMPLETE` is the marker
+# playwright-core writes once a browser is fully fetched + verified (it's the
+# same marker its own registry checks on subsequent runs, so this is the
+# canonical "is it there" signal — robust to layout changes like the move
+# from chrome-linux/ to chrome-linux64/). Without this skip, re-running
+# `bin/setup` would re-invoke the CLI, which would re-scan and exit clean but
+# still pay the startup cost; with it, the second run is a directory stat.
+if [ -f "$CACHE_DIR/chromium-$PLAYWRIGHT_REV/INSTALLATION_COMPLETE" ] \
+   && [ -f "$CACHE_DIR/chromium_headless_shell-$PLAYWRIGHT_REV/INSTALLATION_COMPLETE" ]; then
+  echo "==> chromium $PLAYWRIGHT_REV + headless_shell already at $CACHE_DIR, skipping install"
+else
+  echo "==> chromium install (playwright-core revision $PLAYWRIGHT_REV)"
+  # Use the repo-pinned CLI, NEVER `bunx playwright`: `bunx` resolves an
+  # unpinned version that "exit 0 in 0.7s without fetching the headless
+  # shell the pinned version requires" (ci.yml:71-73). No apt /
+  # install-deps on any path — the system libs are already on the stock
+  # image, and the Ubuntu mirrors are what flake (ci.yml:59-66). The launch
+  # check in the next stage gates that claim at runtime.
+  # Bounded retry: `timeout` kills a wedged or crawling attempt so the retry
+  # actually fires. Exit 124 (or 137 after the KILL fallback) means the
+  # 300s budget was exceeded and the attempt is logged as such. 300s
+  # dwarfs the ~19s a healthy install took while leaving 3 attempts +
+  # backoff inside any reasonable outer budget.
+  install_ok=0
+  for attempt in 1 2 3; do
+    # `|| rc=$?` is the form `set -e` exempts (same family as the `${CI:+...}`
+    # idiom above): a failed attempt must fall through to the rc checks below
+    # so the retry + backoff actually run. A bare `timeout …` line here would
+    # abort the whole script on the FIRST non-zero exit and the 3-attempt loop
+    # would be dead code — the exact defect CodeRabbit's pre-merge check
+    # flagged on PR #84.
+    rc=0
+    timeout --kill-after=30 300 node node_modules/playwright-core/cli.js install chromium || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      echo "chromium installed (attempt $attempt/3)"
+      install_ok=1
+      break
+    fi
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      echo "::warning::attempt $attempt/3 exceeded its 300s budget and was killed (exit $rc)"
+    else
+      echo "::warning::chromium install attempt $attempt/3 failed (exit $rc)"
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      sleep $((attempt * 20))
+    fi
+  done
+  if [ "$install_ok" -ne 1 ]; then
+    echo "::error::chromium install failed after 3 attempts — see output above" >&2
+    exit 1
+  fi
+fi
+
+# Runtime gate: prove the launch surface the suite needs is actually there —
+# both the browser set (chromium + headless_shell) and the system libraries
+# the no-apt claim rests on. If anything is missing, this fails HERE with
+# the error naming it (e.g. "Chromium distribution 'X' is not found at Y"
+# — same shape as the issue's #83 baseline-red), not as a mystery inside
+# `bin check` / `bun test`. Not retried: a missing binary or library is
+# not transient.
+echo "==> verify chromium launches"
+bun -e '(async () => {
+  const { chromium } = await import("playwright-core");
+  const browser = await chromium.launch({ headless: true });
+  console.log("chromium " + browser.version() + " launched headless");
+  await browser.close();
+})().catch((err) => { console.error(err); process.exit(1); })'
 
 echo "==> ready. try: bin/check"
