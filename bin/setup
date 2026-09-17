@@ -98,8 +98,14 @@ else
   # backoff inside any reasonable outer budget.
   install_ok=0
   for attempt in 1 2 3; do
-    timeout --kill-after=30 300 node node_modules/playwright-core/cli.js install chromium
-    rc=$?
+    # `|| rc=$?` is the form `set -e` exempts (same family as the `${CI:+...}`
+    # idiom above): a failed attempt must fall through to the rc checks below
+    # so the retry + backoff actually run. A bare `timeout …` line here would
+    # abort the whole script on the FIRST non-zero exit and the 3-attempt loop
+    # would be dead code — the exact defect CodeRabbit's pre-merge check
+    # flagged on PR #84.
+    rc=0
+    timeout --kill-after=30 300 node node_modules/playwright-core/cli.js install chromium || rc=$?
     if [ "$rc" -eq 0 ]; then
       echo "chromium installed (attempt $attempt/3)"
       install_ok=1
