@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Install this repo's dependencies and build its dummy/web e2e fixture, so
+# `bin/check` can run end-to-end on a fresh checkout.
+#
+# Idempotent: every step is a no-op when its output is already there.
+# Cwd-independent: `cd` to the repo root before running anything, so the
+# script works no matter where it is invoked from.
+#
+# Stages:
+#   1. mise (if installed)  — pin bun + node from .mise.toml / .tool-versions
+#   2. bun install          — root deps, so `bunx tsc` resolves
+#   3. dummy/web fixture    — `bun install --frozen-lockfile && bun run build`
+#                             so the e2e suite's static server can find dist/
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# Guard mise activation the way wurk's bin/setup does: skip cleanly when mise
+# is absent (a laptop without mise still works), activate it when present so a
+# repo-pinned bun version wins over the system one.
+if command -v mise >/dev/null 2>&1; then
+  echo "==> mise install"
+  mise install
+  # `mise env -s bash` emits `export FOO=bar ...` for the current shell; eval
+  # it into THIS shell so the `bun` below is the mise-managed one, not PATH.
+  eval "$(mise env -s bash)"
+fi
+
+command -v bun >/dev/null || { echo "X_BUN_MISSING: install bun — https://bun.sh"; exit 1; }
+
+echo "==> bun install (root)"
+bun install
+
+# dummy/web is a standalone package with its own bun.lock, so the repo-root
+# install never reaches it. Both `bun test` (src/dummy-web.e2e.test.ts:141) and
+# CI (.github/workflows/ci.yml:42) build the fixture's dist/ up front; doing it
+# here too keeps `bin/check` honest when run from a fresh clone.
+echo "==> dummy/web fixture (install + build)"
+(
+  cd dummy/web
+  # --frozen-lockfile under CI only: locally a plain install is fine and lets
+  # `bun install` record any newly added dep. `${CI:+...}` is the form
+  # `set -u` exempts, so an unset CI expands to nothing.
+  bun install ${CI:+--frozen-lockfile}
+  bun run build
+)
+
+echo "==> ready. try: bin/check"

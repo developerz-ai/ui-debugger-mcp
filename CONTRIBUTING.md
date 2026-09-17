@@ -5,8 +5,12 @@
 ```bash
 git clone <repo>
 cd ui-debugger-mcp
-bun install
+bin/setup
 ```
+
+The one-command entry point is `bin/setup` — installs root + dummy/web deps and
+builds the e2e fixture's `dist/`. `bin/check` is the matching CI gate (typecheck,
+lint, test). Both run from any cwd and are the same commands CI runs.
 
 Boot the server in watch mode (for manual testing with an MCP client):
 
@@ -15,6 +19,16 @@ bun run dev
 ```
 
 ## CI gate — all four must pass before commit
+
+`bin/check` runs typecheck + lint + test in one command. For the full four-step
+gate that matches CI exactly:
+
+```bash
+bin/check           # typecheck + lint + test (the script CI runs)
+bun run build       # esbuild / tsc emit
+```
+
+Or step-by-step:
 
 ```bash
 bun run lint        # Biome format + lint

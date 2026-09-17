@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# The CI gate as a single command: typecheck, lint, test — in the order the
+# platform's Bun stack profile declares, so the first red leg fails the script
+# with a tail that names what was wrong.
+#
+# Anything this runs, CI runs too — set `SKIP_BROWSER_INTEGRATION=1` the way CI
+# does (`.github/workflows/ci.yml`: the BrowserAdapter integration suite flakes
+# under the runner's 2-vCPU load, so CI skips it; the e2e suite covers the real
+# browser→findings path in CI). Run `bin/setup` first.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# `&&` not `;`: set -e + `&&` fails on the FIRST red leg, so the captured
+# tail names the stage that broke instead of a downstream error masking it.
+echo "==> typecheck"
+bun run typecheck
+
+echo "==> lint"
+bun run lint
+
+echo "==> test"
+SKIP_BROWSER_INTEGRATION=1 bun test
