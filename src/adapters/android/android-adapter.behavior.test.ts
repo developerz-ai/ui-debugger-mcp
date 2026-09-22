@@ -161,6 +161,42 @@ describe('AndroidAdapter.pressKey', () => {
   });
 });
 
+describe('AndroidAdapter act `clear: true` flow', () => {
+  // Drives the real AndroidAdapter through the sequence the act `clear: true` belt
+  // action emits: focus (tap), select-all chord, delete, then type the new text.
+  // Asserts the **exact** adb argv shape (FakeAdb.calls) — including the
+  // `input keycombination KEYCODE_CTRL_LEFT KEYCODE_A` chord and the
+  // `input keyevent KEYCODE_FORWARD_DEL` delete. If the adapter ever swaps
+  // the keyevent sequence the assertions fail verbatim; fixing that is a
+  // follow-up, not something this test should silently paper over.
+  test('type("", "") → pressKey("Control+a") → pressKey("Delete") → type("hello") emits the expected argv order', async () => {
+    const node = makeNode({ bounds: { x: 0, y: 0, width: 200, height: 60 } });
+    const { adapter, adb } = makeAdapter({ nodes: [node] });
+
+    await adapter.type('Save', '');
+    await adapter.pressKey('Control+a');
+    await adapter.pressKey('Delete');
+    await adapter.type('Save', 'hello');
+
+    // Slice down to the `input` argv the adapter hands the device shell, then
+    // strip the `input` prefix so the assertion reads as the belt sees it.
+    const ops = adb.calls
+      .filter((c) => c.method === 'shell' && c.args[0] === 'input')
+      .map((c) => c.args.slice(1));
+    expect(ops).toEqual([
+      // adapter.type('Save', '') → focus tap, no text call.
+      ['tap', '100', '30'],
+      // adapter.pressKey('Control+a') → select-all chord (Android 11+ keycombination).
+      ['keycombination', 'KEYCODE_CTRL_LEFT', 'KEYCODE_A'],
+      // adapter.pressKey('Delete') → forward-delete keyevent.
+      ['keyevent', 'KEYCODE_FORWARD_DEL'],
+      // adapter.type('Save', 'hello') → re-focus tap, then type the new text.
+      ['tap', '100', '30'],
+      ['text', 'hello'],
+    ]);
+  });
+});
+
 describe('AndroidAdapter.scroll', () => {
   test('down scroll → swipe shell call', async () => {
     const { adapter, adb } = makeAdapter();
