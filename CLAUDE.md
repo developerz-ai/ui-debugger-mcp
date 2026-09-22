@@ -45,6 +45,9 @@ code, asks again. Loop until the UI works. No human clicking.
 - `src/config/` — load the project config (`.dz/ui-debugger/ui-debugger-mcp.json`
   first, root `.ui-debugger-mcp.json` fallback), resolve model/targets.
 - `src/services/` — business logic. Thin handlers, logic here.
+- `src/errors.ts` — custom error classes (base `UiDebuggerError` + `ConfigError` /
+  `AdapterError` / `AuthError` / `AgentError` / `WorkspaceError` / `ProviderError` /
+  etc.). No generic `Error`.
 
 ## Targets (one project, many)
 | Target  | Adapter        | Protocol            | Reads              |
