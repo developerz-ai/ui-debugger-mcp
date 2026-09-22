@@ -26,15 +26,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Cap on a top-level array field before it gets truncated for the response. */
-const MAX_LIST_ITEMS = 20;
+export const MAX_LIST_ITEMS = 20;
 
 /** Keys whose string value — when an absolute path — is evidence worth linking. */
-const EVIDENCE_KEYS = new Set(['screenshot', 'evidence']);
+export const EVIDENCE_KEYS = new Set(['screenshot', 'evidence']);
 
 type ResourceLinkContent = Extract<CallToolResult['content'][number], { type: 'resource_link' }>;
 
 /** Guess a MIME type from an evidence path's extension; omit when unknown. */
-function mimeTypeFor(path: string): string | undefined {
+export function mimeTypeFor(path: string): string | undefined {
   if (path.endsWith('.png')) return 'image/png';
   if (path.endsWith('.jpg') || path.endsWith('.jpeg')) return 'image/jpeg';
   if (path.endsWith('.mp4')) return 'video/mp4';
@@ -117,7 +117,7 @@ function capLists(data: Record<string, unknown>): {
 }
 
 /** Steering text appended when one or more lists got capped. */
-function steeringNote(truncated: string[]): string {
+export function steeringNote(truncated: string[]): string {
   const fields = truncated.map((f) => `"${f}"`).join(', ');
   return (
     `Truncated ${truncated.join(', ')} to the first ${MAX_LIST_ITEMS} items (see "${TRUNCATED_KEY}" ` +
