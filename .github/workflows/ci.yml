@@ -13,7 +13,8 @@ jobs:
   bun:
     name: bun (lint + typecheck + test)
     # Blacksmith 2 vCPU runner — fast on small matrices, plenty for this suite.
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    # GitHub-hosted runner (org rule: private repos on Ubicloud, public on GitHub-hosted).
+    runs-on: ubuntu-22.04
     # 10 was too tight (run 34577257568 was cancelled at 10m17s mid-install).
     # 20 now exists for the retry's sake, not to accommodate a hang: three
     # bounded attempts (3 × 300s) + backoff (20s + 40s) + ~30s for the rest of
