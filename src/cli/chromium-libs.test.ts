@@ -557,6 +557,13 @@ test('checkChromiumLibs: the REAL ldd runner reports the missing library', () =>
 // and arguments, tagless) — so a probe parsed against it rejected every
 // passwordless host. The real-sudo regressions at the bottom pin the format
 // against the host's OWN sudo.
+//
+// One more real shape the stubs must model: a sudo whose `-ll <cmd>` listing
+// is TAGLESS — the same short form `-l <cmd>` prints (sudo-rs, the default
+// sudo on recent Ubuntu images; the real-CI regression at the bottom of this
+// file). `installTaglessListingStub` models it: the probe's long listing
+// carries no tag to read, so it must fall back to the full listing's
+// `NOPASSWD: ALL`.
 
 /**
  * Put a stub `sudo` first on PATH. `body` is the shell body; `$@` is argv.
@@ -660,6 +667,34 @@ grep -q "^NOPASSWD: $cmd\\$" "$dir/sudoers" || { echo 'sudo: a password is requi
   return previousPath;
 }
 
+/**
+ * Install a sudo stub modeling a sudo whose `-ll <cmd>` listing is TAGLESS —
+ * the same short form `-l <cmd>` prints (the sudo-rs shape: the default sudo
+ * on recent Ubuntu images, where `sudo -n -ll /bin/true` on a `NOPASSWD: ALL`
+ * host prints just `/bin/true`). Only the FULL listing (`-l`, no command)
+ * carries tags: it prints `fullListing` verbatim. Returns the PATH to restore.
+ */
+function installTaglessListingStub(dir: string, fullListing: string[]): string {
+  const body = `dir=${JSON.stringify(dir)}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|-l|-ll) shift ;;
+    *) break ;;
+  esac
+done
+if [ $# -eq 0 ]; then
+  cat "$dir/sudoers"
+  exit 0
+fi
+echo "$1"
+exit 0
+`;
+  // installSudoStub wipes `dir` first — the listing file is written after.
+  const previousPath = installSudoStub(dir, body);
+  writeFileSync(join(dir, 'sudoers'), `${fullListing.join('\n')}\n`, 'utf8');
+  return previousPath;
+}
+
 /** A sudo that demands a password — what `sudo -n` must surface as a LOUD failure. */
 const SUDO_DEMANDS_PASSWORD = `echo 'sudo: a password is required' >&2\nexit 1`;
 
@@ -738,6 +773,46 @@ test('probeElevation: a NOPASSWD rule for the ACTUAL install command clears it',
   const previousPath = installSudoPolicyStub(dir, [{ tag: 'NOPASSWD', command: 'node' }]);
   try {
     expect(asNonRoot(() => probeElevation(INSTALL_DEPS_COMMAND))).toBe(true);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('probeElevation: a TAGLESS -ll listing (sudo-rs) falls back to NOPASSWD: ALL in the full listing', () => {
+  // The real-CI regression: GitHub's runner image ships sudo-rs, whose
+  // `-ll <cmd>` prints the same tagless short form as `-l`. The OLD probe
+  // read the tag from that listing, found none, and rejected a fully
+  // passwordless host — blocking remediation on exactly the machines this
+  // ships for. Exit 0 on `-ll` already proved the command is LISTED; the
+  // full listing's `NOPASSWD: ALL` then proves it executes passwordless.
+  const dir = join(TMP, 'sudo-rs-passwordless');
+  const previousPath = installTaglessListingStub(dir, [
+    'User runner may run the following commands on fv-az123:',
+    '\t(ALL : ALL) NOPASSWD: ALL',
+  ]);
+  try {
+    expect(asNonRoot(() => probeElevation(INSTALL_DEPS_COMMAND))).toBe(true);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('probeElevation: a TAGLESS -ll listing without NOPASSWD: ALL stays blocked', () => {
+  // The sudo-rs shape of the dangerous middle: a tagless `-ll` cannot
+  // separate NOPASSWD-true from PASSWD-node, and no portable query proves
+  // the install command passwordless. The safe answer is false — the blocked
+  // diagnostic — never a doomed install (and a wrong `true` would still be
+  // caught by the installer's own `sudo -n`, which fails instantly).
+  const dir = join(TMP, 'sudo-rs-narrow');
+  const previousPath = installTaglessListingStub(dir, [
+    'User runner may run the following commands on fv-az123:',
+    '\t(ALL) NOPASSWD: /usr/bin/true',
+    '\t(ALL) /usr/bin/node',
+  ]);
+  try {
+    expect(asNonRoot(() => probeElevation(INSTALL_DEPS_COMMAND))).toBe(false);
   } finally {
     process.env.PATH = previousPath;
     rmSync(dir, { recursive: true, force: true });
@@ -903,7 +978,7 @@ test('REAL sudo: a passwordless host is RECOGNIZED — the probe answers true', 
   expect(asNonRoot(() => probeElevation(PROBE_BINARY))).toBe(true);
 });
 
-test('REAL sudo: the short listing is TAGLESS — the format fact the probe depends on', () => {
+test('REAL sudo: the probe oracle holds — the long listing tags the command, or the full listing says NOPASSWD: ALL', () => {
   const sudo = realSudoOrSkip();
   if (!sudo) return;
   let short: string;
@@ -919,12 +994,30 @@ test('REAL sudo: the short listing is TAGLESS — the format fact the probe depe
   // `NOPASSWD` out of this listing reads nothing. If a sudo ever starts
   // tagging the short listing, this fires and the probe can be re-tightened.
   expect(short).not.toContain('NOPASSWD');
-  // The long listing for the same command DOES carry the execution answer:
-  // on a passwordless host it renders the NOPASSWD tag as `!authenticate`.
+  let long: string;
+  try {
+    long = execFileSync(sudo, ['-n', '-ll', PROBE_BINARY], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch {
+    return; // No long listing for the probe binary — nothing more to pin.
+  }
+  if (long.includes('authenticate')) {
+    // GNU sudo's long listing renders the tag — the probe's primary oracle.
+    // On a passwordless host it MUST be the negated (no-password) spelling:
+    // the very fact the OLD short-listing read missed.
+    if (!hostIsPasswordlessAll(sudo)) return;
+    expect(long).toContain('!authenticate');
+    return;
+  }
+  // TAGLESS `-ll` (sudo-rs, the default sudo on recent Ubuntu images — the
+  // real-CI shape): the probe falls back to the full listing, so THAT must
+  // carry the NOPASSWD: ALL fact it accepts, or the host offers no oracle.
   if (!hostIsPasswordlessAll(sudo)) return;
-  const long = execFileSync(sudo, ['-n', '-ll', PROBE_BINARY], {
+  const full = execFileSync(sudo, ['-n', '-l'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  expect(long).toContain('!authenticate');
+  expect(full).toContain('NOPASSWD: ALL');
 });

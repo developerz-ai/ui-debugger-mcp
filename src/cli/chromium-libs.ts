@@ -31,13 +31,24 @@
  * the invocation itself — the installer runs under `sudo -n` (never a bare
  * sudo; as root, without sudo at all), and the probe reads the POLICY for
  * that exact argv via `sudo -n -ll <command…>` — the long listing, the only
- * COMMAND-SCOPED query whose output carries the authentication tag (the short
- * `sudo -l <command…>` prints just the fully-qualified path and arguments,
- * with no tag at all). Exit 0 alone is only the LISTING answer: under sudo's
- * default `listpw=any` a password-required command is listed without a
- * password whenever the user holds ANY NOPASSWD rule — so elevation
- * additionally requires the matched entry to render the NOPASSWD tag, which
- * the long form spells `!authenticate` (`authenticate` there = PASSWD). A
+ * COMMAND-SCOPED query whose output carries the authentication tag on GNU
+ * sudo (the short `sudo -l <command…>` prints just the fully-qualified path
+ * and arguments, with no tag at all). Exit 0 alone is only the LISTING
+ * answer: under sudo's default `listpw=any` a password-required command is
+ * listed without a password whenever the user holds ANY NOPASSWD rule — so
+ * elevation additionally requires the matched entry to render the NOPASSWD
+ * tag, which the long form spells `!authenticate` (`authenticate` there =
+ * PASSWD). A sudo whose `-ll` listing is TAGLESS all the same — sudo-rs, the
+ * default sudo on recent Ubuntu images, accepts `-ll` but prints the same
+ * short form as `-l` (real CI: `sudo -n -ll /bin/true` on a `NOPASSWD: ALL`
+ * host printed just `/bin/true`) — cannot answer that way. There the probe
+ * falls back to the FULL listing and accepts only `NOPASSWD: ALL`: exit 0 on
+ * `-ll` already proved THIS command is listed, and a full listing rendering
+ * `NOPASSWD: ALL` proves everything listed executes without a password. A
+ * narrower NOPASSWD scope behind a tagless `-ll` (a RunAs-scoped ALL, a
+ * per-command rule) has no portable query to prove it and answers false —
+ * the blocked diagnostic; a wrong `true` there would still be caught by the
+ * installer's own `sudo -n`, which fails instantly and loud, never hangs. A
  * sudoers rule permitting passwordless `true` while the install command
  * itself needs a password therefore fails here, loud, instead of passing a
  * probe and hitting the password demand mid-install. Without elevation the
@@ -365,9 +376,27 @@ function isRoot(): boolean {
 }
 
 /**
+ * Run `sudo -n <argv…>` capturing stdout; `null` when it exits non-zero or
+ * cannot run. The locale is pinned to C so the tokens matched against the
+ * listings (`!authenticate`, `NOPASSWD: ALL`) are never translated.
+ */
+function sudoListing(argv: string[]): string | null {
+  try {
+    return execFileSync('sudo', ['-n', ...argv], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Default elevation probe: COMMAND-SCOPED, reading BOTH permissions sudo
  * keeps separate — via the LONG listing (`sudo -n -ll <command…>`), the only
- * command-scoped query whose output carries the authentication tag.
+ * command-scoped query whose output carries the authentication tag on GNU
+ * sudo.
  *
  * The short listing (`sudo -l <command…>`) does NOT: real sudo (verified
  * against 1.9.15p5; pinned by the real-sudo regressions in
@@ -391,35 +420,44 @@ function isRoot(): boolean {
  * under sudo's default `listpw=any` the listing succeeds without a password
  * as soon as the user holds ANY NOPASSWD rule, so a passwordless `true`
  * lists a password-required install command. Exit 0 alone is therefore only
- * the LISTING answer; the EXECUTION answer is the tag on the matched entry,
- * read with the locale pinned to C so the rendering is stable. An exit-1 run
+ * the LISTING answer; the EXECUTION answer is the tag on the matched entry.
+ *
+ * A sudo whose `-ll` listing is TAGLESS cannot answer that way: sudo-rs —
+ * the default sudo on recent Ubuntu images, GitHub Actions runner images
+ * among them — accepts `-ll` but prints the same short form as `-l` (real
+ * CI: `sudo -n -ll /bin/true` on a `NOPASSWD: ALL` host printed just
+ * `/bin/true`). The probe falls back to the FULL listing (`sudo -n -l`,
+ * every privilege with its tag) and accepts only `NOPASSWD: ALL`: the `-ll`
+ * exit 0 already proved THIS command is listed, and `NOPASSWD: ALL` proves
+ * everything listed executes passwordless. A narrower NOPASSWD scope behind
+ * a tagless `-ll` has no portable query to prove it and stays `false` — the
+ * blocked diagnostic; a wrong `true` there would still be caught by the
+ * installer's own `sudo -n`, which fails instantly and loud. An exit-1 run
  * — unlisted ("Sorry, user … may not run …"), unresolvable, or a listing
  * that itself needed a password (no NOPASSWD rule anywhere) — is not
  * passwordless elevation. uid 0 counts as elevated (no sudo needed at all).
- * An old sudo whose `-ll <command…>` disagrees degrades to `false`: the
- * blocked diagnostic, never a doomed install.
  */
 export const probeElevation: ElevationProbe = (command) => {
   if (isRoot()) return true;
   const parsed = splitCommand(command);
   if (!parsed) return false;
-  try {
-    const listing = execFileSync('sudo', ['-n', '-ll', parsed.bin, ...parsed.args], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      // The long-form labels are localized; `!authenticate` is the tag render.
-      // Pin the locale anyway, so the token matched below is never translated.
-      env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
-    });
-    // Exit 0 = the command is LISTED. `!authenticate` in the matched entry is
-    // exactly when `sudo -n <command…>` can succeed without a password.
-    return listing.includes('!authenticate');
-  } catch {
+  const listing = sudoListing(['-ll', parsed.bin, ...parsed.args]);
+  if (listing === null) {
     // Non-zero: the command is unlisted ("Sorry, user … may not run …"), or
     // even the LISTING needed a password (no NOPASSWD rule anywhere, per the
     // default `listpw=any`). Neither is passwordless elevation.
     return false;
   }
+  // GNU sudo renders the matched entry's authentication tag: `!authenticate`
+  // is exactly when `sudo -n <command…>` can succeed without a password;
+  // bare `authenticate` is the PASSWD render.
+  if (listing.includes('!authenticate')) return true;
+  if (listing.includes('authenticate')) return false;
+  // Exit 0 but NO tag anywhere — the tagless `-ll` (sudo-rs shape). The only
+  // portable execution answer left is the FULL listing's NOPASSWD: ALL; the
+  // command-scoped listing already succeeded, so the question left is only
+  // whether everything the user may run is passwordless.
+  return sudoListing(['-l'])?.includes('NOPASSWD: ALL') ?? false;
 };
 
 /**
