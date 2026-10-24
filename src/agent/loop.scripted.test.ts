@@ -79,11 +79,21 @@ function findingsTracker() {
   return { written, writer };
 }
 
+/** Enter the trail's gate, run `body`, release — what every wired belt tool does. */
+async function gated<T>(trail: ActTrail, body: () => Promise<T>): Promise<T> {
+  const settle = trail.begin();
+  try {
+    return await body();
+  } finally {
+    settle();
+  }
+}
+
 /**
  * Build a minimal real belt for integration tests:
- * - observe → empty tree (no step trail)
+ * - observe → empty tree, gated like the real tool (records nothing)
  * - act     → records its step on the shared trail, like the real `act` does
- * - look    → description (no step trail)
+ * - look    → description, gated like the real tool (records nothing)
  * - report  → writes verdict via the provided writer and signals stop
  *
  * `act` takes a tick of real work between announcing itself and recording, so a
@@ -94,7 +104,7 @@ function realBelt(progress: ProgressWriter, trail: ActTrail = createActTrail()):
     observe: tool({
       description: 'observe',
       inputSchema: z.object({ kind: z.string() }),
-      execute: async () => ({ kind: 'tree', count: 0, nodes: [] }),
+      execute: async () => gated(trail, async () => ({ kind: 'tree', count: 0, nodes: [] })),
     }),
     act: tool({
       description: 'act',
@@ -114,10 +124,58 @@ function realBelt(progress: ProgressWriter, trail: ActTrail = createActTrail()):
     look: tool({
       description: 'look',
       inputSchema: z.object({ question: z.string().optional() }),
-      execute: async () => ({ description: 'looks fine', issues: [] }),
+      execute: async () => gated(trail, async () => ({ description: 'looks fine', issues: [] })),
     }),
     report: createReportTool(progress, () => trail.settled()),
   };
+}
+
+/** An observe stub that reads a console channel AND records its error rows, like the real tool. */
+function consoleObserve(trail: ActTrail) {
+  return tool({
+    description: 'observe',
+    inputSchema: z.object({ kind: z.string() }),
+    execute: async () =>
+      gated(trail, async () => {
+        trail.recordBug({
+          kind: 'console',
+          detail: 'TypeError: cart is undefined',
+          evidence: 'app.js:12:3',
+        });
+        return {
+          kind: 'console',
+          count: 1,
+          entries: [
+            { level: 'error', text: 'TypeError: cart is undefined', location: 'app.js:12:3' },
+          ],
+        };
+      }),
+  });
+}
+
+/** A look stub that flags an issue AND records it (with its frame), like the real tool. */
+function issueLook(trail: ActTrail, delayMs = 0) {
+  return tool({
+    description: 'look',
+    inputSchema: z.object({ question: z.string().optional() }),
+    execute: async () =>
+      gated(trail, async () => {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        trail.recordVisual({
+          issue: 'total overlaps the pay button',
+          where: 'cart footer',
+          severity: 'high',
+          screenshot: '002-cart.png',
+        });
+        return {
+          description: 'the total overlaps the button',
+          issues: [
+            { what: 'total overlaps the pay button', where: 'cart footer', severity: 'high' },
+          ],
+          screenshot: '002-cart.png',
+        };
+      }),
+  });
 }
 
 test('scripted loop (observe→act→report) records running steps and finalizes findings', async () => {
@@ -142,7 +200,7 @@ test('scripted loop (observe→act→report) records running steps and finalizes
     instructions: 'debug this app',
     inbox: fakeInbox(),
     progress: writer,
-    trail: trail.steps,
+    trail,
     maxSteps: 10,
   });
 
@@ -190,7 +248,7 @@ test('an act emitted in the SAME step as report still reaches the verdict', asyn
     instructions: 'debug this app',
     inbox: fakeInbox(),
     progress: writer,
-    trail: trail.steps,
+    trail,
     maxSteps: 10,
   });
 
@@ -233,7 +291,7 @@ test('an INVALID report call does not end the run — the driver retries and the
     instructions: 'debug this app',
     inbox: fakeInbox(),
     progress: writer,
-    trail: trail.steps,
+    trail,
     maxSteps: 10,
   });
 
@@ -255,30 +313,12 @@ test('an INVALID report call does not end the run — the driver retries and the
 
 test('scripted loop streams look issues + console errors before any verdict', async () => {
   const { written, writer } = findingsTracker();
-  const belt = realBelt(writer);
-  // The two channels the running flush lifts: a console read with an error row,
-  // then a look that flags a visual issue.
-  belt.observe = tool({
-    description: 'observe',
-    inputSchema: z.object({ kind: z.string() }),
-    execute: async () => ({
-      kind: 'console',
-      count: 1,
-      entries: [
-        { level: 'error', text: 'TypeError: cart is undefined', location: 'app.js:12:3' },
-        { level: 'log', text: 'checkout mounted' },
-      ],
-    }),
-  });
-  belt.look = tool({
-    description: 'look',
-    inputSchema: z.object({ question: z.string().optional() }),
-    execute: async () => ({
-      description: 'the total overlaps the button',
-      issues: [{ what: 'total overlaps the pay button', where: 'cart footer', severity: 'high' }],
-      screenshot: '002-cart.png',
-    }),
-  });
+  const trail = createActTrail();
+  const belt = realBelt(writer, trail);
+  // The two channels the running flush streams: a console read with an error row,
+  // then a look that flags a visual issue — both recorded by the belt tools.
+  belt.observe = consoleObserve(trail);
+  belt.look = issueLook(trail);
 
   let callCount = 0;
   const model = new MockLanguageModelV3({
@@ -297,6 +337,7 @@ test('scripted loop streams look issues + console errors before any verdict', as
     instructions: 'debug this app',
     inbox: fakeInbox(),
     progress: writer,
+    trail,
     maxSteps: 10,
   });
 
@@ -316,6 +357,91 @@ test('scripted loop streams look issues + console errors before any verdict', as
       screenshot: '002-cart.png',
     },
   ]);
+});
+
+test('look-with-issues + report in the SAME step: the verdict still carries the issues', async () => {
+  const { written, writer } = findingsTracker();
+  const trail = createActTrail();
+  const belt = realBelt(writer, trail);
+  // The look takes real work, so `report` — fired in the SAME step — reads the
+  // trail while the look is still in flight. `settled()` waits for it.
+  belt.look = issueLook(trail, 5);
+
+  const model = new MockLanguageModelV3({
+    doGenerate: async () =>
+      toolCallsResponse(
+        { id: 'c1', toolName: 'look', args: { question: 'is it aligned?' } },
+        // The driver's verdict lists NOTHING — the pre-merge write would have
+        // erased the issue the look had just surfaced.
+        {
+          id: 'c2',
+          toolName: 'report',
+          args: { status: 'failed', steps: [], bugs: [], visual: [] },
+        },
+      ),
+  });
+
+  const agent = createDebugAgent({
+    model,
+    tools: belt,
+    instructions: 'debug this app',
+    inbox: fakeInbox(),
+    progress: writer,
+    trail,
+    maxSteps: 10,
+  });
+
+  await runDebugLoop({ agent });
+
+  const verdict = written.filter((f) => f.status !== 'running').at(-1);
+  if (!verdict) throw new Error('expected a terminal findings write');
+  expect(verdict.visual).toEqual([
+    {
+      issue: 'total overlaps the pay button',
+      where: 'cart footer',
+      severity: 'high',
+      screenshot: '002-cart.png',
+    },
+  ]);
+  expect(verdict.bugs).toEqual([]);
+});
+
+test('observe-console + report in the SAME step: the verdict still carries the error rows', async () => {
+  const { written, writer } = findingsTracker();
+  const trail = createActTrail();
+  const belt = realBelt(writer, trail);
+  belt.observe = consoleObserve(trail);
+
+  const model = new MockLanguageModelV3({
+    doGenerate: async () =>
+      toolCallsResponse(
+        { id: 'c1', toolName: 'observe', args: { kind: 'console' } },
+        {
+          id: 'c2',
+          toolName: 'report',
+          args: { status: 'failed', steps: [], bugs: [], visual: [] },
+        },
+      ),
+  });
+
+  const agent = createDebugAgent({
+    model,
+    tools: belt,
+    instructions: 'debug this app',
+    inbox: fakeInbox(),
+    progress: writer,
+    trail,
+    maxSteps: 10,
+  });
+
+  await runDebugLoop({ agent });
+
+  const verdict = written.filter((f) => f.status !== 'running').at(-1);
+  if (!verdict) throw new Error('expected a terminal findings write');
+  expect(verdict.bugs).toEqual([
+    { kind: 'console', detail: 'TypeError: cart is undefined', evidence: 'app.js:12:3' },
+  ]);
+  expect(verdict.visual).toEqual([]);
 });
 
 /**
@@ -347,24 +473,8 @@ test('crash/abort: findings.json keeps look issues, console bugs and a failed ac
   const { written, writer } = findingsTracker();
   const trail = createActTrail();
   const belt = realBelt(writer, trail);
-  belt.observe = tool({
-    description: 'observe',
-    inputSchema: z.object({ kind: z.string() }),
-    execute: async () => ({
-      kind: 'console',
-      count: 1,
-      entries: [{ level: 'error', text: 'TypeError: cart is undefined', location: 'app.js:12:3' }],
-    }),
-  });
-  belt.look = tool({
-    description: 'look',
-    inputSchema: z.object({ question: z.string().optional() }),
-    execute: async () => ({
-      description: 'the total overlaps the button',
-      issues: [{ what: 'total overlaps the pay button', where: 'cart footer', severity: 'high' }],
-      screenshot: '002-cart.png',
-    }),
-  });
+  belt.observe = consoleObserve(trail);
+  belt.look = issueLook(trail);
   belt.act = failingAct(trail);
 
   let callCount = 0;
@@ -387,7 +497,7 @@ test('crash/abort: findings.json keeps look issues, console bugs and a failed ac
     instructions: 'debug this app',
     inbox: fakeInbox(),
     progress: writer,
-    trail: trail.steps,
+    trail,
     maxSteps: 3,
   });
 

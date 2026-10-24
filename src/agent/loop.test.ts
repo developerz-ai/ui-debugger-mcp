@@ -2,11 +2,11 @@ import { expect, test } from 'bun:test';
 import { type ModelMessage, tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
+import { createActTrail, type TrailEvidence } from './belt/trail.js';
 import {
   type BeltTools,
   BUDGET_WARN,
   budgetNudge,
-  consoleBugsFrom,
   createDebugAgent,
   DEFAULT_MAX_STEPS,
   describeStep,
@@ -15,9 +15,7 @@ import {
   type LoopInbox,
   progressForStep,
   pruneStaleFrames,
-  type RunTrail,
   STALE_FRAME_NOTE,
-  visualFrom,
 } from './loop.js';
 
 test('budgetNudge stays silent while there is ample budget', () => {
@@ -51,41 +49,69 @@ function fakeInbox(...items: string[]): LoopInbox {
   };
 }
 
-const actResult = (label: string, screenshot: string, ok = true) => ({
-  toolName: 'act',
-  output: { action: 'click', label, ok, screenshot },
-});
-
 /**
- * What the `act` tool does to the shared trail before the step finishes: record the
- * step, then hand back the matching tool result (see `belt/act.ts`).
+ * What the `act` tool does to the shared trail before the step finishes: record
+ * the step AT ACT TIME (see `belt/act.ts`), then hand back the matching tool
+ * result.
  */
-const acted = (running: RunTrail, label: string, screenshot: string, ok = true) => {
-  running.steps.push({ step: label, ok, screenshot });
-  return actResult(label, screenshot, ok);
+const acted = (
+  evidence: ReturnType<typeof createActTrail>,
+  label: string,
+  screenshot: string,
+  ok = true,
+) => {
+  evidence.record({ step: label, ok, screenshot });
+  return {
+    toolName: 'act',
+    output: { action: 'click', label, ok, screenshot },
+  };
 };
 
-/** A vision-guy `look` result carrying flagged issues plus the frame they were judged on. */
-const lookResult = (
+/**
+ * What the `look` tool does to the shared trail: record each flagged issue with
+ * its frame (see `belt/look.ts`).
+ */
+const looked = (
+  evidence: ReturnType<typeof createActTrail>,
   screenshot: string,
   ...issues: Array<{ what: string; where: string; severity: 'low' | 'medium' | 'high' }>
-) => ({
-  toolName: 'look',
-  output: { description: 'seen', issues, screenshot },
-});
+) => {
+  for (const issue of issues) {
+    evidence.recordVisual({
+      issue: issue.what,
+      where: issue.where,
+      severity: issue.severity,
+      screenshot,
+    });
+  }
+  return { toolName: 'look', output: { description: 'seen', issues, screenshot } };
+};
 
-/** An `observe` console read — the channel the running flush lifts error rows from. */
-const consoleResult = (...entries: Array<{ level: string; text: string; location?: string }>) => ({
-  toolName: 'observe',
-  output: { kind: 'console', count: entries.length, entries },
-});
+/** What the `observe` tool does with a console read: record each error row (see `belt/observe.ts`). */
+const consoleRead = (
+  evidence: ReturnType<typeof createActTrail>,
+  ...entries: Array<{ level: string; text: string; location?: string }>
+) => {
+  for (const entry of entries) {
+    if (entry.level !== 'error') continue;
+    evidence.recordBug({
+      kind: 'console',
+      detail: entry.text,
+      ...(entry.location !== undefined && { evidence: entry.location }),
+    });
+  }
+  return {
+    toolName: 'observe',
+    output: { kind: 'console', count: entries.length, entries },
+  };
+};
 
-/** Fresh run-long accumulators for the running flush. */
-const runTrail = (): RunTrail => ({ steps: [], bugs: [], visual: [] });
+/** Fresh flushed bookkeeping — what the loop starts a run with. */
+const noneFlushed = (): TrailEvidence => ({ steps: [], bugs: [], visual: [] });
 
 /**
  * A `tool-error` content part — AI SDK 6's shape for a rejected tool call (never
- * `toolResults`; see `describeStep` and `progressForStep`'s `acted` check below).
+ * `toolResults`; see `describeStep`).
  */
 const toolErrorPart = (toolName: string, error: unknown) => ({
   type: 'tool-error',
@@ -132,93 +158,35 @@ test('foldInstructionsIntoStep re-appends standing instructions after the inbox 
   expect(standing).toEqual(['check mobile view']);
 });
 
-test('visualFrom lifts vision-guy issues with their frame, and ignores a self-look result', () => {
-  const issues = visualFrom([
-    lookResult('003-cart.png', {
-      what: 'total is cut off',
-      where: 'cart footer',
-      severity: 'high',
-    }),
-    // self-look: the multimodal driver judged the frame itself — no issues[] to lift
-    { toolName: 'look', output: { screenshot: '004.png', bytes: 12, prompt: 'q', frame: 'AAAA' } },
-    { toolName: 'act', output: { label: 'click', ok: true, screenshot: '005.png' } },
-  ]);
-  expect(issues).toEqual([
-    {
-      issue: 'total is cut off',
-      where: 'cart footer',
-      severity: 'high',
-      screenshot: '003-cart.png',
-    },
-  ]);
-});
+// --- progressForStep: flush on trail growth ----------------------------------
 
-test('consoleBugsFrom lifts error rows only, keeping the source location as evidence', () => {
-  const bugs = consoleBugsFrom([
-    consoleResult(
-      { level: 'error', text: 'TypeError: x is undefined', location: 'app.js:12:3' },
-      { level: 'warn', text: 'deprecated api' },
-      { level: 'error', text: 'failed to fetch' },
-    ),
-    { toolName: 'observe', output: { kind: 'tree', count: 0, nodes: [] } },
-  ]);
-  expect(bugs).toEqual([
-    { kind: 'console', detail: 'TypeError: x is undefined', evidence: 'app.js:12:3' },
-    { kind: 'console', detail: 'failed to fetch' },
-  ]);
-});
-
-test('progressForStep steps aside for the terminal report step (verdict owned by report)', () => {
-  const running = runTrail();
+test('progressForStep flushes when the step trail grew past flushed', () => {
+  const trail = createActTrail();
   const out = progressForStep(
-    { toolCalls: [{ toolName: 'report' }], toolResults: [acted(running, 'click x', '1.png')] },
-    running,
+    { toolCalls: [{ toolName: 'act' }], toolResults: [acted(trail, 'typed email', '1.png')] },
+    trail,
+    noneFlushed(),
   );
-  // No running write to clobber the verdict — but the act itself is NOT lost: `act`
-  // recorded it on the shared trail, and `report` merged that trail into `steps`.
-  expect(out).toBeNull();
-  expect(running.steps).toEqual([{ step: 'click x', ok: true, screenshot: '1.png' }]);
-});
-
-test('progressForStep skips steps that surfaced nothing new', () => {
-  const out = progressForStep(
-    { toolCalls: [{ toolName: 'observe' }], toolResults: [{ toolName: 'observe', output: {} }] },
-    runTrail(),
-  );
-  expect(out).toBeNull();
-});
-
-test('progressForStep flushes a running trail and accumulates across steps', () => {
-  const running = runTrail();
-  const first = progressForStep(
-    { toolCalls: [{ toolName: 'act' }], toolResults: [acted(running, 'typed email', '1.png')] },
-    running,
-  );
-  expect(first).toEqual({
+  expect(out).toEqual({
     status: 'running',
     steps: [{ step: 'typed email', ok: true, screenshot: '1.png' }],
     bugs: [],
     visual: [],
   });
-  const second = progressForStep(
-    { toolCalls: [{ toolName: 'act' }], toolResults: [acted(running, 'clicked Submit', '2.png')] },
-    running,
-  );
-  expect(second?.steps).toHaveLength(2);
-  expect(running.steps).toHaveLength(2);
 });
 
-test('progressForStep streams look issues + console errors — an act-less step still flushes', () => {
-  const running = runTrail();
+test('progressForStep flushes when only bugs grew — a look/observe step has no acts', () => {
+  const trail = createActTrail();
   const out = progressForStep(
     {
       toolCalls: [{ toolName: 'observe' }, { toolName: 'look' }],
       toolResults: [
-        consoleResult({ level: 'error', text: 'boom', location: 'app.js:1:1' }),
-        lookResult('006.png', { what: 'button overlaps', where: 'header', severity: 'medium' }),
+        consoleRead(trail, { level: 'error', text: 'boom', location: 'app.js:1:1' }),
+        looked(trail, '006.png', { what: 'button overlaps', where: 'header', severity: 'medium' }),
       ],
     },
-    running,
+    trail,
+    noneFlushed(),
   );
   expect(out).toEqual({
     status: 'running',
@@ -228,44 +196,145 @@ test('progressForStep streams look issues + console errors — an act-less step 
       { issue: 'button overlaps', where: 'header', severity: 'medium', screenshot: '006.png' },
     ],
   });
-  expect(running.bugs).toHaveLength(1);
-  expect(running.visual).toHaveLength(1);
+  expect(trail.bugs).toHaveLength(1);
+  expect(trail.visual).toHaveLength(1);
 });
 
-test('progressForStep dedupes re-read console rows and re-flagged visual issues by message', () => {
-  const running = runTrail();
-  const step = () => ({
-    toolCalls: [{ toolName: 'observe' }, { toolName: 'look' }],
+test('progressForStep returns null when nothing grew past flushed', () => {
+  const trail = createActTrail();
+  const out = progressForStep(
+    { toolCalls: [{ toolName: 'observe' }], toolResults: [{ toolName: 'observe', output: {} }] },
+    trail,
+    noneFlushed(),
+  );
+  expect(out).toBeNull();
+});
+
+test('progressForStep returns null once the already-flushed evidence is passed back', () => {
+  // The trail dedupes, so a re-read of the same console rows records nothing new —
+  // passing the previous flush back as `flushed` must yield no second write.
+  const trail = createActTrail();
+  const step = {
+    toolCalls: [{ toolName: 'observe' }],
     toolResults: [
-      consoleResult({ level: 'error', text: 'boom' }, { level: 'error', text: 'boom' }),
-      lookResult('007.png', { what: 'Button  Overlaps', where: 'Header', severity: 'medium' }),
+      consoleRead(trail, { level: 'error', text: 'boom' }, { level: 'error', text: 'boom' }),
     ],
+  };
+  const first = progressForStep(step, trail, noneFlushed());
+  expect(first?.bugs).toHaveLength(1);
+  expect(progressForStep(step, trail, first ?? noneFlushed())).toBeNull();
+  expect(trail.bugs).toHaveLength(1);
+});
+
+test('progressForStep steps aside for the terminal report step (verdict owned by report)', () => {
+  const trail = createActTrail();
+  const out = progressForStep(
+    {
+      toolCalls: [{ toolName: 'report' }, { toolName: 'act' }],
+      toolResults: [acted(trail, 'click x', '1.png'), { toolName: 'report', output: {} }],
+    },
+    trail,
+    noneFlushed(),
+  );
+  // No running write to clobber the verdict — but the act itself is NOT lost: `act`
+  // recorded it on the shared trail, and `report` merged that trail into `steps`.
+  expect(out).toBeNull();
+  expect(trail.steps).toEqual([{ step: 'click x', ok: true, screenshot: '1.png' }]);
+});
+
+test('progressForStep still flushes a step whose report call was INVALID — acts on it are not lost', () => {
+  const trail = createActTrail();
+  // What `runAct` does on a throw (see `belt/act.ts`): the trail gets the
+  // `ok: false` entry AT ACT TIME, before the step content — carrying only a
+  // `tool-error` part — ever reaches `onStepFinish`.
+  trail.record({ step: 'click #save', ok: false, note: 'AgentError: no element matched' });
+  const out = progressForStep(
+    {
+      // A `report` whose arguments fail the Zod schema is never executed (no
+      // report RESULT in toolResults) but still listed in `toolCalls` — gating
+      // the flush on the CALL threw away exactly this step.
+      toolCalls: [
+        { toolName: 'act', input: { action: 'click', target: '#save' } },
+        { toolName: 'report', input: { status: 'pass' } },
+      ],
+      toolResults: [], // neither the failed act nor the invalid call has a result here
+      content: [
+        toolErrorPart('act', new Error('no element matched')),
+        toolErrorPart('report', new Error('invalid input')),
+      ],
+    },
+    trail,
+    noneFlushed(),
+  );
+  expect(out).toEqual({
+    status: 'running',
+    steps: [{ step: 'click #save', ok: false, note: 'AgentError: no element matched' }],
+    bugs: [],
+    visual: [],
   });
-  const first = progressForStep(step(), running);
+});
+
+test('progressForStep flushes a FAILED act too — a rejected tool call never reaches toolResults', () => {
+  const trail = createActTrail();
+  trail.record({ step: 'click #save', ok: false, note: 'AgentError: no element matched' });
+  const out = progressForStep(
+    {
+      toolCalls: [{ toolName: 'act', input: { action: 'click', target: '#save' } }],
+      toolResults: [], // the failed call's result is not here — only in `content`
+      content: [toolErrorPart('act', new Error('no element matched'))],
+    },
+    trail,
+    noneFlushed(),
+  );
+  // Growth is read off the trail, not toolResults: the failure is recorded at act
+  // time, so the step a crashed run most needs is still flushed.
+  expect(out?.steps).toEqual([
+    { step: 'click #save', ok: false, note: 'AgentError: no element matched' },
+  ]);
+});
+
+test('progressForStep snapshots COPY the trail arrays — later records cannot rewrite a flush', () => {
+  const trail = createActTrail();
+  const out = progressForStep(
+    { toolCalls: [{ toolName: 'act' }], toolResults: [acted(trail, 'click a', '1.png')] },
+    trail,
+    noneFlushed(),
+  );
+  acted(trail, 'click b', '2.png');
+  expect(out?.steps).toEqual([{ step: 'click a', ok: true, screenshot: '1.png' }]);
+});
+
+test('flushed semantics across consecutive steps: each flush includes everything so far', () => {
+  const trail = createActTrail();
+  const first = progressForStep(
+    {
+      toolCalls: [{ toolName: 'observe' }, { toolName: 'look' }],
+      toolResults: [
+        consoleRead(trail, { level: 'error', text: 'boom', location: 'app.js:1:1' }),
+        looked(trail, '008.png', { what: 'clipped', where: 'nav', severity: 'low' }),
+      ],
+    },
+    trail,
+    noneFlushed(),
+  );
   expect(first?.bugs).toHaveLength(1);
   expect(first?.visual).toHaveLength(1);
-  // The console channel is a ring buffer, and looks repeat on the same screen:
-  // a second identical read adds nothing new, so there is nothing to flush.
-  expect(progressForStep(step(), running)).toBeNull();
-  expect(running.bugs).toHaveLength(1);
-  expect(running.visual).toHaveLength(1);
-});
-
-test('progressForStep keeps streamed findings when a later step only acts', () => {
-  const running = runTrail();
-  progressForStep(
-    {
-      toolCalls: [{ toolName: 'look' }],
-      toolResults: [lookResult('008.png', { what: 'clipped', where: 'nav', severity: 'low' })],
-    },
-    running,
+  const flushed: TrailEvidence = {
+    steps: first?.steps ?? [],
+    bugs: first?.bugs ?? [],
+    visual: first?.visual ?? [],
+  };
+  // Next step only acts — its flush still carries the earlier streamed evidence.
+  const second = progressForStep(
+    { toolCalls: [{ toolName: 'act' }], toolResults: [acted(trail, 'clicked Pay', '9.png')] },
+    trail,
+    flushed,
   );
-  const next = progressForStep(
-    { toolCalls: [{ toolName: 'act' }], toolResults: [acted(running, 'clicked Pay', '9.png')] },
-    running,
-  );
-  expect(next?.visual).toHaveLength(1);
-  expect(next?.steps).toEqual([{ step: 'clicked Pay', ok: true, screenshot: '9.png' }]);
+  expect(second?.steps).toEqual([{ step: 'clicked Pay', ok: true, screenshot: '9.png' }]);
+  expect(second?.visual).toEqual([
+    { issue: 'clipped', where: 'nav', severity: 'low', screenshot: '008.png' },
+  ]);
+  expect(second?.bugs).toEqual([{ kind: 'console', detail: 'boom', evidence: 'app.js:1:1' }]);
 });
 
 test('createDebugAgent builds an agent driving the four-tool belt', () => {
@@ -361,31 +430,6 @@ test('describeStep surfaces a tool-error content part (AI SDK 6 shape), not tool
     3,
   );
   expect(line).toBe('step 3: act({"act":"click #save"}) — ERROR act: element not found');
-});
-
-test('progressForStep flushes a FAILED act too — a rejected tool call never reaches toolResults', () => {
-  const running = runTrail();
-  // What `runAct` does on a throw (see `belt/act.ts`): the trail gets the
-  // `ok: false` entry AT ACT TIME, before the step content — carrying only a
-  // `tool-error` part — ever reaches `onStepFinish`.
-  running.steps.push({ step: 'click #save', ok: false, note: 'AgentError: no element matched' });
-  const out = progressForStep(
-    {
-      toolCalls: [{ toolName: 'act', input: { action: 'click', target: '#save' } }],
-      toolResults: [], // the failed call's result is not here — only in `content`
-      content: [toolErrorPart('act', new Error('no element matched'))],
-    },
-    running,
-  );
-  // Gating on toolResults (the pre-fix check) would see no `act` result and no
-  // new bugs/visual, and return null — silently losing the one step a crashed
-  // run most needs: the failure itself. Gating on toolCalls catches it.
-  expect(out).toEqual({
-    status: 'running',
-    steps: [{ step: 'click #save', ok: false, note: 'AgentError: no element matched' }],
-    bugs: [],
-    visual: [],
-  });
 });
 
 test('describeStep stays clean when the step has no content (or no errors in it)', () => {

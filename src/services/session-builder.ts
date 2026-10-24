@@ -336,12 +336,14 @@ export async function buildSession(
     }
   };
 
-  // One trail per run, shared between the `act` tool (which records every step as
-  // it finishes, `ok: false` included), the loop (which snapshots it into each
-  // running flush) and the `report` tool (which merges it with the driver's
-  // reported steps), so the persisted findings and the returned counts derive from
-  // the same object. `report` reads it through `settled()`, so an act racing it in
-  // the SAME step still makes the verdict.
+  // One evidence trail per run, shared between the belt's tools (which record
+  // into it as they run: `act` records every step, `look` each flagged visual
+  // issue, `observe` each error-level console row — deduped, at tool time), the
+  // loop (which snapshots all three streams into each running flush) and the
+  // `report` tool (which merges all three with the driver's verdict), so the
+  // persisted findings and the returned counts derive from the same object.
+  // `report` reads it through `settled()`, so evidence gathered in the SAME step
+  // still makes the verdict.
   //
   // Built HERE rather than inside `run` because the pre-run login (`open`, below)
   // happens first and has to land on the same trail: the driver did not do it, but
@@ -352,13 +354,13 @@ export async function buildSession(
     const agent = createDebugAgent({
       model: models.driver,
       tools: {
-        observe: withToolLog('observe', createObserveTool(adapter, store), logAgent),
+        observe: withToolLog('observe', createObserveTool(adapter, store, trail), logAgent),
         act: withToolLog('act', createActTool(adapter, store, trail, origin), logAgent),
         look: withToolLog(
           'look',
           selfLook
             ? createSelfLookTool(adapter, store)
-            : createLookTool(adapter, models.vision, store),
+            : createLookTool(adapter, models.vision, store, trail),
           logAgent,
         ),
         report: withToolLog(
@@ -371,7 +373,7 @@ export async function buildSession(
       inbox,
       progress,
       log: logAgent,
-      trail: trail.steps,
+      trail,
     });
     await flushAgentLog(`run start: target=${target} goal=${JSON.stringify(goal)}`);
     try {
