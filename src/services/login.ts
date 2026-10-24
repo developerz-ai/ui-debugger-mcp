@@ -301,14 +301,19 @@ export async function performLogin(adapter: Adapter, options: LoginOptions): Pro
  *
  * Two failures, and they say different things because the MEASUREMENTS differ:
  *
- *  - **settled rejection** — the page reached network-idle at least once and
- *    the URL was still the login page when the proof ended. The app finished
- *    its work and did not navigate: the login did not take, and the
- *    credentials are the first thing to check.
- *  - **never settled** — the budget ran out with the URL still on the login page
- *    and the page never having gone idle. The navigation may still have been in
- *    flight; nothing measured here implicates the credentials, so the error says
- *    that instead of guessing.
+ *  - **settled rejection** — the page was idle AND unmoved on the login page
+ *    for its whole confirmation window, and that evidence was still CURRENT
+ *    when the proof ended. The app finished its work and did not navigate: the
+ *    login did not take, and the credentials are the first thing to check.
+ *  - **unresolved proof** — the budget ran out without that evidence: the page
+ *    never went idle, or it went idle once and went BUSY again (the app is
+ *    still working — a quiet streak the page later voided is not evidence).
+ *    The navigation may still have been in flight; nothing measured here
+ *    implicates the credentials, so the error says that instead of guessing.
+ *
+ * Before either diagnostic, the URL is read ONE more time: the loop's last act
+ * is a sleep, and a redirect landing inside that final slice is a successful
+ * login the loop would otherwise never see.
  */
 async function assertSignedIn(
   adapter: Adapter,
@@ -345,12 +350,17 @@ async function assertSignedIn(
 
   /** The URL the last observation saw — the one a failure names. */
   let lastUrl = loginUrl;
-  /** Whether the page was EVER observed idle — the difference between the two failures. */
-  let sawSettled = false;
   /**
-   * When the page was first observed idle AND unmoved, or 0 when it is not
-   * currently quiet. A page that goes busy again resets it: the app is still
-   * working, so the quiet streak starts over.
+   * Whether the page's quiet streak is CURRENTLY intact: idle AND unmoved on
+   * the last observation, and not since invalidated by a busy one. A settled
+   * observation sets it; a busy one voids it — the app went back to work, so
+   * its earlier quiet is no longer evidence of anything.
+   */
+  let quiet = false;
+  /**
+   * When the current quiet streak began, or 0 when the page is not quiet. A
+   * page that goes busy again resets it: the app is still working, so the
+   * streak starts over.
    */
   let quietSince = 0;
   /** How long the page must stay quiet before the credentials are blamed. */
@@ -391,15 +401,19 @@ async function assertSignedIn(
       // The page went busy again (or never settled): it is WORKING, not
       // rejecting. Any quiet streak is void — a redirect may be on its way.
       quietSince = 0;
+      quiet = false;
     } else {
-      sawSettled = true;
+      quiet = true;
       if (quietSince === 0) {
         // The page just went quiet for the first time (or after being busy).
-        // How long it must STAY quiet is bounded by what is left of the budget:
-        // a caller with less budget gets a shorter window, and a budget that
-        // runs out first ends the proof through the other diagnostic.
+        // How long it must STAY quiet is bounded by what is left of the budget
+        // AT THE MOMENT it went quiet — measured from the stamp, not from the
+        // start of the observation (the settle wait and the URL read already
+        // spent a slice of it): a caller with less budget gets a shorter
+        // window, and a budget that runs out first ends the proof through the
+        // other diagnostic.
         quietSince = Date.now();
-        quietWindow = Math.min(SETTLE_CONFIRM_MS, Math.max(1, remaining));
+        quietWindow = Math.min(SETTLE_CONFIRM_MS, Math.max(1, deadline - quietSince));
       }
       // The page is idle and has not moved. That is STILL not a rejection: the
       // redirect can be pending (the app answered the login POST and will
@@ -421,12 +435,20 @@ async function assertSignedIn(
     await delay(Math.min(OBSERVATION_INTERVAL_MS, remainingMs(deadline)));
   }
 
-  // The budget ran out with the URL still on the login page. Which failure it
-  // is depends on what was MEASURED, not on how the loop ended: a page that
-  // settled at least once finished its work and did not navigate, while a page
-  // that never went idle may still have had a navigation in flight — and
-  // nothing measured there implicates the credentials.
-  if (sawSettled) {
+  // The budget ran out — but the loop's last act was a SLEEP, not a read, and
+  // the redirect can land inside it (a 275ms redirect on a 300ms budget lands
+  // between the last observation and this line). The URL is what decides, so
+  // read it once more before reporting anything.
+  const finalUrl = await currentUrl(adapter);
+  if (finalUrl !== null && !samePage(finalUrl, loginUrl)) return;
+
+  // Still on the login page. Which failure this is depends on what was
+  // MEASURED AT THE END, not on what was measured at any point before: only a
+  // quiet streak that is still INTACT and has held for its whole window is a
+  // confirmed rejection. A streak the page later invalidated — it went busy
+  // again and was still working when the budget ran out — proves nothing about
+  // the credentials, so it gets the unresolved diagnostic instead.
+  if (quiet && Date.now() - quietSince >= quietWindow) {
     throw new AuthError(
       `auth persona '${name}': still on ${lastUrl} after submitting '${persona.submit}' — the login ` +
         'did not take. Check the credentials and the field keys; if this app signs in WITHOUT ' +
@@ -434,8 +456,9 @@ async function assertSignedIn(
     );
   }
   throw new AuthError(
-    `auth persona '${name}': still on ${lastUrl} after ${budget}ms — the login navigation never settled ` +
-      '(the page never went idle) and the login budget was exhausted, so the proof could not be ' +
+    `auth persona '${name}': still on ${lastUrl} after ${budget}ms — the login budget was exhausted ` +
+      'without a settled-and-unmoved page to conclude from (the navigation never settled, or it ' +
+      'settled and the page went busy again before the budget ran out), so the proof could not be ' +
       'completed. Nothing measured here says why the page did not leave the login page. ' +
       "Raise the run's timeout, or set 'expect' on the persona to a selector that only exists once signed in.",
   );

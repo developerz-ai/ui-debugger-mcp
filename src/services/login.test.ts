@@ -115,6 +115,9 @@ test('samePage ignores the query a login flow appends', () => {
 /** A trace entry: what the login asked the adapter to do. */
 type Call = { fn: string; arg?: unknown; text?: string; timeout?: number };
 
+/** Local sleep — the fake spends real budget the way a real adapter does. */
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 interface FakeOptions {
   /** Selectors that resolve to a node; everything else resolves to null. */
   matches?: (query: string) => boolean;
@@ -147,6 +150,12 @@ interface FakeOptions {
    * the URL twice back to back reads it twice before the timer fires.
    */
   landsOnAfterMs?: { url: string; afterMs: number };
+  /**
+   * The `open` call takes this many REAL ms — setup that spends part of the
+   * shared budget, so a watch window handed the FULL budget after the submit
+   * is visible in what the settle wait was offered.
+   */
+  openDelayMs?: number;
 }
 
 function fakeAdapter(options: FakeOptions = {}): { adapter: Adapter; calls: Call[] } {
@@ -165,6 +174,7 @@ function fakeAdapter(options: FakeOptions = {}): { adapter: Adapter; calls: Call
   });
   const adapter: Adapter = {
     open: async (target) => {
+      if (options.openDelayMs) await delay(options.openDelayMs);
       calls.push({ fn: 'open', arg: target });
     },
     find: async (opts: Query) => {
@@ -340,14 +350,32 @@ test('a login whose redirect lands LATE still signs the run in', async () => {
   // not happened yet.
   //
   // Here the page never goes idle (the POST is still in flight — a settle wait
-  // that TIMES OUT is not a verdict) and the redirect lands only after several
-  // observations. The login must still succeed, and the trail must name where
-  // it landed.
+  // that TIMES OUT is not a verdict) and the redirect lands only after MORE
+  // than the whole 5s settle slice has passed, on a budget LONGER than the
+  // slice. A proof still capped at the 5s slice ends before the redirect and
+  // fails this test: the watch has to keep going for as long as its budget
+  // says, and the trail must name where it landed.
   const { adapter } = fakeAdapter({
     settleFails: true,
-    landsOnAfter: { url: 'http://localhost:5173/dashboard', afterObservations: 3 },
+    landsOnAfterMs: { url: 'http://localhost:5173/dashboard', afterMs: 5_500 },
   });
-  const steps = await performLogin(adapter, { ...OPTS, timeoutMs: 5_000 });
+  const steps = await performLogin(adapter, { ...OPTS, timeoutMs: 15_000 });
+
+  expect(steps.at(-1)?.step).toBe('signed in as "admin" → http://localhost:5173/dashboard');
+  expect(steps.every((s) => s.ok)).toBe(true);
+}, 20_000);
+
+test('a redirect landing in the FINAL slice is still seen — one more read before giving up', async () => {
+  // The loop's last act is a SLEEP, not a read: the final observation reads
+  // the URL, then sleeps out what is left of the budget. A redirect landing
+  // inside that sleep — 275ms on a 300ms budget — used to be missed: the loop
+  // left without reading again and reported a FAILED login that blames the
+  // credentials for a navigation that DID happen. The proof reads the URL one
+  // more time before it reports the budget exhausted.
+  const { adapter } = fakeAdapter({
+    landsOnAfterMs: { url: 'http://localhost:5173/dashboard', afterMs: 275 },
+  });
+  const steps = await performLogin(adapter, { ...OPTS, timeoutMs: 300 });
 
   expect(steps.at(-1)?.step).toBe('signed in as "admin" → http://localhost:5173/dashboard');
   expect(steps.every((s) => s.ok)).toBe(true);
@@ -403,6 +431,26 @@ test('a login that settles and then goes BUSY again keeps watching', async () =>
   expect(steps.at(-1)?.step).toBe('signed in as "admin" → http://localhost:5173/dashboard');
 });
 
+test('a page that settled once and then stayed BUSY to the budget end is NOT a rejected login', async () => {
+  // The quiet streak was INVALIDATED: the page went back to work after
+  // settling and was STILL working when the budget ran out. That is not
+  // evidence about the credentials — only quiet evidence that is CURRENT
+  // (the streak was never interrupted) and complete may call the login
+  // rejected — so this is the unresolved diagnostic, not the rejection.
+  const { adapter } = fakeAdapter({ settleFailsAfter: 1, landsOn: LOGIN_URL });
+  let thrown: unknown;
+  try {
+    await performLogin(adapter, { ...OPTS, timeoutMs: 300 });
+  } catch (error) {
+    thrown = error;
+  }
+  expect(thrown).toBeInstanceOf(AuthError);
+  const message = (thrown as Error).message;
+  expect(message).toMatch(/budget was exhausted/);
+  expect(message).not.toMatch(/did not take/);
+  expect(message).not.toMatch(/credentials/i);
+});
+
 test('the settled rejection waits for the page to STAY quiet, not for one adjacent read', async () => {
   // The settled rejection is a verdict about a page that has been idle AND
   // unmoved for the whole quiet window. It must NOT fire on the first settled
@@ -429,14 +477,26 @@ test('the login shares ONE budget with the caller — it cannot overrun the cap 
   // The watch window used to be a FRESH budget started after the open, the
   // typing and the submit, so the login could take twice the cap it was given.
   // The whole login — open, fill, submit, watch — now fits inside it.
-  const { adapter, calls } = fakeAdapter({ settleFails: true, landsOn: LOGIN_URL });
+  //
+  // RED-WHEN-REGRESSED: the setup spends half the cap (the fake `open` takes
+  // 250ms of the 500ms). A watch that restarts the FULL budget after the
+  // submit would be offered all 500ms and end ~750ms in; the shared deadline
+  // offers it only the ~250ms that is left and ends at the original cap.
+  const { adapter, calls } = fakeAdapter({
+    settleFails: true,
+    landsOn: LOGIN_URL,
+    openDelayMs: 250,
+  });
   const started = Date.now();
-  await expect(performLogin(adapter, { ...OPTS, timeoutMs: 300 })).rejects.toThrow(AuthError);
+  await expect(performLogin(adapter, { ...OPTS, timeoutMs: 500 })).rejects.toThrow(AuthError);
+  const elapsed = Date.now() - started;
 
-  // The proof stopped at the caller's cap, not at a fresh one on top of it.
-  expect(Date.now() - started).toBeLessThan(2_000);
+  // The watch was offered only the REMAINDER, not the whole budget again.
   const settle = calls.find((c) => c.fn === 'waitFor' && c.arg === 'networkIdle');
-  expect(settle?.timeout).toBeLessThanOrEqual(300);
+  expect(settle?.timeout).toBeLessThanOrEqual(250);
+  // …and the whole login finished within the ORIGINAL deadline — a fresh
+  // 500ms watch started after the 250ms setup would run past 700ms.
+  expect(elapsed).toBeLessThan(650);
 });
 
 test('a rejected login blames the credentials — the page settled and stayed put', async () => {

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The URL watch reads the active URL once more before reporting the budget
+  exhausted.** The loop's last act is a sleep, and a redirect landing inside
+  that final slice (275ms on a 300ms budget) was missed: the proof left the
+  loop without reading again and reported a failed login that blamed the
+  credentials for a navigation that DID happen.
+
+- **A quiet streak the page later invalidates is no longer evidence for a
+  rejected login.** The exhausted-budget diagnostic used to blame the
+  credentials whenever the page had settled AT ANY POINT — even when it went
+  busy again afterwards and was still working when the budget ran out. Only
+  quiet evidence that is current (the streak was never interrupted) and
+  complete (it held for its whole window) counts as a rejection now; everything
+  else gets the unresolved proof, which does not implicate the credentials. The
+  quiet window is also measured from the moment the page went quiet, not from
+  the start of the observation that saw it, so a window shortened by a small
+  remaining budget completes exactly when that budget does.
+
 - **The no-`expect` login proof now watches the URL across the login's remaining
   budget instead of reading it once after a 5 s settle slice.** A valid login
   whose redirect landed after that slice was reported as a failed login and the
