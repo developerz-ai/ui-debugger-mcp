@@ -11,6 +11,10 @@
  * The layers govern disjoint fields, so the order is unambiguous:
  *   - models / workspace / targets  → project file over defaults
  *   - provider creds (key, base url) → env over the OpenRouter default base url
+ *
+ * The provider key is resolved through the shared provider credential contract
+ * (`src/agent/provider.ts`): `OPENAI_API_KEY` then `OPENROUTER_API_KEY`, the
+ * same order the runtime provider uses.
  * The per-session smart-agent overrides (top of the documented order) are a
  * runtime concern, not the file loader's — out of scope here.
  *
@@ -20,6 +24,11 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import {
+  type ProviderEnv,
+  providerApiKeyPrecedence,
+  resolveProviderApiKey,
+} from '../agent/provider.js';
 import { ConfigError } from '../errors.js';
 import type { Target } from './schema.js';
 import { ConfigSchema } from './schema.js';
@@ -113,7 +122,8 @@ function configName(cwd: string, path: string): string {
 
 /**
  * Load, validate, and resolve the project config. Throws `ConfigError` if the
- * file is missing, not JSON, fails the schema, or `OPENAI_API_KEY` is unset.
+ * file is missing, not JSON, fails the schema, or no provider API key is set
+ * (`OPENAI_API_KEY` / `OPENROUTER_API_KEY`).
  */
 export function loadConfig(opts: LoadOptions = {}): ResolvedConfig {
   const cwd = opts.cwd ?? process.cwd();
@@ -195,12 +205,21 @@ function parseProject(raw: string, name: string) {
   return result.data;
 }
 
-/** Resolve OpenAI-compatible router creds: env over the OpenRouter default base url. */
-function resolveProvider(env: Record<string, string | undefined>): ProviderConfig {
-  const apiKey = env.OPENAI_API_KEY?.trim();
+/**
+ * Resolve OpenAI-compatible router creds: env over the OpenRouter default base url.
+ *
+ * The key comes from the shared provider credential contract — explicit value,
+ * then `OPENAI_API_KEY`, then `OPENROUTER_API_KEY` (`PROVIDER_API_KEY_ENV_VARS`
+ * in `src/agent/provider.ts`) — so boot and runtime resolve identically.
+ * The missing-key message reuses the same precedence clause as the runtime
+ * guidance ({@link providerApiKeyPrecedence}), so both name the same keys AND
+ * the same precedence, and never carry a value.
+ */
+function resolveProvider(env: ProviderEnv): ProviderConfig {
+  const apiKey = resolveProviderApiKey(undefined, env);
   if (!apiKey) {
     throw new ConfigError(
-      'OPENAI_API_KEY is not set — add the model API key to your `.mcp.json` env.',
+      `No provider API key found — ${providerApiKeyPrecedence()} (add the model API key to your \`.mcp.json\` env).`,
     );
   }
   const baseUrl = env.OPENAI_BASE_URL?.trim() || OPENROUTER_BASE_URL;

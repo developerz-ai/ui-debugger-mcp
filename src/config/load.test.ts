@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { PROVIDER_API_KEY_ENV_VARS, providerApiKeyGuidance } from '../agent/provider.js';
 import { ConfigError } from '../errors.js';
 import {
   CONFIG_CANDIDATES,
@@ -46,6 +47,23 @@ function writeCandidate(dir: string, candidate: string, config: unknown): string
 
 const key = { OPENAI_API_KEY: 'sk-test' };
 
+/**
+ * A credential-shaped SENTINEL — a fake value that MUST never reach a message.
+ * Deliberately shaped like a real key so the shape assertions below can fail.
+ */
+const CREDENTIAL_SENTINEL = 'sk-ant-sentinel-0123456789abcdef';
+
+/** Matches a credential-shaped token (the `sk-`/`rk-`/`or-`/`pk-` key families). */
+const CREDENTIAL_SHAPED = /\b(?:sk|rk|or|pk)-[A-Za-z0-9_-]{8,}\b/;
+
+/**
+ * Assert `message` carries NO credential-shaped token. Reports a boolean, not
+ * the message, so a failing assertion never echoes a credential value.
+ */
+function expectNoCredentialShapedToken(message: string): void {
+  expect(CREDENTIAL_SHAPED.test(message)).toBe(false);
+}
+
 test('fills model and workspace defaults when the project omits them', () => {
   const cfg = loadConfig({ cwd: tmpProject(minimal), env: key });
   expect(cfg.models).toEqual(DEFAULT_MODELS);
@@ -84,11 +102,131 @@ test('blank OPENAI_BASE_URL falls back to the OpenRouter default', () => {
   expect(cfg.provider.baseUrl).toBe(OPENROUTER_BASE_URL);
 });
 
-test('missing OPENAI_API_KEY throws ConfigError', () => {
+test('missing provider API key throws ConfigError', () => {
   expect(() => loadConfig({ cwd: tmpProject(minimal), env: {} })).toThrow(ConfigError);
   expect(() => loadConfig({ cwd: tmpProject(minimal), env: { OPENAI_API_KEY: '  ' } })).toThrow(
     ConfigError,
   );
+});
+
+// --- the boot-time provider credential contract: OPENAI_API_KEY then
+// OPENROUTER_API_KEY, the same order the runtime provider resolves in.
+
+test('neither provider env key set: ConfigError names both accepted keys, no value', () => {
+  let caught: unknown;
+  try {
+    loadConfig({ cwd: tmpProject(minimal), env: {} });
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught).toBeInstanceOf(ConfigError);
+  const message = (caught as ConfigError).message;
+  expect(message).toContain('OPENAI_API_KEY');
+  expect(message).toContain('OPENROUTER_API_KEY');
+  // No credential value can appear — none was given. Asserted by SHAPE, not by
+  // a literal that was never in scope: a shape check can actually fail.
+  expectNoCredentialShapedToken(message);
+});
+
+test('the missing-key ConfigError carries no credential value from the env', () => {
+  // A credential-shaped value sits in an env var the resolver never reads, so
+  // the missing-key path still throws — the message must not pick it up.
+  let caught: unknown;
+  try {
+    loadConfig({
+      cwd: tmpProject(minimal),
+      env: { ANTHROPIC_API_KEY: CREDENTIAL_SENTINEL },
+    });
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught).toBeInstanceOf(ConfigError);
+  expectNoCredentialShapedToken((caught as ConfigError).message);
+});
+
+test('OPENAI_API_KEY alone: the config provider resolves that key', () => {
+  const cfg = loadConfig({
+    cwd: tmpProject(minimal),
+    env: { OPENAI_API_KEY: 'sk-openai' },
+  });
+  expect(cfg.provider.apiKey.length).toBe('sk-openai'.length);
+  expect(cfg.provider.apiKey === 'sk-openai').toBe(true);
+  expect(cfg.provider.baseUrl).toBe(OPENROUTER_BASE_URL);
+});
+
+test('OPENROUTER_API_KEY alone: the config provider resolves that key', () => {
+  const cfg = loadConfig({
+    cwd: tmpProject(minimal),
+    env: { OPENROUTER_API_KEY: 'sk-openrouter' },
+  });
+  expect(cfg.provider.apiKey.length).toBe('sk-openrouter'.length);
+  expect(cfg.provider.apiKey === 'sk-openrouter').toBe(true);
+  expect(cfg.provider.baseUrl).toBe(OPENROUTER_BASE_URL);
+});
+
+test('both provider env keys set: OPENAI_API_KEY wins', () => {
+  const cfg = loadConfig({
+    cwd: tmpProject(minimal),
+    env: { OPENAI_API_KEY: 'sk-openai', OPENROUTER_API_KEY: 'sk-openrouter' },
+  });
+  expect(cfg.provider.apiKey.length).toBe('sk-openai'.length);
+  expect(cfg.provider.apiKey === 'sk-openai').toBe(true);
+});
+
+test('a blank OPENAI_API_KEY falls through to OPENROUTER_API_KEY', () => {
+  const cfg = loadConfig({
+    cwd: tmpProject(minimal),
+    env: { OPENAI_API_KEY: '   ', OPENROUTER_API_KEY: 'sk-openrouter' },
+  });
+  expect(cfg.provider.apiKey.length).toBe('sk-openrouter'.length);
+  expect(cfg.provider.apiKey === 'sk-openrouter').toBe(true);
+});
+
+test('a missing provider key errors without naming an unsupported env key', () => {
+  let caught: unknown;
+  try {
+    loadConfig({ cwd: tmpProject(minimal), env: { OPENAI_API_KEY: '  ' } });
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught).toBeInstanceOf(ConfigError);
+  const message = (caught as ConfigError).message;
+  expect(message).toContain('OPENAI_API_KEY');
+  expect(message).toContain('OPENROUTER_API_KEY');
+  expect(message).not.toContain('ANTHROPIC_API_KEY');
+});
+
+test('the missing-key ConfigError states the env precedence the resolver applies', () => {
+  let caught: unknown;
+  try {
+    loadConfig({ cwd: tmpProject(minimal), env: {} });
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught).toBeInstanceOf(ConfigError);
+  const message = (caught as ConfigError).message;
+  // The accepted keys appear in RESOLUTION order — OPENAI_API_KEY first.
+  expect(message.indexOf('OPENAI_API_KEY')).toBeLessThan(message.indexOf('OPENROUTER_API_KEY'));
+  // The tie-break is stated explicitly and names the winning key.
+  expect(message).toContain('OPENAI_API_KEY wins if both are set');
+});
+
+test('the boot ConfigError and the runtime ProviderError guidance agree', () => {
+  let caught: unknown;
+  try {
+    loadConfig({ cwd: tmpProject(minimal), env: {} });
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught).toBeInstanceOf(ConfigError);
+  const message = (caught as ConfigError).message;
+  // Same accepted keys AND the same precedence statement on both sides.
+  for (const name of PROVIDER_API_KEY_ENV_VARS) {
+    expect(message).toContain(name);
+    expect(providerApiKeyGuidance()).toContain(name);
+  }
+  expect(message).toContain('OPENAI_API_KEY wins if both are set');
+  expect(providerApiKeyGuidance()).toContain('OPENAI_API_KEY wins if both are set');
 });
 
 test('missing config file throws ConfigError', () => {

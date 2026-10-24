@@ -23,8 +23,9 @@ reads it and spawns this server over stdio.
 ```
 
 - Holds the **model API key + base URL** (the agent's brains run in-server).
-- Any **OpenAI-compatible router** — `OPENAI_BASE_URL` + `OPENAI_API_KEY`.
-  Default base URL: OpenRouter. Also works: z.ai, DeepSeek, or any
+- Any **OpenAI-compatible router** — `OPENAI_BASE_URL` + an API key in
+  `OPENAI_API_KEY` or `OPENROUTER_API_KEY` (`OPENAI_API_KEY` wins when both are
+  set). Default base URL: OpenRouter. Also works: z.ai, DeepSeek, or any
   OpenAI-compatible endpoint. See *Providers* below.
 - Gitignored — never commit the key.
 - `bunx` works too.
@@ -236,7 +237,8 @@ Rules:
    the root `.ui-debugger-mcp.json` (legacy). Both present → `.dz/` wins, with a
    one-line notice naming the ignored root file; a bad `.dz/` copy errors without
    reading root.
-3. env (`OPENAI_API_KEY`, `OPENAI_BASE_URL`)
+3. env (`OPENAI_API_KEY` or `OPENROUTER_API_KEY` — the first wins when both are
+   set — plus `OPENAI_BASE_URL`)
 4. built-in defaults — managed + headless web, OpenRouter base url, and:
    - `driver` → `deepseek/deepseek-v4-flash` (text)
    - `vision` → `qwen/qwen3-vl-32b-instruct` (image)
@@ -253,8 +255,9 @@ All Zod-validated. Bad config fails fast and loud.
 
 ## Providers — OpenAI-compatible routers
 
-We talk to **any OpenAI-compatible endpoint**: one `OPENAI_BASE_URL` +
-`OPENAI_API_KEY`. No vendor lock-in (same posture as `../ai-task-master`).
+We talk to **any OpenAI-compatible endpoint**: one `OPENAI_BASE_URL` + an API key
+in `OPENAI_API_KEY` or `OPENROUTER_API_KEY` (`OPENAI_API_KEY` takes precedence
+when both are set). No vendor lock-in (same posture as `../ai-task-master`).
 
 - **OpenRouter** (default base url) — one key reaches every provider; model
   strings are `provider/model`, with optional routing suffixes passed through

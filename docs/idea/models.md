@@ -73,8 +73,10 @@ one does the moving and asks — *"is the cup to my left?"* — and acts on the 
 ```
 Defaults if omitted: **deepseek for text** (driver + summary), **glm for image**
 (vision). Capability-based assignment, same idea as `../ai-task-master`'s roles.
-Provider = any OpenAI-compatible endpoint (`OPENAI_BASE_URL` + `OPENAI_API_KEY`);
-OpenRouter is the default — see [`config.md`](config.md#providers--openai-compatible-routers).
+Provider = any OpenAI-compatible endpoint (`OPENAI_BASE_URL` + an API key in
+`OPENAI_API_KEY` or `OPENROUTER_API_KEY`, `OPENAI_API_KEY` first when both are
+set); OpenRouter is the default — see
+[`config.md`](config.md#providers--openai-compatible-routers).
 
 ## The `look` tool — the cooperation seam
 
