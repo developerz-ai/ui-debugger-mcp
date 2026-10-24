@@ -168,3 +168,22 @@ export class ReplayError extends UiDebuggerError {
     Object.setPrototypeOf(this, ReplayError.prototype);
   }
 }
+
+/**
+ * The pinned Chromium headless shell is missing shared libraries and the check
+ * could not (or failed to) install them.
+ *
+ * The message starts with `X_CHROMIUM_LIBS_MISSING:` — the machine-readable
+ * marker the library check (`src/cli/chromium-libs.ts`) puts on its stderr, and
+ * which `bin/setup` relays unchanged before its launch verification — and
+ * names every missing library plus the remediation command. Loud on purpose: a
+ * headless shell that cannot resolve `libX.so` fails at launch with a stack
+ * trace that names no library.
+ */
+export class ChromiumLibsMissingError extends UiDebuggerError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChromiumLibsMissingError';
+    Object.setPrototypeOf(this, ChromiumLibsMissingError.prototype);
+  }
+}
