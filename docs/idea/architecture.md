@@ -63,9 +63,11 @@ mobile via ADB + uiautomator. See [`adapters.md`](adapters.md).
 
 ## Concurrency
 
-One debug run per project at a time. The persistent Chrome profile locks itself,
-and a single small agent keeps the loop simple. Parallel runs would need cloned
-profiles — out of scope for now.
+One debug run per project at a time. The gate is the workspace's exclusive
+ownership claim (`owner.lock`), taken atomically — exactly one live owner per
+workspace, across processes, with no Chrome involved — and a single small agent
+keeps the loop simple. Parallel runs would need cloned profiles — out of scope
+for now.
 
 ## Stack
 

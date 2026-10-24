@@ -7,7 +7,7 @@
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ResolvedConfig } from '../config/load.js';
@@ -20,8 +20,16 @@ import {
 } from '../errors.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { SessionManager } from '../session/manager.js';
+import { ownerLockPath } from '../session/owner-lock.js';
+import { captureIdentity } from '../session/process-identity.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
-import type { ForeignRun, StatePort } from '../session/state-file.js';
+import {
+  FileStatePort,
+  type ForeignRun,
+  readState,
+  type StatePort,
+  writeState,
+} from '../session/state-file.js';
 import { _resetCounter, sessionPaths, workspacePaths } from '../session/workspace.js';
 import { DebugService } from './debug-service.js';
 import type { BuiltSession, SessionBuilder } from './session-builder.js';
@@ -699,4 +707,162 @@ test('get_findings serves a foreign run instead of denying it exists', async () 
 
   // An unrelated id is still a hard miss — this is a targeted fallback, not a catch-all.
   await expect(service.getFindings({ session_id: 'nope' })).rejects.toThrow(SessionNotFoundError);
+});
+
+// --- cross-process admission: the workspace ownership claim ------------------
+
+/** Live child processes spawned by these tests — killed after each case. */
+let liveChildren: ReturnType<typeof Bun.spawn>[] = [];
+
+/**
+ * A second LIVE pid, distinct from this process's.
+ *
+ * The ownership claim is decided by pid + process identity, so a test needs a
+ * real second process: a dead pid would be reclaimed as stale, and a fabricated
+ * one would not be provably alive. The child only sleeps — its pid is all the
+ * test needs.
+ */
+function spawnLivePid(): number {
+  const child = Bun.spawn({
+    cmd: ['bun', '-e', 'await Bun.sleep(30_000)'],
+    stdout: 'ignore',
+    stderr: 'ignore',
+  });
+  liveChildren.push(child);
+  return child.pid;
+}
+
+afterEach(async () => {
+  for (const child of liveChildren) {
+    child.kill();
+    await child.exited.catch(() => undefined);
+  }
+  liveChildren = [];
+});
+
+test('a second server on the same workspace is refused — the owner keeps its run', async () => {
+  // Two REAL FileStatePorts over ONE shared workspace, with distinct live pids:
+  // the shape of two MCP servers debugging the same project at once. The second
+  // start must be refused, and — the defect this closes — the first owner's
+  // breadcrumb must still name it, so `status`/`stop` keep reaching the live
+  // run instead of a dead one.
+  const workspace = workspacePaths(CWD, tmpDir);
+  const ownerPid = process.pid;
+  const otherPid = spawnLivePid();
+  const ownerState = new FileStatePort(workspace, { pid: ownerPid });
+  const otherState = new FileStatePort(workspace, { pid: otherPid });
+
+  const ownerManager = new SessionManager<Session>();
+  const otherManager = new SessionManager<Session>();
+  const ownerBuild = fakeBuilder();
+  const otherBuild = fakeBuilder();
+  const owner = new DebugService({
+    manager: ownerManager,
+    config: CONFIG,
+    cwd: CWD,
+    build: ownerBuild.build,
+    state: ownerState,
+    now: () => NOW,
+  });
+  const other = new DebugService({
+    manager: otherManager,
+    config: CONFIG,
+    cwd: CWD,
+    build: otherBuild.build,
+    state: otherState,
+    now: () => NOW,
+  });
+
+  const started = await owner.start({ target: 'web', goal: 'first' });
+  expect(ownerManager.has(CWD)).toBe(true);
+
+  const failure = await other.start({ target: 'web', goal: 'second' }).catch((e: unknown) => e);
+
+  expect(failure).toBeInstanceOf(SessionBusyError);
+  const message = (failure as SessionBusyError).message;
+  expect(message).toContain(`pid ${ownerPid}`);
+  expect(message).toContain(started.session_id);
+  expect(message).toContain('ui-debugger-mcp stop');
+
+  // The loser's browser never came up.
+  expect(otherBuild.log.builds).toBe(0);
+  expect(otherManager.has(CWD)).toBe(false);
+
+  // …and the owner's live run is still the one on disk.
+  expect(await readState(workspace.stateJson)).toMatchObject({
+    pid: ownerPid,
+    sessionId: started.session_id,
+    status: 'running',
+  });
+
+  await owner.end({ session_id: started.session_id });
+});
+
+test('the ownership claim refuses a start even when the breadcrumb pre-check sees nothing', async () => {
+  // The window the breadcrumb read cannot close: the loser's pre-check reads
+  // the workspace BEFORE the winner's breadcrumb lands, so it sees "no foreign
+  // run" and lets the start through. Only the exclusive claim can decide — and
+  // it must refuse, before the loser publishes anything.
+  //
+  // The winner's breadcrumb here names a DEAD pid (its write has not landed
+  // yet), while the claim it already took names a LIVE foreign process.
+  const workspace = workspacePaths(CWD, tmpDir);
+  const claimPid = spawnLivePid();
+  const loserPid = spawnLivePid();
+  const otherState = new FileStatePort(workspace, { pid: loserPid });
+  const otherManager = new SessionManager<Session>();
+  const otherBuild = fakeBuilder();
+  const other = new DebugService({
+    manager: otherManager,
+    config: CONFIG,
+    cwd: CWD,
+    build: otherBuild.build,
+    state: otherState,
+    now: () => NOW,
+  });
+
+  // The winner holds the claim; its breadcrumb names a dead pid, so the loser's
+  // pre-check reports "no foreign run" — exactly the race the claim closes.
+  await mkdir(workspace.root, { recursive: true });
+  await writeFile(
+    ownerLockPath(workspace),
+    `${JSON.stringify(
+      {
+        pid: claimPid,
+        identity: captureIdentity(claimPid),
+        sessionId: 'winner-run',
+        acquiredAt: '2026-06-29T00:00:00.000Z',
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
+  await writeState(workspace.stateJson, {
+    pid: 999_999_999, // dead — the pre-check sees nobody
+    identity: { startTicks: 1 },
+    sessionId: 'winner-run',
+    target: 'web',
+    goal: 'first',
+    status: 'running',
+    startedAt: '2026-06-29T00:00:00.000Z',
+    updatedAt: '2026-06-29T00:00:00.000Z',
+    sessionDir: join(workspace.sessions, 'winner-run'),
+  });
+
+  // The pre-check is blind here…
+  expect(await otherState.foreignRun()).toBeNull();
+
+  // …so the CLAIM is what refuses, before anything is launched.
+  const failure = await other.start({ target: 'web', goal: 'second' }).catch((e: unknown) => e);
+  expect(failure).toBeInstanceOf(SessionBusyError);
+  expect((failure as SessionBusyError).message).toContain(`pid ${claimPid}`);
+  expect(otherBuild.log.builds).toBe(0);
+  expect(otherManager.has(CWD)).toBe(false);
+
+  // The winner's breadcrumb is untouched — the refusal published nothing.
+  expect(await readState(workspace.stateJson)).toMatchObject({
+    sessionId: 'winner-run',
+    status: 'running',
+  });
 });
