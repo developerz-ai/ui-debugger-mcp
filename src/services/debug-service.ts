@@ -312,6 +312,18 @@ export class DebugService implements DebugApi {
           'at any time, so a lost session id never wedges the project.',
       );
     }
+    // The previous run's teardown is still in flight: the manager freed its slot,
+    // but its close has not settled, so the profile/browser it held is mid-release.
+    // Launching now would race the ending run for those resources — refuse until
+    // the gate lifts, naming what the caller is waiting on (the manager refuses
+    // with the same message if its own start() is reached first).
+    const closing = this.#manager.closingId(cwd);
+    if (closing !== undefined) {
+      throw new SessionBusyError(
+        `The previous debug session ('${closing}') for '${cwd}' is still closing — its ` +
+          'teardown is releasing the profile lock. Wait a moment, then retry.',
+      );
+    }
     // Before anything is launched: a run built from config the caller has already
     // replaced is worse than no run — it reproduces the very failure they just fixed.
     this.#assertConfigFresh();
@@ -402,7 +414,9 @@ export class DebugService implements DebugApi {
     } catch (err) {
       // Nobody holds this id, so nothing could ever end the run — leave no
       // `running` breadcrumb pointing the CLI at a run that is already gone.
-      await this.#state.clear().catch(() => undefined);
+      // Scoped to THIS attempt's id: a successor that recorded itself while the
+      // failure unwound (a raced takeover) must keep its breadcrumb.
+      await this.#state.clear(id).catch(() => undefined);
       throw err;
     }
   }
@@ -603,7 +617,12 @@ export class DebugService implements DebugApi {
     try {
       await this.#manager.end(this.#cwd);
     } finally {
-      await this.#state.clear();
+      // Clear the breadcrumb even when the close throws: the manager frees the slot
+      // before closing, so a stale `running` state.json would make a later CLI
+      // `stop` SIGTERM a healthy server. The close error still propagates. Scoped
+      // to `session_id` — `#require` verified it against the active session — so a
+      // successor that records itself while this teardown is in flight is untouched.
+      await this.#state.clear(session_id);
     }
     return { ok: true, session_id };
   }
@@ -628,12 +647,14 @@ export class DebugService implements DebugApi {
     // Nobody asked for this end, so nobody has read the results yet: retain the
     // session (settled + closed) so `get_findings` still serves them. Captured
     // before the close, so even a failing teardown leaves the findings reachable.
-    this.#retained = this.#manager.get(this.#cwd);
-    // Same contract as `end()`: the breadcrumb clears even when the close throws.
+    const ending = this.#manager.get(this.#cwd);
+    this.#retained = ending;
+    // Same contract as `end()`: the breadcrumb clears even when the close throws —
+    // scoped to the run being ENDED, never a successor's.
     try {
       await this.#manager.end(this.#cwd);
     } finally {
-      await this.#state.clear();
+      await this.#state.clear(ending.id);
     }
   }
 

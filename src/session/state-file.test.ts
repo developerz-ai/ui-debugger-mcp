@@ -4,7 +4,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureIdentity } from './process-identity.js';
 import type { StateFile } from './state-file.js';
-import { FileStatePort, markStatus, readState, restoreRunning, writeState } from './state-file.js';
+import {
+  FileStatePort,
+  markStatus,
+  readState,
+  restoreRunning,
+  StateFileSchema,
+  type StateIo,
+  writeState,
+} from './state-file.js';
 import { workspacePaths } from './workspace.js';
 
 let dir: string;
@@ -144,15 +152,91 @@ test('FileStatePort.clear stays best-effort (the run is already down)', async ()
   const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
   const port = new FileStatePort(ws, { pid: 99 });
   // Nothing recorded, nothing writable — clearing must not throw into teardown.
-  await port.clear();
+  await port.clear('s');
 });
 
 test('FileStatePort.clear marks the run ended', async () => {
   const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
   const port = new FileStatePort(ws, { pid: 99, now: () => new Date('2026-06-29T02:00:00.000Z') });
   await port.record({ sessionId: 's', target: 'web', goal: 'g' });
-  await port.clear();
+  await port.clear('s');
   expect((await readState(ws.stateJson))?.status).toBe('ended');
+});
+
+test('FileStatePort.clear is scoped to the ending run — a successor breadcrumb is never ended', async () => {
+  const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
+  const port = new FileStatePort(ws, { pid: 99, now: () => new Date('2026-06-29T02:00:00.000Z') });
+  await port.record({ sessionId: 'old', target: 'web', goal: 'done' });
+  // A successor started while the old run's teardown was still in flight.
+  await port.record({ sessionId: 'new', target: 'web', goal: 'next' });
+
+  await port.clear('old'); // the late teardown clear
+
+  // The successor the CLI `stop` reads stays live: status, id and goal untouched.
+  expect(await readState(ws.stateJson)).toMatchObject({
+    status: 'running',
+    sessionId: 'new',
+    goal: 'next',
+  });
+});
+
+test('a record racing an in-flight clear queues behind it — the live successor survives', async () => {
+  // The interleaving the id guard alone cannot survive: the teardown's clear
+  // READS the old breadcrumb, a successor start records itself, and THEN the
+  // clear's write publishes — the guard passed on the stale read, and the live
+  // successor is overwritten with the old ended run, so `ui-debugger-mcp stop`
+  // skips a run that is actually going. The workspace write queue must make the
+  // successor's record wait out the clear's whole read-modify-write.
+  const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
+  const old: StateFile = {
+    ...SAMPLE,
+    sessionId: 'old',
+    goal: 'done',
+    sessionDir: join(ws.sessions, 'old'),
+  };
+  let contents: string | undefined = `${JSON.stringify(old, null, 2)}\n`;
+  // Park exactly ONE write — the clear's — mid-flight, deterministically (real-fs
+  // timing could never pin this interleaving).
+  let releaseFirstWrite: () => void = () => undefined;
+  const firstWriteGate = new Promise<void>((resolve) => {
+    releaseFirstWrite = resolve;
+  });
+  let writes = 0;
+  const onDisk = (): StateFile | null =>
+    contents === undefined ? null : StateFileSchema.parse(JSON.parse(contents));
+  const io: StateIo = {
+    async read() {
+      return onDisk();
+    },
+    async write(_path, state) {
+      writes += 1;
+      if (writes === 1) await firstWriteGate;
+      contents = `${JSON.stringify(state, null, 2)}\n`;
+    },
+  };
+  const port = new FileStatePort(ws, { pid: 99, io });
+
+  // The clear starts (and reads 'old'); the successor's record is issued while
+  // that clear is still mid-flight.
+  const clearing = port.clear('old');
+  const recording = port.record({ sessionId: 'new', target: 'web', goal: 'next' });
+  await new Promise<void>((r) => setTimeout(r, 0)); // both parked where they belong
+
+  // The record has NOT slipped past the parked clear: the breadcrumb is still
+  // exactly what the clear read, and only the clear's write is in flight.
+  expect(writes).toBe(1);
+  expect(onDisk()).toMatchObject({ sessionId: 'old', status: 'running' });
+
+  releaseFirstWrite(); // the clear publishes (old, ended)...
+  await Promise.all([clearing, recording]); // ...then the queued record (new, running)
+
+  expect(writes).toBe(2);
+  // The successor the CLI `stop` must signal is the one left on disk.
+  expect(onDisk()).toMatchObject({
+    status: 'running',
+    sessionId: 'new',
+    goal: 'next',
+  });
 });
 
 // --- foreignRun: the cross-process one-run gate -----------------------------
