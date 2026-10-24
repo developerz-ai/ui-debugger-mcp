@@ -229,6 +229,7 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
       // settles `failed`, never the verdict it may have written just before close.
       if (this.#abort.signal.aborted) {
         this.#status = 'failed';
+        await this.#persistAbortedVerdict();
         return;
       }
       this.#status = await this.#verdict();
@@ -242,9 +243,43 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
       await this.#raceAbort(this.#ensureReplay());
     } catch (error) {
       this.#status = 'failed';
-      // Aborted by `close()` — the teardown is the verdict; nothing to surface.
-      if (this.#abort.signal.aborted) return;
+      // Aborted by `close()` — the teardown is the verdict, not the agent's failure:
+      // persist the terminal `failed` record (replacing any stale `running`/`passed`
+      // snapshot) and skip the agent-error surfacing.
+      if (this.#abort.signal.aborted) {
+        await this.#persistAbortedVerdict();
+        return;
+      }
       await this.#surfaceAgentError(error);
+    }
+  }
+
+  /**
+   * Persist the aborted run's terminal `failed` verdict, replacing any stale
+   * `running`/`passed` snapshot while preserving every step, bug, visual finding
+   * and evidence pointer already streamed before the abort.
+   *
+   * The summary is the one field NOT carried over blindly: prose the driver wrote
+   * under a `passed` verdict claims success, and the abort overrules that verdict —
+   * kept as-is it would read "all good" under a `failed` status and send the
+   * caller hunting for a clean run that never happened. A summary written under a
+   * `failed` verdict already describes the failure, so it stays.
+   */
+  async #persistAbortedVerdict(): Promise<void> {
+    const prior = await this.#findingsStore.tryReadFindings().catch(() => null);
+    const carriedSummary = prior?.status === 'failed' ? prior.summary : undefined;
+    try {
+      await this.#findingsStore.writeFindings({
+        ...prior,
+        status: this.#status,
+        steps: prior?.steps ?? [],
+        bugs: prior?.bugs ?? [],
+        visual: prior?.visual ?? [],
+        // Overrides the spread's summary — a success summary never survives the abort.
+        summary: carriedSummary,
+      });
+    } catch {
+      // Best-effort persistence — the in-memory terminal status still stands.
     }
   }
 

@@ -213,7 +213,20 @@ test('close aborts the in-flight loop, waits for it, then releases the adapter',
   const store = makeStore();
   const session = new Session({ id: 's1', story: 'x', adapter, findingsStore: store });
 
+  let markWritten: () => void = () => undefined;
+  const written = new Promise<void>((resolve) => {
+    markWritten = resolve;
+  });
+
   session.start(async (ctx) => {
+    await ctx.progress.writeFindings({
+      status: 'running',
+      steps: [{ step: 'opened cart', ok: true }],
+      bugs: [{ kind: 'flow', detail: 'checkout button did nothing' }],
+      visual: [{ issue: 'total is cut off', where: 'cart footer', severity: 'high' }],
+      evidence: 'sessions/s1/partial.png',
+    });
+    markWritten();
     await new Promise<void>((resolve) => {
       ctx.signal.addEventListener('abort', () => resolve(), { once: true });
     });
@@ -221,11 +234,20 @@ test('close aborts the in-flight loop, waits for it, then releases the adapter',
     throw new AgentError('aborted by close');
   });
 
+  await written;
+
   await session.close();
 
   expect(order).toEqual(['loop', 'adapter']); // the loop settled before the adapter closed
   expect(session.status).toBe('failed'); // an aborted run never reached a verdict
-  expect(await store.tryReadFindings()).toBeNull(); // abort is the verdict — nothing surfaced
+  const findings = await store.readFindings();
+  expect(findings.status).toBe('failed'); // the terminal verdict is persisted, not stale 'running'
+  expect(findings.steps).toEqual([{ step: 'opened cart', ok: true }]);
+  expect(findings.bugs).toEqual([{ kind: 'flow', detail: 'checkout button did nothing' }]);
+  expect(findings.visual).toEqual([
+    { issue: 'total is cut off', where: 'cart footer', severity: 'high' },
+  ]);
+  expect(findings.evidence).toBe('sessions/s1/partial.png');
 });
 
 test('close forces failed even if the loop resolves with a verdict after abort', async () => {
@@ -245,16 +267,89 @@ test('close forces failed even if the loop resolves with a verdict after abort',
     });
     await ctx.progress.writeFindings({
       status: 'passed',
-      steps: [],
-      bugs: [],
-      visual: [],
+      steps: [{ step: 'opened cart', ok: true }],
+      bugs: [{ kind: 'flow', detail: 'checkout button did nothing' }],
+      visual: [{ issue: 'total is cut off', where: 'cart footer', severity: 'high' }],
       summary: 'all good',
+      evidence: 'sessions/s1/partial.png',
     });
   });
 
   await session.close();
 
   expect(session.status).toBe('failed'); // aborted run settles failed, not the written verdict
+  const findings = await store.readFindings();
+  expect(findings.status).toBe('failed'); // the stale 'passed' snapshot was replaced
+  expect(findings.steps).toEqual([{ step: 'opened cart', ok: true }]);
+  expect(findings.bugs).toEqual([{ kind: 'flow', detail: 'checkout button did nothing' }]);
+  expect(findings.visual).toEqual([
+    { issue: 'total is cut off', where: 'cart footer', severity: 'high' },
+  ]);
+  expect(findings.evidence).toBe('sessions/s1/partial.png');
+  // The success summary does not survive the abort: "all good" under a `failed`
+  // status would send the caller hunting for a clean run that never happened.
+  expect(findings.summary).toBeUndefined();
+});
+
+test('an aborted run that wrote no findings still persists a terminal failed verdict', async () => {
+  const store = makeStore();
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+  });
+
+  // The abort lands before the driver flushed anything — there is no findings.json
+  // on disk yet, so the persisted verdict has to be built from nothing.
+  session.start(async (ctx) => {
+    await new Promise<void>((resolve) => {
+      ctx.signal.addEventListener('abort', () => resolve(), { once: true });
+    });
+    throw new AgentError('aborted by close');
+  });
+
+  await session.close();
+
+  expect(session.status).toBe('failed');
+  const findings = await store.readFindings(); // read from disk, not the snapshot projection
+  expect(findings.status).toBe('failed'); // a terminal verdict, not a missing file
+  expect(findings.steps).toEqual([]);
+  expect(findings.bugs).toEqual([]);
+  expect(findings.visual).toEqual([]);
+});
+
+test('an aborted run keeps a failure summary but drops a success one', async () => {
+  const store = makeStore();
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+  });
+
+  // The driver reported a FAILURE before the abort landed — that prose stays
+  // truthful under the `failed` status, so it is carried over.
+  await store.writeFindings({
+    status: 'failed',
+    steps: [{ step: 'opened cart', ok: false }],
+    bugs: [{ kind: 'flow', detail: 'checkout button did nothing' }],
+    visual: [],
+    summary: 'Checkout is dead: the button does nothing.',
+  });
+
+  session.start(async (ctx) => {
+    await new Promise<void>((resolve) => {
+      ctx.signal.addEventListener('abort', () => resolve(), { once: true });
+    });
+    throw new AgentError('aborted by close');
+  });
+
+  await session.close();
+
+  const findings = await store.readFindings();
+  expect(findings.status).toBe('failed');
+  expect(findings.summary).toBe('Checkout is dead: the button does nothing.');
 });
 
 test('an agent crash settles failed and surfaces the error (with its trail) into findings', async () => {
