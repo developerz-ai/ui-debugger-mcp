@@ -17,6 +17,7 @@ for that app. Keyed by the current dir.
 │       ├── console.log        browser / app console
 │       ├── network.log        requests, responses, failures, timings
 │       └── agent.log          small agent's step-by-step trail
+├── owner.lock                 exclusive ownership claim (one live owner)
 └── state.json                 session state, keyed by cwd
 ```
 
@@ -33,6 +34,7 @@ for that app. Keyed by the current dir.
 | `console.log`       | JS errors a code-only agent can't see. |
 | `network.log`       | The 500s / hangs / bad payloads behind a broken UI. |
 | `agent.log`         | Why the small agent decided pass/fail. Auditable. |
+| `owner.lock`        | The **exclusive ownership claim** — the authoritative one-run gate. Taken atomically (`open(..., 'wx')`) by `FileStatePort.record` before any breadcrumb is published; names its holder by pid + process identity, so a live foreign owner refuses the start (`SessionBusyError`) and a dead or PID-recycled holder is reclaimed. Released only by the owner it names. |
 | `state.json`        | Resume / inspect the cwd-keyed session. |
 
 ## PR replay video
@@ -109,8 +111,11 @@ reason. Pinned by `src/session/isolation.test.ts`.
 
 ## Rules
 
-- **One session at a time** per project — the persistent profile locks itself.
-  Parallel runs *within one project* would need a cloned profile; out of scope.
+- **One session at a time** per project — the gate is the workspace's exclusive
+  ownership claim (`owner.lock`), taken atomically before the run is recorded:
+  exactly one live owner per workspace, across processes, with no Chrome involved.
+  The persistent profile still locks itself, but it is not the gate. Parallel runs
+  *within one project* would need a cloned profile; out of scope.
   Different projects run in parallel freely (see above).
 - Lives under `./tmp/` so it never pollutes the repo (gitignore `tmp/`).
 - Findings reference evidence by path, so the smart agent can open a screenshot

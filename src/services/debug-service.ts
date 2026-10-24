@@ -13,6 +13,13 @@
  * refuses when another live server already owns a run here (a dead owner's stale
  * breadcrumb never blocks).
  *
+ * The breadcrumb read is the FRIENDLY early refusal; the AUTHORITY is the
+ * workspace's exclusive ownership claim, taken atomically by
+ * {@link FileStatePort.record} when the breadcrumb is written. Two servers
+ * starting in the same window both read "no foreign run" — only the claim
+ * admits one of them, and the loser is refused with {@link SessionBusyError}
+ * before a browser is launched.
+ *
  * Sessions are keyed by cwd, but the tools speak `session_id`. Every id-bearing
  * call resolves the active session for the cwd and fails loud
  * ({@link SessionNotFoundError}) when the id does not match, so a stale id never
@@ -275,8 +282,9 @@ export class DebugService implements DebugApi {
    * the target, and kick the loop off in the background. Fails loud if a run is
    * already active for this cwd ({@link SessionBusyError}) — whether it belongs to
    * this server (the manager / in-flight guard) or to another live one (the
-   * `state.json` breadcrumb); never leaks a launched browser — a lost lock race or
-   * a failed `open` tears the session back down.
+   * `state.json` breadcrumb read, and then the workspace's exclusive ownership
+   * claim that the breadcrumb write takes); never leaks a launched browser — a
+   * lost lock race or a failed `open` tears the session back down.
    *
    * `timeout` is wall-clock from HERE: the deadline is fixed on entry and the
    * remaining budget is threaded into the build and the first navigation, so a slow
@@ -362,6 +370,10 @@ export class DebugService implements DebugApi {
     /** Budget left on the caller's cap; never negative — a blown budget is simply spent. */
     const remaining = (): number => Math.max(0, deadline - this.#now());
 
+    // The friendly early refusal: another live server's breadcrumb already names
+    // a run here. It is a READ, so two servers starting in the same window can
+    // both see "no foreign run" — the AUTHORITATIVE admission is the exclusive
+    // ownership claim that `state.record()` takes below, atomically.
     await this.#assertNoForeignRun(cwd);
     // The caller asked to take the project over. Before the breadcrumb, so the
     // takeover's `clear()` cannot wipe the record of the run replacing it.
@@ -373,6 +385,11 @@ export class DebugService implements DebugApi {
     // browser already holds the profile lock. It fails loud (a run the CLI cannot
     // see is a run nobody can stop) — and here that costs nothing, since not one
     // process has been launched yet.
+    //
+    // Writing it also TAKES the workspace's exclusive ownership claim, which is
+    // the real gate: a live foreign owner refuses this write with
+    // {@link SessionBusyError} (naming its pid and session), so the loser never
+    // publishes a breadcrumb that would hide the winner's live run.
     await this.#state.record({ sessionId: id, target, goal });
 
     try {
@@ -476,6 +493,12 @@ export class DebugService implements DebugApi {
    * same profile/emulator and overwrite the live breadcrumb (leaving the CLI
    * pointing at the wrong pid). A dead or PID-recycled owner does not count — a
    * crashed server's stale `running` file must never wedge the project shut.
+   *
+   * This is the FRIENDLY early refusal, not the authority: it reads the
+   * breadcrumb, so two servers starting in the same window can both pass it.
+   * The authoritative admission is the workspace's exclusive ownership claim,
+   * taken atomically by the breadcrumb write in {@link #launch} — a refused
+   * claim surfaces as {@link SessionBusyError} from there.
    */
   async #assertNoForeignRun(cwd: string): Promise<void> {
     const foreign = await this.#state.foreignRun();

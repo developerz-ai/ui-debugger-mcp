@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Findings } from '../findings/schema.js';
+import { ownerLockPath } from '../session/owner-lock.js';
 import { captureIdentity } from '../session/process-identity.js';
 import type { StateFile } from '../session/state-file.js';
 import { FileStatePort, readState, writeState } from '../session/state-file.js';
@@ -143,7 +144,22 @@ test('a successor breadcrumb survives the ending run\u2019s late scoped clear â€
   // to its own id, so the live successor's breadcrumb must be untouched â€”
   // otherwise `stop` would see a terminal status and skip the live server.
   const stateJson = await seedState({ sessionId: 'successor-1', ...liveOwner() });
-  await new FileStatePort(workspacePaths(cwd)).clear('old-run');
+  const ws = workspacePaths(cwd);
+  await writeFile(
+    ownerLockPath(ws),
+    `${JSON.stringify(
+      {
+        pid: process.pid,
+        identity: captureIdentity(process.pid),
+        sessionId: 'successor-1',
+        acquiredAt: '2026-06-29T00:00:00.000Z',
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
+  await new FileStatePort(ws).clear('old-run');
 
   const survived = await readState(stateJson);
   expect(survived).toMatchObject({ status: 'running', sessionId: 'successor-1' });

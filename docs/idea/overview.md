@@ -50,6 +50,6 @@ conversation, structured findings — not a remote control.
 
 - **Linux first.** x11 / wayland. Adapter-based.
 - **Headless by default** for web.
-- **One session at a time** per project (persistent browser profile locks it).
+- **One session at a time** per project (an exclusive workspace ownership claim, `owner.lock`, admits one owner).
 - **Session = current dir.** Open it in the repo, it debugs that repo.
 - **Evidence over claims.** Every finding has a screenshot / log to back it.
