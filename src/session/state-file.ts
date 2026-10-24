@@ -73,6 +73,20 @@ export async function readState(path: string): Promise<StateFile | null> {
   }
 }
 
+/**
+ * The two seams a breadcrumb lifecycle write flows through, as one injectable
+ * unit — the real fs by default, a controllable fake in tests (so the
+ * record-vs-clear write ordering can be pinned deterministically, without
+ * racing real-fs timings).
+ */
+export interface StateIo {
+  read(path: string): Promise<StateFile | null>;
+  write(path: string, state: StateFile): Promise<void>;
+}
+
+/** The real fs — {@link StateIo} as {@link writeState}/{@link readState} implement it. */
+export const fsStateIo: StateIo = { read: readState, write: writeState };
+
 /** What a run reports to the state file when it opens. */
 export interface RunState {
   sessionId: string;
@@ -90,7 +104,15 @@ export interface ForeignRun {
   sessionDir: string;
 }
 
-/** The seam {@link DebugService} writes run lifecycle through (no-op in tests). */
+/**
+ * The seam {@link DebugService} writes run lifecycle through (no-op in tests).
+ *
+ * `record` and `clear` must be serialized per workspace: `clear` is a
+ * read-modify-write whose id guard only holds when no `record` can publish
+ * between its read and its write ({@link FileStatePort} queues them) — an
+ * interleaved record would be overwritten with the ending run's stale
+ * breadcrumb, leaving `ui-debugger-mcp stop` nothing live to signal.
+ */
 export interface StatePort {
   /** Record the run as `running`. Throws when the breadcrumb cannot be written. */
   record(run: RunState): Promise<void>;
@@ -135,34 +157,65 @@ export class FileStatePort implements StatePort {
   readonly #workspace: WorkspacePaths;
   readonly #pid: number;
   readonly #now: () => Date;
+  readonly #io: StateIo;
+  /**
+   * Tail of this workspace's breadcrumb-write queue.
+   *
+   * `clear()` is a read-modify-write: read the breadcrumb, check the session
+   * id, write it back. `record()` is an overwrite. Letting the two interleave
+   * breaks the id guard — a teardown's clear reads the OLD breadcrumb, a
+   * successor start records itself, the clear's write publishes last and
+   * overwrites the live successor with the old ended run, so `stop` skips it.
+   * Lifecycle writes therefore run one at a time per workspace: each finishes
+   * before the next begins, so a clear's read never goes stale.
+   */
+  #writes: Promise<void> = Promise.resolve();
 
-  constructor(workspace: WorkspacePaths, opts: { pid?: number; now?: () => Date } = {}) {
+  constructor(
+    workspace: WorkspacePaths,
+    opts: { pid?: number; now?: () => Date; io?: StateIo } = {},
+  ) {
     this.#workspace = workspace;
     this.#pid = opts.pid ?? process.pid;
     this.#now = opts.now ?? (() => new Date());
+    this.#io = opts.io ?? fsStateIo;
+  }
+
+  /** Run `task` only once every breadcrumb write issued before it has fully settled. */
+  #serialize(task: () => Promise<void>): Promise<void> {
+    const run = this.#writes.then(task, task);
+    // The tail must advance on a failed write too — one lost breadcrumb must
+    // never jam every later lifecycle write behind it.
+    this.#writes = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   async record(run: RunState): Promise<void> {
     const iso = this.#now().toISOString();
-    await writeState(this.#workspace.stateJson, {
-      pid: this.#pid,
-      sessionId: run.sessionId,
-      target: run.target,
-      goal: run.goal,
-      status: 'running',
-      startedAt: iso,
-      updatedAt: iso,
-      sessionDir: sessionPaths(this.#workspace, run.sessionId).root,
-      identity: captureIdentity(this.#pid),
-    });
+    await this.#serialize(() =>
+      this.#io.write(this.#workspace.stateJson, {
+        pid: this.#pid,
+        sessionId: run.sessionId,
+        target: run.target,
+        goal: run.goal,
+        status: 'running',
+        startedAt: iso,
+        updatedAt: iso,
+        sessionDir: sessionPaths(this.#workspace, run.sessionId).root,
+        identity: captureIdentity(this.#pid),
+      }),
+    );
   }
 
   async clear(sessionId: string): Promise<void> {
     // Best-effort stays: the run is already down, and a swallowed clear only
     // leaves a breadcrumb naming a pid whose liveness the CLI checks anyway.
-    await markStatus(this.#workspace.stateJson, 'ended', this.#now(), sessionId).catch(
-      () => undefined,
-    );
+    await this.#serialize(() =>
+      markStatus(this.#workspace.stateJson, 'ended', this.#now(), sessionId, this.#io),
+    ).catch(() => undefined);
   }
 
   /**
@@ -215,19 +268,24 @@ export class FileStatePort implements StatePort {
  * it deterministic. The server cannot begin its teardown until the signal lands,
  * and the signal is only sent once `stopped` is durably on disk (see
  * `runStop`), so the server's read always observes `stopped` and keeps it.
+ *
+ * In-process callers (the server's own `clear`) must not rely on that ordering:
+ * a `clear` racing a successor's `record` is exactly the interleaving the port's
+ * write queue closes, which is why `FileStatePort` routes this through its queue.
  */
 export async function markStatus(
   path: string,
   status: 'ended' | 'stopped',
   now: Date = new Date(),
   onlySessionId?: string,
+  io: StateIo = fsStateIo,
 ): Promise<void> {
-  const prior = await readState(path);
+  const prior = await io.read(path);
   if (!prior) return;
   // Not our run anymore (a successor owns the breadcrumb) — never write over it.
   if (onlySessionId !== undefined && prior.sessionId !== onlySessionId) return;
   const nextStatus = prior.status === 'stopped' ? 'stopped' : status;
-  await writeState(path, { ...prior, status: nextStatus, updatedAt: now.toISOString() });
+  await io.write(path, { ...prior, status: nextStatus, updatedAt: now.toISOString() });
 }
 
 /**
