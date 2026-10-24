@@ -21,12 +21,31 @@ import { isAdapterWired } from './factory.js';
  * browser — CDP + Chromium are cross-platform.
  * desktop — X11/Wayland + AT-SPI + xdotool + scrot/grim are Linux tooling.
  * android — ADB + the Android SDK ship on Linux and macOS.
+ *
+ * The ids are typed `NodeJS.Platform`, NOT `string`: a typo'd id ('linuix')
+ * would otherwise compile and silently make its kind non-operational on every
+ * host. The key type is the config-schema union (`Target['adapter']`), so an
+ * adapter kind added to the schema without a row here is a TYPE error too.
  */
-export const SUPPORTED_PLATFORMS: Readonly<Record<Target['adapter'], readonly string[]>> = {
-  browser: ['linux', 'darwin', 'win32'],
-  desktop: ['linux'],
-  android: ['linux', 'darwin'],
-};
+export const SUPPORTED_PLATFORMS: Readonly<Record<Target['adapter'], readonly NodeJS.Platform[]>> =
+  {
+    browser: ['linux', 'darwin', 'win32'],
+    desktop: ['linux'],
+    android: ['linux', 'darwin'],
+  };
+
+/**
+ * The lookup view of {@link SUPPORTED_PLATFORMS} — same rows, but each row is
+ * OPTIONAL.
+ *
+ * The table above is TOTAL over the config-schema union, so every wired kind
+ * HAS a row by construction — the type forbids the missing-row case. This view
+ * keeps the lookup total anyway, so a row that goes missing at runtime (the
+ * exported table is mutable) answers `false` instead of throwing a bare
+ * `TypeError` on `undefined.includes(...)`.
+ */
+const SUPPORTED_ROWS: Readonly<Partial<Record<Target['adapter'], readonly NodeJS.Platform[]>>> =
+  SUPPORTED_PLATFORMS;
 
 /**
  * Whether an adapter kind is usable HERE — wired in this build AND supported
@@ -44,6 +63,8 @@ export function isAdapterOperational(
   platform: NodeJS.Platform = process.platform,
 ): boolean {
   if (!isAdapterWired(kind)) return false;
-  // The guard above narrowed `kind` to a wired kind, so this read cannot miss.
-  return SUPPORTED_PLATFORMS[kind].includes(platform);
+  // The guard above narrowed `kind` to the schema union, whose every member has
+  // a row in the total table. `SUPPORTED_ROWS` still admits a missing row, so
+  // this answers false for one — it never throws.
+  return SUPPORTED_ROWS[kind]?.includes(platform) ?? false;
 }
