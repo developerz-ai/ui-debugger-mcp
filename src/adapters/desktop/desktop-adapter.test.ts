@@ -5,7 +5,13 @@ import { join } from 'node:path';
 import type { DesktopTarget } from '../../config/schema.js';
 import { AdapterError } from '../../errors.js';
 import type { Node, ScrollDirection } from '../contract.js';
-import { type AtspiNode, type AtspiReadOptions, type AtspiSource, matchesQuery } from './atspi.js';
+import {
+  type AtspiNode,
+  type AtspiReadOptions,
+  type AtspiSource,
+  BusctlAtspi,
+  matchesQuery,
+} from './atspi.js';
 import type { ScreenCapture } from './capture.js';
 import { DesktopAdapter, scrollRepeat } from './desktop-adapter.js';
 import type { PointerInput, WindowMatch } from './input.js';
@@ -102,7 +108,7 @@ class FakeCapture implements ScreenCapture {
   }
 }
 
-const config: DesktopTarget = { adapter: 'desktop', launch: 'true' };
+const config: DesktopTarget = { adapter: 'desktop', launch: 'true', window: { title: 'App' } };
 
 function build(nodes: AtspiNode[] = [atspiNode({})]): {
   adapter: DesktopAdapter;
@@ -412,7 +418,13 @@ test('open hands the window wait an ABSOLUTE deadline its xdotool calls cannot o
 test('open refuses to launch when there is no window to drive', async () => {
   // No `window` config and a blank open target (what session-builder passes): the old
   // code spawned the app and resolved having verified nothing.
-  const { adapter, input } = build();
+  const input = new FakePointer();
+  const adapter = DesktopAdapter.create({
+    config: { adapter: 'desktop', launch: 'true' },
+    atspi: new FakeAtspi([]),
+    input,
+    capture: new FakeCapture(),
+  });
   await expect(adapter.open('  ')).rejects.toThrow(/no window to drive/);
   expect(input.calls).toEqual([]);
   await expect(adapter.close()).resolves.toBeUndefined(); // nothing was spawned
@@ -499,4 +511,162 @@ test('open respawns the managed app after it exits', async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// --- scoped reads (duplicate labels across applications) ---------------------
+
+/**
+ * A canned a11y bus holding TWO applications whose buttons share the label
+ * "Save" — the FOREIGN one listed FIRST among the registry root's children,
+ * so an unscoped walk reaches its button before the managed app's.
+ *
+ * The tree is registry root → application → frame → button, mirroring a real
+ * AT-SPI tree. Each button sits at its own place on the screen, so the click
+ * coordinates say WHICH app was hit.
+ */
+function twoAppBus(): { exec: (args: string[]) => Promise<string> } {
+  const call = (data: unknown): string => JSON.stringify({ type: 'x', data });
+  const nodes: Record<string, { role: string; name: string; bounds: number[] }> = {
+    '/app1': { role: 'application', name: 'Foreign App', bounds: [0, 0, 800, 600] },
+    '/app1/frame': { role: 'frame', name: 'Foreign App — Doc', bounds: [0, 0, 800, 600] },
+    '/app1/btn': { role: 'push button', name: 'Save', bounds: [10, 20, 100, 40] },
+    '/app2': { role: 'application', name: 'Managed App', bounds: [0, 0, 800, 600] },
+    '/app2/frame': { role: 'frame', name: 'Managed App — Doc', bounds: [0, 0, 800, 600] },
+    '/app2/btn': { role: 'push button', name: 'Save', bounds: [400, 500, 100, 40] },
+  };
+  const children: Record<string, [string, string][]> = {
+    '/org/a11y/atspi/accessible/root': [
+      [':1.5', '/app1'],
+      [':1.6', '/app2'],
+    ],
+    '/app1': [[':1.5', '/app1/frame']],
+    '/app1/frame': [[':1.5', '/app1/btn']],
+    '/app2': [[':1.6', '/app2/frame']],
+    '/app2/frame': [[':1.6', '/app2/btn']],
+  };
+  const exec = async (args: string[]): Promise<string> => {
+    if (args.includes('GetAddress')) return call(['unix:path=/tmp/at-spi/bus']);
+    const path = args[4] ?? '';
+    if (args.includes('GetChildren')) return call([children[path] ?? []]);
+    const node = nodes[path];
+    if (!node) throw new Error(`unexpected busctl call: ${args.join(' ')}`);
+    if (args.includes('GetRoleName')) return call([node.role]);
+    if (args.includes('get-property')) return call(node.name);
+    if (args.includes('GetState')) return call([[0x100 | (1 << 24) | (1 << 25) | (1 << 30), 0]]);
+    if (args.includes('GetExtents')) return call([node.bounds]);
+    throw new Error(`unexpected busctl call: ${args.join(' ')}`);
+  };
+  return { exec };
+}
+
+/** Build an adapter over the REAL {@link BusctlAtspi} on the two-app fake bus. */
+function overTwoApps(target: DesktopTarget): { adapter: DesktopAdapter; input: FakePointer } {
+  const input = new FakePointer();
+  const adapter = DesktopAdapter.create({
+    config: target,
+    atspi: new BusctlAtspi({ exec: twoAppBus().exec }),
+    input,
+    capture: new FakeCapture(),
+  });
+  return { adapter, input };
+}
+
+test('find resolves the duplicate label inside the managed application', async () => {
+  // The foreign app is listed first among the registry root's children, so an
+  // unscoped walk reaches ITS "Save" first — the click would land in the wrong
+  // window. Scoped to the managed app, the managed button is the one found.
+  const { adapter } = overTwoApps({
+    adapter: 'desktop',
+    launch: 'true',
+    window: { title: 'Managed App' },
+  });
+  const found = await adapter.find({ query: 'Save' });
+  expect(found?.bounds).toEqual({ x: 400, y: 500, width: 100, height: 40 });
+});
+
+test('click and type act on the managed application, never the foreign one', async () => {
+  const { adapter, input } = overTwoApps({
+    adapter: 'desktop',
+    launch: 'true',
+    window: { title: 'Managed App' },
+  });
+  await adapter.click('Save');
+  await adapter.type('Save', 'hello');
+  // The managed button's center — the foreign one's would be (60, 40).
+  expect(input.calls).toEqual(['click:450,520', 'click:450,520', 'type:hello']);
+});
+
+test('a read with no window ever selected fails loud instead of reading the desktop', async () => {
+  // No `window` config and `open` never called: there is no window to scope to,
+  // and an unscoped read would resolve the label against ANY application.
+  const { adapter } = overTwoApps({ adapter: 'desktop', launch: 'true' });
+  await expect(adapter.readState({ query: 'Save' })).rejects.toThrow(/no window selected/);
+  await expect(adapter.find({ query: 'Save' })).rejects.toThrow(AdapterError);
+  // The waitFor poll reads too — it must fail loud, not time out on a tree it
+  // was never allowed to read.
+  await expect(adapter.waitFor({ query: 'Save', timeout: 50 })).rejects.toThrow(
+    /no window selected/,
+  );
+});
+
+test('open re-scopes the reads to the window it selected', async () => {
+  // A later `navigate` opens another window; the reads must follow it.
+  const input = new FakePointer();
+  const adapter = DesktopAdapter.create({
+    config: { adapter: 'desktop', launch: 'sleep 5' },
+    atspi: new BusctlAtspi({ exec: twoAppBus().exec }),
+    input,
+    capture: new FakeCapture(),
+  });
+  await adapter.open('Foreign App');
+  const found = await adapter.find({ query: 'Save' });
+  expect(found?.bounds).toEqual({ x: 10, y: 20, width: 100, height: 40 });
+  await adapter.close();
+});
+
+test('every read path carries the scope down to the AT-SPI walk', async () => {
+  // The scope is the guard against the duplicate-label bug: a read that
+  // reaches the bus without it walks every application on the desktop.
+  const { adapter, atspi } = walking([atspiNode({ name: 'OK' })]);
+  await adapter.readState({ query: 'OK' });
+  expect(atspi.lastOpts?.scope).toEqual({ title: 'App' });
+  await adapter.find({ query: 'OK' });
+  expect(atspi.lastOpts?.scope).toEqual({ title: 'App' });
+  // The `within` region scope resolves through the same scoped read.
+  await adapter.readState({ query: 'OK', within: 'OK' });
+  expect(atspi.lastOpts?.scope).toEqual({ title: 'App' });
+  // The waitFor poll reads too.
+  await adapter.waitFor({ query: 'OK', timeout: 100 });
+  expect(atspi.lastOpts?.scope).toEqual({ title: 'App' });
+});
+
+test('the scope in force is the last opened window, else the configured one', async () => {
+  const source = new WalkingAtspi([atspiNode({ name: 'OK' })]);
+  const adapter = DesktopAdapter.create({
+    config: { adapter: 'desktop', launch: 'sleep 5', window: { title: 'App' } },
+    atspi: source,
+    input: new FakePointer(),
+    capture: new FakeCapture(),
+  });
+  await adapter.readState({ query: 'OK' });
+  expect(source.lastOpts?.scope).toEqual({ title: 'App' }); // the configured window
+  // A configured window wins over the open target — it is the window xdotool
+  // activates, so it is the window the scope must name.
+  await adapter.open('Other Window');
+  await adapter.readState({ query: 'OK' });
+  expect(source.lastOpts?.scope).toEqual({ title: 'App' });
+  await adapter.close();
+
+  // With no configured window, the opened one is the scope.
+  const other = new WalkingAtspi([atspiNode({ name: 'OK' })]);
+  const unscoped = DesktopAdapter.create({
+    config: { adapter: 'desktop', launch: 'sleep 5' },
+    atspi: other,
+    input: new FakePointer(),
+    capture: new FakeCapture(),
+  });
+  await unscoped.open('Other Window');
+  await unscoped.readState({ query: 'OK' });
+  expect(other.lastOpts?.scope).toEqual({ title: 'Other Window' });
+  await unscoped.close();
 });
