@@ -47,9 +47,16 @@ export interface AndroidNode extends Node {
   resourceId: string;
 }
 
-/** The read seam the adapter depends on — implemented by {@link AdbUiAutomator}, faked in tests. */
+/**
+ * The read seam the adapter depends on — implemented by {@link AdbUiAutomator}, faked in tests.
+ *
+ * `deadline` is an ABSOLUTE wall-clock instant (epoch ms) the dump must not outlive —
+ * the same shape as `AtspiReadOptions.deadline`. A dump is three `adb` round-trips
+ * (`rm` → `dump` → `cat`), so without a deadline the slowest of the three decides
+ * how long a `waitFor` poll takes, not the wait's own timeout.
+ */
 export interface UiAutomatorSource {
-  dump(): Promise<AndroidNode[]>;
+  dump(deadline?: number): Promise<AndroidNode[]>;
 }
 
 /** Whitelisted `filters` keys for android nodes — anything else is rejected, not ignored. */
@@ -361,10 +368,17 @@ export class AdbUiAutomator implements UiAutomatorSource {
    * the dump's own success line ({@link DUMP_MARKER}) is asserted, because a failed
    * `uiautomator dump` exits 0: without both, `cat` would hand back the previous
    * screen's XML and the agent would reason about a UI that is no longer there.
+   *
+   * Each of the three `adb` calls carries the same absolute `deadline`, so the whole
+   * dump fits inside the caller's budget: the three calls share it, they do not each
+   * get a fresh copy. A deadline already in the past fails loud before the first call
+   * is spent — a dump that cannot finish is not worth starting.
    */
-  async dump(): Promise<AndroidNode[]> {
-    await this.#adb.shell(['rm', '-f', DUMP_PATH]);
-    const out = await this.#adb.shell(['uiautomator', 'dump', DUMP_PATH]);
+  async dump(deadline?: number): Promise<AndroidNode[]> {
+    this.#assertNotExpired(deadline, 'rm');
+    await this.#adb.shell(['rm', '-f', DUMP_PATH], deadline);
+    this.#assertNotExpired(deadline, 'dump');
+    const out = await this.#adb.shell(['uiautomator', 'dump', DUMP_PATH], deadline);
     if (!DUMP_MARKER.test(out)) {
       const said = out.trim() === '' ? 'no output' : JSON.stringify(out.trim());
       throw new AdapterError(
@@ -372,7 +386,22 @@ export class AdbUiAutomator implements UiAutomatorSource {
           'mid-animation or busy; wait for it to settle and read again',
       );
     }
-    const xml = await this.#adb.shell(['cat', DUMP_PATH]);
+    this.#assertNotExpired(deadline, 'cat');
+    const xml = await this.#adb.shell(['cat', DUMP_PATH], deadline);
+    // The last call may itself have answered late — a hierarchy read past the
+    // deadline is not the live screen the caller asked for.
+    this.#assertNotExpired(deadline, 'dump');
     return parseHierarchy(xml);
+  }
+
+  /** Fail loud when the deadline has already passed — never start a call that cannot finish. */
+  #assertNotExpired(deadline: number | undefined, step: string): void {
+    if (deadline === undefined) return;
+    const now = Date.now();
+    if (now >= deadline) {
+      throw new AdapterError(
+        `uiautomator: ${step} step has no time left (deadline ${deadline}ms passed ${now - deadline}ms ago)`,
+      );
+    }
   }
 }

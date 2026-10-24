@@ -68,9 +68,12 @@ class FakePointer implements PointerInput {
   }
   /** Per-call window-wait cap — how much of the run's budget `open` handed down. */
   readonly waits: number[] = [];
-  async activateWindow(match: WindowMatch, timeoutMs: number): Promise<void> {
+  /** The ABSOLUTE deadline of each window wait — what its xdotool calls are capped by. */
+  readonly deadlines: (number | undefined)[] = [];
+  async activateWindow(match: WindowMatch, timeoutMs: number, deadline?: number): Promise<void> {
     this.calls.push(`activate:${JSON.stringify(match)}`);
     this.waits.push(timeoutMs);
+    this.deadlines.push(deadline);
   }
 }
 
@@ -79,6 +82,17 @@ class StuckPointer extends FakePointer {
   override activateWindow(match: WindowMatch): Promise<void> {
     this.calls.push(`activate:${JSON.stringify(match)}`);
     return new Promise<void>(() => {});
+  }
+}
+
+/**
+ * An AT-SPI source whose walk answers only AFTER the wait's deadline — the shape of
+ * a bus that replies late. `waitFor` must not read that as the node having appeared.
+ */
+class LateAtspi implements AtspiSource {
+  async readTree(_opts?: AtspiReadOptions): Promise<AtspiNode[]> {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    return [atspiNode({ name: 'OK' })];
   }
 }
 
@@ -291,6 +305,19 @@ test('waitFor rejects networkIdle and an empty wait (unsupported on desktop)', a
   await expect(adapter.waitFor({})).rejects.toThrow(AdapterError);
 });
 
+test('waitFor rejects a query that only appears after the timeout', async () => {
+  // The node shows up 60ms into a 20ms wait: that is not a success — resolving would
+  // report a match the caller waited too long for.
+  const adapter = DesktopAdapter.create({
+    config,
+    atspi: new LateAtspi(),
+    input: new FakePointer(),
+    capture: new FakeCapture(),
+  });
+  await expect(adapter.waitFor({ query: 'OK', timeout: 20 })).rejects.toThrow(AdapterError);
+  await expect(adapter.waitFor({ query: 'OK', timeout: 20 })).rejects.toThrow(/waitFor timed out/);
+});
+
 // --- console / network / close ----------------------------------------------
 
 test('console and network are unsupported and throw loud', async () => {
@@ -359,6 +386,26 @@ test('open waits for the window no longer than the run has budget left', async (
   await adapter.open('App'); // no budget → the adapter's own wait stands
 
   expect(input.waits).toEqual([2_500, 10_000]);
+  await expect(adapter.close()).resolves.toBeUndefined();
+});
+
+test('open hands the window wait an ABSOLUTE deadline its xdotool calls cannot outlive', async () => {
+  // A duration alone is not enough: the xdotool calls the wait makes are capped by
+  // the time left until the deadline, so an in-flight search cannot outlive the
+  // budget the run has left.
+  const input = new FakePointer();
+  const adapter = DesktopAdapter.create({
+    config: { adapter: 'desktop', launch: 'sleep 5', window: { title: 'App' } },
+    atspi: new FakeAtspi([]),
+    input,
+    capture: new FakeCapture(),
+  });
+  const started = Date.now();
+  await adapter.open('App', 2_500);
+  const deadline = input.deadlines[0];
+  expect(typeof deadline).toBe('number');
+  expect(deadline as number).toBeGreaterThanOrEqual(started + 2_500);
+  expect(deadline as number).toBeLessThanOrEqual(Date.now() + 2_500);
   await expect(adapter.close()).resolves.toBeUndefined();
 });
 

@@ -53,7 +53,14 @@ export function captureArgs(tool: CaptureTool, file: string): string[] {
 
 /** Screenshot surface the adapter calls — implemented by {@link Screenshot}, faked in tests. */
 export interface ScreenCapture {
-  capture(): Promise<Uint8Array>;
+  /**
+   * Capture the current frame as PNG bytes.
+   *
+   * `deadline` is the absolute instant (epoch ms) the capture must not run past: the
+   * grim/scrot invocation is capped by the time left until then instead of by its own
+   * 30 s default, and a frame that lands after it is a failure, not a screenshot.
+   */
+  capture(deadline?: number): Promise<Uint8Array>;
 }
 
 /** grim/scrot-backed {@link ScreenCapture}. Construct with a target `display` (or inject `exec`). */
@@ -67,15 +74,27 @@ export class Screenshot implements ScreenCapture {
   }
 
   /** Capture the current frame as PNG bytes via a temp file (read then deleted). */
-  async capture(): Promise<Uint8Array> {
+  async capture(deadline?: number): Promise<Uint8Array> {
     const tool = chooseCaptureTool(this.#env);
     const dir = await mkdtemp(join(tmpdir(), 'uidbg-shot-'));
     const file = join(dir, 'shot.png');
     try {
-      await this.#exec(tool, captureArgs(tool, file));
+      await this.#exec(
+        tool,
+        captureArgs(tool, file),
+        deadline === undefined ? undefined : { deadline },
+      );
+      // A frame produced after the deadline is stale: the caller asked for it within
+      // its budget, so a late capture fails loud instead of resolving as a success.
+      if (deadline !== undefined && Date.now() >= deadline) {
+        throw new AdapterError(
+          `desktop: screenshot (${tool}) resolved after its deadline (${deadline}) had passed`,
+        );
+      }
       const buffer = await readFile(file);
       return new Uint8Array(buffer);
     } catch (error) {
+      if (error instanceof AdapterError) throw error;
       throw new AdapterError(`desktop.screenshot failed (${tool}): ${errMessage(error)}`);
     } finally {
       await rm(dir, { recursive: true, force: true });

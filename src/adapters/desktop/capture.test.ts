@@ -96,3 +96,42 @@ test("Screenshot.capture surfaces a missing capture binary's message, not a swal
   const capture = new Screenshot({ display: ':99', exec }); // DISPLAY → scrot
   await expect(capture.capture()).rejects.toThrow(/desktop\.screenshot failed \(scrot\).*ENOENT/);
 });
+
+test('Screenshot.capture hands its deadline to the capture tool', async () => {
+  // The grim/scrot invocation must be capped by the time left until the deadline,
+  // not by its own 30s default — otherwise a wedged capture outlives the budget.
+  const seen: (number | undefined)[] = [];
+  const exec: Exec = async (_cmd, _args, opts) => {
+    seen.push(opts?.deadline);
+    return '';
+  };
+  const capture = new Screenshot({ display: ':99', exec });
+  const deadline = Date.now() + 5_000;
+  await capture.capture(deadline).catch(() => undefined); // the fake writes no PNG
+  expect(seen).toEqual([deadline]);
+});
+
+test('Screenshot.capture rejects a capture that resolves after its deadline', async () => {
+  // A frame produced past the deadline is stale — it must not resolve as a success.
+  const bytes = Uint8Array.from([1, 2, 3]);
+  const exec: Exec = async (_cmd, args) => {
+    const file = args.at(-1);
+    if (file) await writeFile(file, bytes);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    return '';
+  };
+  const capture = new Screenshot({ display: ':99', exec });
+  await expect(capture.capture(Date.now() + 10)).rejects.toThrow(AdapterError);
+  await expect(capture.capture(Date.now() + 10)).rejects.toThrow(/after its deadline/);
+});
+
+test('Screenshot.capture still returns the bytes when it lands before the deadline', async () => {
+  const bytes = Uint8Array.from([4, 5, 6]);
+  const exec: Exec = async (_cmd, args) => {
+    const file = args.at(-1);
+    if (file) await writeFile(file, bytes);
+    return '';
+  };
+  const capture = new Screenshot({ display: ':99', exec });
+  expect(await capture.capture(Date.now() + 5_000)).toEqual(bytes);
+});

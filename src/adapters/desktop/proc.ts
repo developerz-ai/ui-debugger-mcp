@@ -12,6 +12,12 @@
  * Fails loud — a non-zero exit rejects through `execFile`, and callers re-wrap it
  * as an {@link AdapterError}; never a silent fallback. Every invocation is also
  * wall-clock capped, so no wedged tool can park the run (see {@link makeExec}).
+ *
+ * The cap is per-invocation, so on its own it can OUTLAST the budget the caller
+ * handed down (a run's remaining wall-clock, a `waitFor` timeout). Hence the
+ * absolute deadline ({@link ExecOptions.deadline}): the subprocess is capped by the
+ * time left until it, and a call that resolves after it rejects — an enclosing
+ * budget is never outlived by the tool's own default.
  */
 
 import { execFile } from 'node:child_process';
@@ -39,8 +45,22 @@ export const DEFAULT_EXEC_TIMEOUT_MS = 10_000;
  */
 const KILL_SIGNAL = 'SIGKILL';
 
+/** Per-call options for one {@link Exec} invocation. */
+export interface ExecOptions {
+  /**
+   * Absolute wall-clock instant (epoch ms) the call must not run past. The
+   * subprocess is capped by the time left until then (never above the adapter's own
+   * default), and a call that resolves after it rejects as an
+   * {@link ExecTimeoutError} instead of counting as a success.
+   *
+   * An absolute instant, not a duration: the enclosing budget is shared by every
+   * call it covers, so each one has to be told the same instant.
+   */
+  deadline?: number;
+}
+
 /** Run a CLI tool, resolve its stdout, reject (loud) on a non-zero exit or a missing binary. */
-export type Exec = (cmd: string, args: string[]) => Promise<string>;
+export type Exec = (cmd: string, args: string[], opts?: ExecOptions) => Promise<string>;
 
 /**
  * A child env with `DISPLAY` overridden when a target display is configured (else inherit).
@@ -63,21 +83,43 @@ export function desktopEnv(display?: string): NodeJS.ProcessEnv {
  * rejects as an {@link ExecTimeoutError} naming the cap; every other failure passes through
  * **raw** so callers can still triage the real `execFile` error (ENOENT, exit code,
  * stderr) — `xdotool search` exiting non-zero with empty stderr means "no window yet".
+ *
+ * With a {@link ExecOptions.deadline} the call is capped by the time left until that
+ * instant instead of by its own default, and a result that arrives after it rejects —
+ * the enclosing budget (a run's remaining time, a `waitFor` timeout) is never
+ * outlived by a tool that happens to be slow.
  */
 export function makeExec(env: NodeJS.ProcessEnv, timeoutMs = DEFAULT_EXEC_TIMEOUT_MS): Exec {
-  return async (cmd, args) => {
+  return async (cmd, args, opts = {}) => {
+    const deadline = opts.deadline;
+    if (deadline !== undefined && Date.now() >= deadline) {
+      // The budget is already spent — starting the tool would only outlive it.
+      throw new ExecTimeoutError(
+        `desktop: \`${cmd}\` was not started — its deadline (${deadline}) has already passed`,
+      );
+    }
+    const cap =
+      deadline === undefined ? timeoutMs : Math.max(1, Math.min(timeoutMs, deadline - Date.now()));
     try {
       const { stdout } = await pExecFile(cmd, args, {
         env,
         maxBuffer: MAX_BUFFER,
-        timeout: timeoutMs,
+        timeout: cap,
         killSignal: KILL_SIGNAL,
       });
+      // The child may have finished right as the deadline passed (the kill timer and
+      // the child's exit race). A result read after the deadline is stale: the caller
+      // asked for an answer within its budget, so this is a failure, not a success.
+      if (deadline !== undefined && Date.now() >= deadline) {
+        throw new ExecTimeoutError(
+          `desktop: \`${cmd}\` resolved after its deadline (${deadline}) had passed`,
+        );
+      }
       return stdout;
     } catch (error) {
       if (!killedByTimeout(error)) throw error;
       throw new ExecTimeoutError(
-        `desktop: \`${cmd}\` timed out after ${timeoutMs}ms (${KILL_SIGNAL}ed — the tool or its display/bus is wedged)`,
+        `desktop: \`${cmd}\` timed out after ${cap}ms (${KILL_SIGNAL}ed — the tool or its display/bus is wedged)`,
         { cause: error },
       );
     }

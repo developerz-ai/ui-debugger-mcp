@@ -289,6 +289,37 @@ describe('AndroidAdapter.waitFor', () => {
   });
 });
 
+describe('AndroidAdapter.waitFor budget', () => {
+  test('the hierarchy dump inside a wait carries the wait deadline', async () => {
+    // The dump is three adb round-trips, each with its own 30s transport cap — the
+    // wait's deadline has to reach the dump, or a poll outlives the wait.
+    const { adapter, ui } = makeAdapter({ nodes: [makeNode({ name: 'Login' })] });
+    await adapter.waitFor({ query: 'Login', timeout: 1000 });
+    expect(ui.deadlines).toHaveLength(1);
+    const deadline = ui.deadlines[0];
+    expect(deadline).toBeDefined();
+    // The dump is bounded by the wait, not by the transport's own 30s cap.
+    expect(deadline as number).toBeLessThan(Date.now() + 30_000);
+    expect(deadline as number).toBeGreaterThan(Date.now());
+  });
+
+  test('a node that appears only after the deadline rejects instead of resolving', async () => {
+    // The dump answers 150 ms late — past the 50 ms wait. The wait promised "the node
+    // is there NOW"; by the time it answered, the budget was gone.
+    const { adapter, ui } = makeAdapter({ nodes: [makeNode({ name: 'Login' })] });
+    ui.setSlow(150);
+    await expect(adapter.waitFor({ query: 'Login', timeout: 50 })).rejects.toThrow(AdapterError);
+  });
+
+  test('a wait that expires mid-dump rejects rather than resolving late', async () => {
+    const { adapter, ui } = makeAdapter({ nodes: [] });
+    ui.setSlow(120);
+    await expect(adapter.waitFor({ query: 'GhostButton', timeout: 40 })).rejects.toThrow(
+      AdapterError,
+    );
+  });
+});
+
 describe('AndroidAdapter.console', () => {
   const RAW_LOGCAT =
     '1546300800.000  1000  1001 I MyTag: hello\n1546300801.000  1000  1001 E Crash: boom\n';

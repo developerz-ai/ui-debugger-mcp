@@ -266,8 +266,14 @@ export class AndroidAdapter implements Adapter {
   /** Ensure the device is up (managed: boot the emulator), then start the activity/package. */
   async open(target: string, timeoutMs?: number): Promise<void> {
     await this.#run('open', async () => {
-      await this.#ensureBooted(timeoutMs);
-      if (target.trim() !== '') await this.#adb.shell(startArgs(target));
+      // One absolute deadline for the whole open: the managed boot poll AND the
+      // post-boot activity start share it, so neither can outlive the caller's budget.
+      const deadline = Date.now() + capWait(this.#bootWaitMs, timeoutMs);
+      await this.#ensureBooted(deadline);
+      if (target.trim() !== '') {
+        await this.#adb.shell(startArgs(target), deadline);
+        this.#assertBefore(deadline, 'android: activity start');
+      }
     });
   }
 
@@ -343,15 +349,41 @@ export class AndroidAdapter implements Adapter {
     }
     const timeout = opts.timeout ?? DEFAULT_WAIT_MS;
     await this.#run('waitFor', async () => {
-      const start = Date.now();
+      const deadline = Date.now() + timeout;
       for (;;) {
-        if (await this.find({ query })) return;
-        if (Date.now() - start >= timeout) {
+        if (await this.#present(query, deadline)) {
+          // A node that only appeared AFTER the deadline is a timeout, not a success:
+          // the wait's promise is "the node is there NOW", and by then it is not.
+          this.#assertBefore(deadline, `android: waitFor (${query})`);
+          return;
+        }
+        if (Date.now() >= deadline) {
           throw new AdapterError(`android: waitFor timed out after ${timeout}ms (${query})`);
         }
         await delay(POLL_MS);
       }
     });
+  }
+
+  /**
+   * One deadline-bounded poll for `query`. The wait's deadline goes **into** the dump:
+   * a dump is three `adb` round-trips (`rm` → `dump` → `cat`) and each one has its own
+   * 30 s transport cap, so a poll could run for a minute and `waitFor` — which only
+   * checks the clock between polls — would overshoot its timeout by a whole dump.
+   */
+  async #present(query: string, deadline: number): Promise<boolean> {
+    const nodes = await this.#ui.dump(deadline);
+    return shapeNodes(nodes, { query, limit: 1 }, DEFAULT_LIMIT).length > 0;
+  }
+
+  /** Fail loud when the deadline has already passed — a late success is not a success. */
+  #assertBefore(deadline: number, what: string): void {
+    const now = Date.now();
+    if (now > deadline) {
+      throw new AdapterError(
+        `${what} finished ${now - deadline}ms after its deadline (deadline ${deadline}ms)`,
+      );
+    }
   }
 
   /** Drain recent logcat as normalized console entries (newest first), narrowed by {@link LogQuery}. */
@@ -406,10 +438,11 @@ export class AndroidAdapter implements Adapter {
   /**
    * Managed boot: launch `emulator @avd -port <p>` (once), poll `sys.boot_completed`. The port
    * is picked free and bound **before** the spawn, so every later call (and the `close` kill)
-   * targets the emulator we started, never a pre-existing one. No-op when attached; `timeoutMs`
-   * (the run's remaining cap) shortens the boot deadline when it is the tighter of the two.
+   * targets the emulator we started, never a pre-existing one. No-op when attached; `deadline`
+   * (the absolute instant the open's budget runs out) bounds both the device poll and the
+   * `getprop` poll — a slow `adb` call can never push the boot past it.
    */
-  async #ensureBooted(timeoutMs?: number): Promise<void> {
+  async #ensureBooted(deadline: number): Promise<void> {
     if (this.#booted) return;
     if (!this.#emulator) {
       // Only managed mode needs an AVD — attach never reads it (hence optional in config).
@@ -447,16 +480,15 @@ export class AndroidAdapter implements Adapter {
       });
       this.#emulator = child;
     }
-    const deadline = Date.now() + capWait(this.#bootWaitMs, timeoutMs);
     await this.#awaitDevice(deadline);
     for (;;) {
-      const out = (await this.#adb.shell(['getprop', 'sys.boot_completed'])).trim();
-      if (out === '1') break;
+      const out = (await this.#adb.shell(['getprop', 'sys.boot_completed'], deadline)).trim();
       if (Date.now() >= deadline) {
         throw new AdapterError(
           `android: emulator @${this.#config.avd} (${this.#serial}) did not boot within ${this.#bootWaitMs}ms`,
         );
       }
+      if (out === '1') break;
       await delay(POLL_MS);
     }
     this.#booted = true;
@@ -466,6 +498,9 @@ export class AndroidAdapter implements Adapter {
    * Bounded replacement for the unbounded `adb wait-for-device`: poll `get-state` until
    * a device answers, failing loud when the emulator died, the poll hit a real error
    * ({@link pendingStateOrThrow}) or the deadline passed — never hang `open` forever.
+   *
+   * The `get-state` call carries the deadline: its own 30 s transport cap is shortened to
+   * the time left, so a wedged `adb` cannot hold the boot past the caller's budget.
    */
   async #awaitDevice(deadline: number): Promise<void> {
     for (;;) {
@@ -474,14 +509,14 @@ export class AndroidAdapter implements Adapter {
       }
       // `get-state` exits non-zero while no device is connected — that alone is "keep
       // waiting"; a missing `adb`, an ambiguous target or a wedged call surfaces now.
-      const state = await this.#adb.adb(['get-state']).catch(pendingStateOrThrow);
-      if (state.trim() === 'device') return;
+      const state = await this.#adb.adb(['get-state'], deadline).catch(pendingStateOrThrow);
       if (Date.now() >= deadline) {
         throw new AdapterError(
           `android: no device appeared within ${this.#bootWaitMs}ms ` +
             `(emulator @${this.#config.avd} on ${this.#serial})`,
         );
       }
+      if (state.trim() === 'device') return;
       await delay(POLL_MS);
     }
   }

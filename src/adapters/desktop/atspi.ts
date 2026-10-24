@@ -21,7 +21,7 @@
 import { AdapterError, ExecTimeoutError } from '../../errors.js';
 import type { Bounds, Filters, FilterValue, Node, Query } from '../contract.js';
 import { capToLimit } from '../limit.js';
-import { desktopEnv, type Exec, makeExec } from './proc.js';
+import { desktopEnv, type Exec, type ExecOptions, makeExec } from './proc.js';
 
 const A11Y_IFACE = 'org.a11y.atspi.Accessible';
 const COMPONENT_IFACE = 'org.a11y.atspi.Component';
@@ -75,10 +75,12 @@ export interface AtspiReadOptions {
    */
   query?: ParsedQuery;
   /**
-   * Wall-clock instant (epoch ms) the walk must not run past: it returns what it has
-   * once the deadline passes. `maxNodes` bounds *matches*, not visits, and every visited
-   * node costs ~2 busctl spawns — without this a fruitless walk over a big tree runs for
-   * as long as the tree is deep (`waitFor` passes its own deadline).
+   * Wall-clock instant (epoch ms) the walk must not run past. Every busctl spawn of
+   * this walk is capped by the time left until then, and a spawn that resolves after
+   * it fails loud — a tree read past the deadline is not an answer, it is a stale
+   * one. `maxNodes` bounds *matches*, not visits, and every visited node costs ~2
+   * busctl spawns — without this a fruitless walk over a big tree runs for as long
+   * as the tree is deep (`waitFor` passes its own deadline).
    */
   deadline?: number;
 }
@@ -347,7 +349,7 @@ export function shapeNodes(
 // --- busctl-backed reader ---------------------------------------------------
 
 /** A busctl invocation (args only — the `busctl` binary is fixed). Injected for tests. */
-export type BusctlExec = (args: string[]) => Promise<string>;
+export type BusctlExec = (args: string[], opts?: ExecOptions) => Promise<string>;
 
 /**
  * {@link AtspiSource} backed by `busctl`. Walks the a11y tree breadth-first from the
@@ -360,57 +362,81 @@ export class BusctlAtspi implements AtspiSource {
 
   constructor(init: { display?: string; exec?: BusctlExec } = {}) {
     const exec: Exec = makeExec(desktopEnv(init.display));
-    this.#exec = init.exec ?? ((args) => exec('busctl', args));
+    this.#exec = init.exec ?? ((args, opts) => exec('busctl', args, opts));
   }
 
   async readTree(opts: AtspiReadOptions = {}): Promise<AtspiNode[]> {
     const maxNodes = opts.maxNodes ?? DEFAULT_MAX_NODES;
     const maxDepth = opts.maxDepth ?? DEFAULT_MAX_DEPTH;
     const query = opts.query;
+    const deadline = opts.deadline;
     const out: AtspiNode[] = [];
     const seen = new Set<string>();
+    // Already out of time: spend no spawn at all — there is nothing left to read.
+    if (deadline !== undefined && Date.now() >= deadline) return out;
     // Start at the registry root's children (apps); the desktop root itself is not UI.
-    let frontier = await this.#children({ dest: REGISTRY_DEST, path: ROOT_PATH });
+    let frontier = await this.#children({ dest: REGISTRY_DEST, path: ROOT_PATH }, deadline);
     for (let depth = 0; frontier.length > 0 && depth < maxDepth; depth += 1) {
       const next: AtspiRef[] = [];
       for (const ref of frontier) {
         // With a query, `out` holds only matches — so this also stops the walk as
         // soon as enough matches are found, not merely enough nodes visited.
         if (out.length >= maxNodes) return out;
-        // Out of time: return what we have rather than spend two more spawns per node.
-        if (opts.deadline !== undefined && Date.now() >= opts.deadline) return out;
+        // Out of time: stop before spending another pair of spawns on this node.
+        if (deadline !== undefined && Date.now() >= deadline) return out;
         const key = `${ref.dest}${ref.path}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        const { role, name } = await this.#roleAndName(ref);
+        const { role, name } = await this.#roleAndName(ref, deadline);
         // A query-pruned non-match: skip the State/Extents calls (they'd just be
         // filtered out downstream) but keep walking its children for deeper matches.
         if (
           !query ||
           matchesQuery({ role, name, bounds: UNMEASURED_BOUNDS, enabled: false }, query)
         ) {
-          out.push(await this.#describeRest(ref, role, name));
+          out.push(await this.#describeRest(ref, role, name, deadline));
         }
-        next.push(...(await this.#children(ref)));
+        next.push(...(await this.#children(ref, deadline)));
       }
       frontier = next;
     }
     return out;
   }
 
+  /**
+   * One busctl spawn, bounded by the walk's deadline.
+   *
+   * The subprocess is capped by the time left until the deadline, so a wedged bus
+   * cannot hold the walk (and the `waitFor` that asked for it) past its timeout. A
+   * reply that arrives after the deadline is a failure, not a partial tree: the
+   * caller must not read a stale tree as the answer.
+   */
+  async #spawn(args: string[], deadline: number | undefined): Promise<string> {
+    const out = await this.#exec(args, deadline === undefined ? undefined : { deadline });
+    if (deadline !== undefined && Date.now() >= deadline) {
+      throw new ExecTimeoutError(
+        `desktop: \`busctl\` resolved after the walk deadline (${deadline}) had passed`,
+      );
+    }
+    return out;
+  }
+
   /** Resolve (and cache) the a11y peer-bus address via the session bus. */
-  async #a11yAddress(): Promise<string> {
+  async #a11yAddress(deadline?: number): Promise<string> {
     if (this.#address) return this.#address;
     const data = busctlData(
-      await this.#exec([
-        '--user',
-        '--json=short',
-        'call',
-        'org.a11y.Bus',
-        '/org/a11y/bus',
-        'org.a11y.Bus',
-        'GetAddress',
-      ]),
+      await this.#spawn(
+        [
+          '--user',
+          '--json=short',
+          'call',
+          'org.a11y.Bus',
+          '/org/a11y/bus',
+          'org.a11y.Bus',
+          'GetAddress',
+        ],
+        deadline,
+      ),
     );
     const address = asString(firstReturn(data, 'GetAddress'), 'a11y bus address');
     if (address === '') throw new AdapterError('AT-SPI: empty a11y bus address');
@@ -424,58 +450,72 @@ export class BusctlAtspi implements AtspiSource {
     iface: string,
     member: string,
     extra: string[] = [],
+    deadline?: number,
   ): Promise<unknown> {
-    const address = await this.#a11yAddress();
+    const address = await this.#a11yAddress(deadline);
     return busctlData(
-      await this.#exec([
-        `--address=${address}`,
-        '--json=short',
-        'call',
-        ref.dest,
-        ref.path,
-        iface,
-        member,
-        ...extra,
-      ]),
+      await this.#spawn(
+        [
+          `--address=${address}`,
+          '--json=short',
+          'call',
+          ref.dest,
+          ref.path,
+          iface,
+          member,
+          ...extra,
+        ],
+        deadline,
+      ),
     );
   }
 
-  async #children(ref: AtspiRef): Promise<AtspiRef[]> {
+  async #children(ref: AtspiRef, deadline?: number): Promise<AtspiRef[]> {
     return parseChildren(
-      firstReturn(await this.#call(ref, A11Y_IFACE, 'GetChildren'), 'GetChildren'),
+      firstReturn(await this.#call(ref, A11Y_IFACE, 'GetChildren', [], deadline), 'GetChildren'),
     );
   }
 
   /** Read the `Name` property as a plain scalar (`get-property` avoids a variant wrapper). */
-  async #name(ref: AtspiRef): Promise<string> {
-    const address = await this.#a11yAddress();
+  async #name(ref: AtspiRef, deadline?: number): Promise<string> {
+    const address = await this.#a11yAddress(deadline);
     const data = busctlData(
-      await this.#exec([
-        `--address=${address}`,
-        '--json=short',
-        'get-property',
-        ref.dest,
-        ref.path,
-        A11Y_IFACE,
-        'Name',
-      ]),
+      await this.#spawn(
+        [
+          `--address=${address}`,
+          '--json=short',
+          'get-property',
+          ref.dest,
+          ref.path,
+          A11Y_IFACE,
+          'Name',
+        ],
+        deadline,
+      ),
     );
     return asString(data, 'Name');
   }
 
   /** Read just role + name — cheap enough to spend on every node for query pruning. */
-  async #roleAndName(ref: AtspiRef): Promise<{ role: string; name: string }> {
+  async #roleAndName(ref: AtspiRef, deadline?: number): Promise<{ role: string; name: string }> {
     const roleName = asString(
-      firstReturn(await this.#call(ref, A11Y_IFACE, 'GetRoleName'), 'GetRoleName'),
+      firstReturn(await this.#call(ref, A11Y_IFACE, 'GetRoleName', [], deadline), 'GetRoleName'),
       'GetRoleName',
     );
-    return { role: mapRole(roleName), name: await this.#name(ref) };
+    return { role: mapRole(roleName), name: await this.#name(ref, deadline) };
   }
 
   /** Finish describing a node (state + extents) once its role/name are known to matter. */
-  async #describeRest(ref: AtspiRef, role: string, name: string): Promise<AtspiNode> {
+  async #describeRest(
+    ref: AtspiRef,
+    role: string,
+    name: string,
+    deadline?: number,
+  ): Promise<AtspiNode> {
     const { enabled, visible } = stateFlags(
-      parseStateWords(firstReturn(await this.#call(ref, A11Y_IFACE, 'GetState'), 'GetState')),
+      parseStateWords(
+        firstReturn(await this.#call(ref, A11Y_IFACE, 'GetState', [], deadline), 'GetState'),
+      ),
     );
     // Application roots + some toolkit filler nodes don't implement Component, so
     // busctl exits non-zero on GetExtents. Keep the node (killing the whole walk over
@@ -483,10 +523,13 @@ export class BusctlAtspi implements AtspiSource {
     // below are a placeholder, never geometry. Role/name/state failures stay loud.
     // An expired per-call cap (`proc.ts`) is not "no Component":
     // swallowing it would spend the cap again on every remaining node of the walk.
-    const extents = await this.#call(ref, COMPONENT_IFACE, 'GetExtents', [
-      'u',
-      String(COORD_SCREEN),
-    ]).catch((error: unknown) => {
+    const extents = await this.#call(
+      ref,
+      COMPONENT_IFACE,
+      'GetExtents',
+      ['u', String(COORD_SCREEN)],
+      deadline,
+    ).catch((error: unknown) => {
       if (error instanceof ExecTimeoutError) throw error;
       return null;
     });

@@ -76,6 +76,42 @@ test('makeExec passes a missing binary through raw as ENOENT', async () => {
   expect(isEnoent(error)).toBe(true);
 });
 
+// --- makeExec with an absolute deadline ---------------------------------------
+
+test('makeExec kills a wedged tool at the DEADLINE, not at its own default cap', async () => {
+  // The adapter's own cap is 10s; the enclosing budget is 300ms. A tool that wedges
+  // must be cut at the deadline — otherwise the run's remaining wall-clock is gone.
+  const exec = makeExec(process.env);
+  const started = Date.now();
+  const promise = exec('sleep', ['30'], { deadline: Date.now() + 300 });
+  await expect(promise).rejects.toThrow(ExecTimeoutError);
+  await expect(promise).rejects.toThrow(/`sleep` timed out after 300ms \(SIGKILLed/);
+  const elapsed = Date.now() - started;
+  expect(elapsed).toBeLessThan(5_000); // cut at the deadline, not parked on the child
+});
+
+test('makeExec rejects a call whose deadline has already passed instead of running it', async () => {
+  // A spent budget must not buy another subprocess: the call fails loud at once.
+  const exec = makeExec(process.env);
+  const promise = exec('sh', ['-c', 'printf late'], { deadline: Date.now() - 1 });
+  await expect(promise).rejects.toThrow(ExecTimeoutError);
+  await expect(promise).rejects.toThrow(/deadline .* has already passed/);
+});
+
+test('makeExec rejects a call that resolves after its deadline instead of returning stdout', async () => {
+  // The child finishes inside its own cap, but only AFTER the deadline it was given:
+  // a result read past the budget is stale, so it must not resolve as a success.
+  const exec = makeExec(process.env, 5_000);
+  const promise = exec('sh', ['-c', 'sleep 0.2; printf late'], { deadline: Date.now() + 50 });
+  await expect(promise).rejects.toThrow(ExecTimeoutError);
+  await expect(promise).rejects.toThrow(/`sh` timed out after 50ms|resolved after its deadline/);
+});
+
+test('makeExec resolves normally when the deadline is still in the future', async () => {
+  const exec = makeExec(process.env);
+  expect(await exec('sh', ['-c', 'printf ok'], { deadline: Date.now() + 5_000 })).toBe('ok');
+});
+
 // --- terminateGroup (real detached process groups) ----------------------------
 
 /** True while `pid` is alive (`kill -0`); false once it's gone (ESRCH). */

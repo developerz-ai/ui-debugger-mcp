@@ -334,6 +334,84 @@ describe('AndroidAdapter managed boot', () => {
   });
 });
 
+describe('AndroidAdapter managed boot budget', () => {
+  test('the device poll carries the boot deadline, not the transport default', async () => {
+    // `get-state` has its own 30s transport cap; the boot's deadline must reach it,
+    // or a wedged adb holds the boot past the caller's budget.
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi([]),
+      spawn: () => makeFakeEmulator(undefined),
+      pickPort: async () => 5554,
+      bootWaitMs: 60_000,
+    });
+    await adapter.open('com.example', 5000);
+    const poll = adb.findCall('adb', 'get-state');
+    expect(poll?.deadline).toBeDefined();
+    expect(poll?.deadline as number).toBeLessThan(Date.now() + 30_000);
+    // The boot-completed half of the poll shares the same absolute deadline.
+    const boot = adb.findCall('shell', 'getprop', 'sys.boot_completed');
+    expect(boot?.deadline).toBe(poll?.deadline);
+  });
+
+  test('a slow adb poll cannot push the managed boot past the caller budget', async () => {
+    // The device never answers in time: the poll itself is slow. `open` must still
+    // give up at the budget, not after the poll's own duration.
+    const adb = new FakeAdb();
+    adb.setResponse('adb get-state', 'unknown');
+    adb.setSlow('adb get-state', 400);
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi([]),
+      spawn: () => makeFakeEmulator(undefined),
+      pickPort: async () => 5554,
+      bootWaitMs: 60_000,
+    });
+    const started = Date.now();
+    const err = await adapter.open('com.example', 60).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as AdapterError).message).toContain('no device appeared');
+    // The slow poll answers 400 ms in, but the budget was 60 ms — the wait ends there.
+    expect(Date.now() - started).toBeLessThan(2000);
+    // And the poll itself was bounded by that budget, not by the transport's 30s cap.
+    const poll = adb.findCall('adb', 'get-state');
+    expect(poll?.deadline).toBeDefined();
+    expect(poll?.deadline as number).toBeLessThan(started + 60_000);
+  });
+
+  test('the activity start after boot is bounded by what is left of the budget', async () => {
+    // The boot ate most of the budget; the start command must get the remainder,
+    // not a fresh 30s cap of its own.
+    const adb = new FakeAdb();
+    adb.setSlow('adb get-state', 120);
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi([]),
+      spawn: () => makeFakeEmulator(undefined),
+      pickPort: async () => 5554,
+      bootWaitMs: 60_000,
+    });
+    await adapter.open('com.example', 1000);
+    const start = adb.findCall(
+      'shell',
+      'monkey',
+      '-p',
+      'com.example',
+      '-c',
+      'android.intent.category.LAUNCHER',
+      '1',
+    );
+    expect(start?.deadline).toBeDefined();
+    // Same absolute deadline the boot used — the two share one budget.
+    const poll = adb.findCall('adb', 'get-state');
+    expect(start?.deadline).toBe(poll?.deadline);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Managed-vs-attach binding: managed drives ONLY the emulator it spawned.
 // ---------------------------------------------------------------------------
