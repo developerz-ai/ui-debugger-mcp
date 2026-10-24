@@ -14,14 +14,19 @@
 #   3. dummy/web fixture    — `bun install --frozen-lockfile && bun run build`
 #                             so the e2e suite's static server can find dist/
 #   4. Chromium             — repo-pinned playwright-core's CLI downloads the
-#                             browser binaries from Playwright's CDN over HTTPS
-#                             (NO apt / install-deps on any path), with the
-#                             same bounded retry ci.yml already learned to
-#                             need. Skipped when both the pinned chromium AND
+#                             browser binaries from Playwright's CDN over HTTPS,
+#                             with the same bounded retry ci.yml already learned
+#                             to need. Skipped when both the pinned chromium AND
 #                             its headless shell are already in the Playwright
 #                             cache dir, so a re-run with the browser present
 #                             does NOT re-download.
-#   5. Launch check         — playwright-core actually launches the headless
+#   5. Library check        — `bun src/cli/chromium-libs.ts "$CACHE_DIR"` proves
+#                             every shared library of the pinned headless-shell
+#                             binary resolves. Apt / install-deps runs ONLY when
+#                             libraries are actually missing AND noninteractive
+#                             elevation is available; otherwise the check fails
+#                             loud naming every missing library.
+#   6. Launch check         — playwright-core actually launches the headless
 #                             shell, so a missing binary or system lib fails
 #                             HERE with the error naming it, not as a mystery
 #                             inside `bin/check` / `bun test`. Not retried: a
@@ -87,10 +92,10 @@ else
   echo "==> chromium install (playwright-core revision $PLAYWRIGHT_REV)"
   # Use the repo-pinned CLI, NEVER `bunx playwright`: `bunx` resolves an
   # unpinned version that "exit 0 in 0.7s without fetching the headless
-  # shell the pinned version requires" (ci.yml:71-73). No apt /
-  # install-deps on any path — the system libs are already on the stock
-  # image, and the Ubuntu mirrors are what flake (ci.yml:59-66). The launch
-  # check in the next stage gates that claim at runtime.
+  # shell the pinned version requires" (ci.yml:71-73). This stage DOWNLOADS
+  # only — it never installs system libraries. The library check in the
+  # next stage is what inspects the binary's shared libraries, and it
+  # remediates missing ones via apt / install-deps.
   # Bounded retry: `timeout` kills a wedged or crawling attempt so the retry
   # actually fires. Exit 124 (or 137 after the KILL fallback) means the
   # 300s budget was exceeded and the attempt is logged as such. 300s
@@ -126,11 +131,24 @@ else
   fi
 fi
 
+# Library gate: prove every shared library the pinned headless-shell binary
+# needs actually resolves, BEFORE the launch check — a missing lib then fails
+# HERE with the error naming it (and the fix), not as a mystery inside the
+# launch. `src/cli/chromium-libs.ts` exits 0 when everything resolves, and
+# exits 1 with an `X_CHROMIUM_LIBS_MISSING:` diagnostic on stderr naming every
+# missing library plus the remediation command. It installs the missing
+# libraries itself ONLY when they are missing AND noninteractive elevation is
+# available (`sudo -n`), so no path here can hang on a password prompt.
+# `set -e` aborts the script on its non-zero exit — the launch check below
+# must not run against a browser that cannot start.
+echo "==> verify chromium shared libraries"
+bun src/cli/chromium-libs.ts "$CACHE_DIR"
+
 # Runtime gate: prove the launch surface the suite needs is actually there —
 # both the browser set (chromium + headless_shell) and the system libraries
-# the no-apt claim rests on. If anything is missing, this fails HERE with
-# the error naming it (e.g. "Chromium distribution 'X' is not found at Y"
-# — same shape as the issue's #83 baseline-red), not as a mystery inside
+# the library check above already proved. If anything is missing, this fails
+# HERE with the error naming it (e.g. "Chromium distribution 'X' is not found
+# at Y" — same shape as the issue's #83 baseline-red), not as a mystery inside
 # `bin check` / `bun test`. Not retried: a missing binary or library is
 # not transient.
 echo "==> verify chromium launches"
