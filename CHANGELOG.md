@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The URL watch reads the active URL once more before reporting the budget
+  exhausted.** The loop's last act is a sleep, and a redirect landing inside
+  that final slice (275ms on a 300ms budget) was missed: the proof left the
+  loop without reading again and reported a failed login that blamed the
+  credentials for a navigation that DID happen.
+
+- **A quiet streak the page later invalidates is no longer evidence for a
+  rejected login.** The exhausted-budget diagnostic used to blame the
+  credentials whenever the page had settled AT ANY POINT — even when it went
+  busy again afterwards and was still working when the budget ran out. Only
+  quiet evidence that is current (the streak was never interrupted) and
+  complete (it held for its whole window) counts as a rejection now; everything
+  else gets the unresolved proof, which does not implicate the credentials. The
+  quiet window is also measured from the moment the page went quiet, not from
+  the start of the observation that saw it, so a window shortened by a small
+  remaining budget completes exactly when that budget does.
+
+- **The no-`expect` login proof now watches the URL across the login's remaining
+  budget instead of reading it once after a 5 s settle slice.** A valid login
+  whose redirect landed after that slice was reported as a failed login and the
+  CREDENTIALS were blamed, even though nothing about them was wrong. The proof
+  now polls the active tab's URL for the rest of the login's budget, and
+  succeeds the moment the URL leaves the login page — including when the
+  adapter's own network-idle wait REJECTED (timed out). A rejected wait no
+  longer ends the proof: it is a page that never went idle, not a proof that
+  the login failed.
+
+  The whole sign-in shares ONE budget: opening the page, filling the fields,
+  submitting and the URL watch all come out of the caller's remaining cap.
+  The watch used to take a FRESH budget of its own, started after the submit,
+  so the login could overrun the cap it was handed; it is now bounded by what
+  is left of that one budget.
+
+- **A settled page is no longer blamed for a redirect that has not landed yet.**
+  Playwright's network-idle wait resolves INSTANTLY on a page that is already
+  idle, so an app that answers the login POST and then navigates on a timer —
+  `fetch('/api/login')` and `setTimeout(() => location.href = '/dashboard', 1000)`
+  — is idle while its redirect is still PENDING. Reading the URL twice back to
+  back read it twice before the timer fired, and the proof called a perfectly
+  valid login a failed one. A settled observation is now only the START of the
+  evidence: the page has to stay IDLE **and** UNMOVED for the quiet window
+  (`SETTLE_CONFIRM_MS`) before the credentials are blamed, and a redirect that
+  lands inside that window is the login taking.
+
+- **A login failure now says which of the two things actually happened.** A
+  *settled rejection* — the page went idle and the URL was still the login page
+  — still names the persona, the URL and the submit control and still says the
+  credentials are probably wrong. A *budget exhaustion* — the budget ran out
+  with the URL still on the login page and no settled observation — is a
+  DIFFERENT `AuthError`: it names the persona and the URL and says the
+  navigation never settled, without blaming the credentials, because nothing
+  measured implicates them. The `expect` path keeps its own explicit proof and
+  its "never appeared" wording — it only shares the one budget now — and the
+  "this target cannot report its current location" error is unchanged.
+
 ## [1.9.0] - 2026-09-05
 
 ### Added
@@ -49,11 +108,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budget left.
 
   This is also why CI was red on `main`: `session-builder.test.ts`'s
-  wrong-credentials story sets its own ceiling to the login budget, so on any
-  runner where the idle wait ran to term the `AuthError` arrived after the
-  harness had already given up. The test was structurally unable to observe the
-  behaviour it asserts and timed out at exactly 30,000ms (run 33647731476,
-  commit 06ec3a07). No test was modified — the code was.
+  wrong-credentials story timed out at exactly 30,000ms (runs 33969855127 and
+  33647731476) — the test was structurally unable to observe the behaviour it
+  asserts. The cause was the way the test AWAITED the flow, not an idle wait
+  running to term: the same login, same adapter, same page measures 1.4s
+  awaited directly and 31.5s awaited through the `.rejects` matcher, because
+  awaiting a long, multi-round-trip browser flow through `.rejects` starves the
+  loop driving it — every CDP call inside the pending promise then costs ~1s.
+  The test now awaits the flow directly and asserts on the caught error
+  instead. No production behaviour was changed for this; the test was.
 
 ## [1.8.0] - 2026-07-30
 

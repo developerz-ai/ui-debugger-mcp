@@ -40,29 +40,69 @@ import type { Step } from '../findings/schema.js';
 const LOGIN_TIMEOUT_MS = 30_000;
 
 /**
- * How long the no-`expect` proof waits for the post-submit navigation to SETTLE,
- * before reading the URL that actually decides whether the login took.
+ * How long ONE observation of the post-submit navigation may wait for the page
+ * to SETTLE, before the URL that decides whether the login took is read.
  *
- * A slice, deliberately not the whole login budget. The settle wait's own result
- * is DISCARDED (`.catch(() => undefined)`) — it exists only to let a redirect
- * land before the URL is read, and a page that never reaches network-idle is the
- * normal shape of a REJECTED login: the credentials POST comes back 401, the app
- * renders an error in place, and nothing navigates. Spending the full budget
- * there meant the one case this check exists to catch was also the slowest to
- * report, at 30s of silence per wrong password.
+ * A per-observation slice — NOT the cap on the proof. The proof watches the URL
+ * across the whole login budget ({@link LOGIN_TIMEOUT_MS}); each observation
+ * spends at most this long waiting for the network to go idle before the URL is
+ * read again.
  *
- * That is not hypothetical. `session-builder.test.ts`'s "a persona whose
- * credentials are wrong fails the run instead of opening it signed out" sets its
- * own ceiling to `LOGIN_TIMEOUT_MS`, so on any runner where the idle wait ran to
- * term the AuthError arrived after the harness had already given up — the test
- * was structurally unable to observe the behaviour it asserts, and it timed out
- * at exactly 30,000ms on `main` (run 33647731476, commit 06ec3a07).
+ * Why there is a wait at all: the URL read alone can miss a redirect that has
+ * been dispatched but has not landed yet, so each observation gives the page a
+ * bounded chance to finish its work before the URL is read.
+ *
+ * Why it is not the CAP: a login whose redirect lands later than this slice — a
+ * slow POST, a slow app — used to be read once, at the end of the slice, and
+ * reported as a FAILED login, with the credentials blamed for a navigation that
+ * had simply not happened yet. The proof now keeps watching instead of reading
+ * the URL once and giving up, and a settle wait that TIMES OUT (the page is
+ * still working) is not a verdict — it never ends the proof.
  *
  * Five seconds is chosen against what it is waiting for — one redirect hop on an
  * app that has already answered the login POST — not against the runner. A
  * caller with less than that left still shortens it via `capWait`.
  */
 const NAVIGATION_SETTLE_MS = 5_000;
+
+/**
+ * How long the page must be observed IDLE **and UNMOVED** before a settled page
+ * that is still on the login page is called a REJECTED login.
+ *
+ * A settle observation is NOT a verdict, and reading the URL twice back to back
+ * is not evidence either: on a page that is already idle, Playwright's
+ * network-idle wait resolves INSTANTLY (`browser-adapter.ts`), so an app that
+ * answers the login POST and then navigates on a timer —
+ * `fetch('/api/login')` and `setTimeout(() => location.href = '/dashboard', 1000)`
+ * — is idle while its redirect is still PENDING. Blaming the credentials for
+ * that was wrong: nothing about them was.
+ *
+ * So the page has to STAY idle, and stay on the login page, for this long
+ * before the proof concludes the login was rejected. It bounds how long a
+ * redirect may sit PENDING: the navigation is dispatched, and if it has not
+ * fired within this window it is not going to.
+ *
+ * Two seconds is twice the delay of the case this exists for (a one-second
+ * timer), and it stays UNDER the settle slice — so a wrong password is still
+ * reported in seconds, faster than the fixed slice it replaced, and a rejected
+ * login never costs the whole budget.
+ *
+ * It is bounded by what is LEFT of the login's budget: a caller with less
+ * budget gets a shorter window, and a budget that runs out first ends the
+ * proof through the other diagnostic.
+ */
+const SETTLE_CONFIRM_MS = 2_000;
+
+/** Gap between two URL observations while the proof waits for a redirect to land. */
+const OBSERVATION_INTERVAL_MS = 250;
+
+/** Local sleep — the repo has no shared timer helper. */
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The ms left before `deadline`, never negative — `capWait` rejects a negative budget. */
+function remainingMs(deadline: number): number {
+  return Math.max(0, deadline - Date.now());
+}
 
 /** What `start_debug({as})` resolved to — the persona plus the key that named it. */
 export interface ResolvedAuth {
@@ -187,6 +227,13 @@ export async function performLogin(adapter: Adapter, options: LoginOptions): Pro
   const { name, persona, loginUrl, timeoutMs } = options;
   const log = options.log ?? (() => undefined);
   const budget = capWait(LOGIN_TIMEOUT_MS, timeoutMs);
+  /**
+   * ONE deadline for the WHOLE login, taken before the first byte is spent:
+   * opening the page, filling the fields and submitting all come out of the
+   * same budget as the URL watch. A watch window that started fresh AFTER the
+   * submit would let the login overrun the cap it was handed.
+   */
+  const deadline = Date.now() + budget;
   const steps: Step[] = [];
   /** Marks every step here as the pre-run login, not something the driver chose. */
   const note = `auth persona ${JSON.stringify(name)} — signed in before the run's first step`;
@@ -225,7 +272,7 @@ export async function performLogin(adapter: Adapter, options: LoginOptions): Pro
   await adapter.click(submit);
   steps.push({ step: `click submit "${persona.submit}"`, ok: true, note });
 
-  await assertSignedIn(adapter, options, budget);
+  await assertSignedIn(adapter, options, budget, deadline);
   // Where the login LANDED, not where the run was configured to start: submitting
   // usually redirects, so this is the page the driver's first step actually reads.
   const landed = await currentUrl(adapter);
@@ -238,15 +285,50 @@ export async function performLogin(adapter: Adapter, options: LoginOptions): Pro
  * Prove the login took, or fail loud. `expect` is the explicit proof; without one
  * the run requires that submitting LEFT the login page — a real signal, and the
  * error says how to replace it for an app that signs in without navigating.
+ *
+ * Without `expect` the proof WATCHES the active tab's URL across the whole
+ * login budget instead of reading it once after a fixed settle slice: a valid
+ * login whose redirect lands later than that slice used to be reported as a
+ * failed login, with the credentials blamed for a navigation that had simply
+ * not happened yet.
+ *
+ * A settled observation is not a verdict by itself. It only says the page
+ * finished its work — a redirect can be dispatched and still PENDING, and on
+ * an already-idle page the settle wait returns INSTANTLY, so two back-to-back
+ * reads prove nothing. The settled rejection therefore needs the page to stay
+ * idle AND unmoved for {@link SETTLE_CONFIRM_MS}; a redirect that lands inside
+ * that window is the login taking, not a rejected login.
+ *
+ * Two failures, and they say different things because the MEASUREMENTS differ:
+ *
+ *  - **settled rejection** — the page was idle AND unmoved on the login page
+ *    for its whole confirmation window, and that evidence was still CURRENT
+ *    when the proof ended. The app finished its work and did not navigate: the
+ *    login did not take, and the credentials are the first thing to check.
+ *  - **unresolved proof** — the budget ran out without that evidence: the page
+ *    never went idle, or it went idle once and went BUSY again (the app is
+ *    still working — a quiet streak the page later voided is not evidence).
+ *    The navigation may still have been in flight; nothing measured here
+ *    implicates the credentials, so the error says that instead of guessing.
+ *
+ * Before either diagnostic, the URL is read ONE more time: the loop's last act
+ * is a sleep, and a redirect landing inside that final slice is a successful
+ * login the loop would otherwise never see.
  */
 async function assertSignedIn(
   adapter: Adapter,
   { name, persona, loginUrl }: LoginOptions,
   budget: number,
+  deadline: number,
 ): Promise<void> {
   if (persona.expect !== undefined) {
     try {
-      await adapter.waitFor({ query: persona.expect, timeout: budget });
+      // The SAME deadline as the URL watch: the whole login shares one budget,
+      // so `expect` waits on what is LEFT of it, never on a fresh one.
+      await adapter.waitFor({
+        query: persona.expect,
+        timeout: capWait(budget, remainingMs(deadline)),
+      });
     } catch (error) {
       throw new AuthError(
         `auth persona '${name}': submitted the form but '${persona.expect}' never appeared — ` +
@@ -257,23 +339,129 @@ async function assertSignedIn(
     return;
   }
 
-  await adapter
-    .waitFor({ networkIdle: true, timeout: capWait(NAVIGATION_SETTLE_MS, budget) })
-    .catch(() => undefined);
-  const after = await currentUrl(adapter);
-  if (after === null) {
+  // A target with no tab concept cannot answer "did the page move?", and there
+  // is no `expect` to fall back on. Say so before spending a wait on it.
+  if (!adapter.tabs) {
     throw new AuthError(
       `auth persona '${name}': this target cannot report its current location, so the login ` +
         "cannot be verified — set 'expect' on the persona to a selector that only exists once signed in.",
     );
   }
-  if (samePage(after, loginUrl)) {
+
+  /** The URL the last observation saw — the one a failure names. */
+  let lastUrl = loginUrl;
+  /**
+   * Whether the page's quiet streak is CURRENTLY intact: idle AND unmoved on
+   * the last observation, and not since invalidated by a busy one. A settled
+   * observation sets it; a busy one voids it — the app went back to work, so
+   * its earlier quiet is no longer evidence of anything.
+   */
+  let quiet = false;
+  /**
+   * When the current quiet streak began, or 0 when the page is not quiet. A
+   * page that goes busy again resets it: the app is still working, so the
+   * streak starts over.
+   */
+  let quietSince = 0;
+  /** How long the page must stay quiet before the credentials are blamed. */
+  let quietWindow = 0;
+
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+
+    // One observation: give the page a bounded slice to settle. A REJECTED wait
+    // is not a verdict — it only says the page is still working (the POST is in
+    // flight, the redirect has not fired) — so the watch continues.
+    let settled = false;
+    try {
+      await adapter.waitFor({
+        networkIdle: true,
+        timeout: capWait(NAVIGATION_SETTLE_MS, remaining),
+      });
+      settled = true;
+    } catch {
+      // not idle within the slice — keep watching
+    }
+
+    // The URL is what decides, and it is read after EVERY observation — settled
+    // or not. That is the whole fix: a redirect that lands late is still seen.
+    const after = await currentUrl(adapter);
+    if (after === null) {
+      throw new AuthError(
+        `auth persona '${name}': this target cannot report its current location, so the login ` +
+          "cannot be verified — set 'expect' on the persona to a selector that only exists once signed in.",
+      );
+    }
+    lastUrl = after;
+    // The URL left the login page: the login took.
+    if (!samePage(after, loginUrl)) return;
+
+    if (!settled) {
+      // The page went busy again (or never settled): it is WORKING, not
+      // rejecting. Any quiet streak is void — a redirect may be on its way.
+      quietSince = 0;
+      quiet = false;
+    } else {
+      quiet = true;
+      if (quietSince === 0) {
+        // The page just went quiet for the first time (or after being busy).
+        // How long it must STAY quiet is bounded by what is left of the budget
+        // AT THE MOMENT it went quiet — measured from the stamp, not from the
+        // start of the observation (the settle wait and the URL read already
+        // spent a slice of it): a caller with less budget gets a shorter
+        // window, and a budget that runs out first ends the proof through the
+        // other diagnostic.
+        quietSince = Date.now();
+        quietWindow = Math.min(SETTLE_CONFIRM_MS, Math.max(1, deadline - quietSince));
+      }
+      // The page is idle and has not moved. That is STILL not a rejection: the
+      // redirect can be pending (the app answered the login POST and will
+      // navigate on a timer). Only a page that stays idle AND unmoved for the
+      // whole quiet window is a rejected login — and a redirect that lands
+      // inside that window is the login taking.
+      if (Date.now() - quietSince >= quietWindow) {
+        throw new AuthError(
+          `auth persona '${name}': still on ${after} after submitting '${persona.submit}' — the login ` +
+            'did not take. Check the credentials and the field keys; if this app signs in WITHOUT ' +
+            "navigating away, set 'expect' on the persona to a selector that only exists once signed in.",
+        );
+      }
+    }
+
+    // Sleep only as long as the budget still allows: a fixed gap would carry
+    // the login PAST the caller's cap, which is the very overrun the shared
+    // deadline exists to prevent.
+    await delay(Math.min(OBSERVATION_INTERVAL_MS, remainingMs(deadline)));
+  }
+
+  // The budget ran out — but the loop's last act was a SLEEP, not a read, and
+  // the redirect can land inside it (a 275ms redirect on a 300ms budget lands
+  // between the last observation and this line). The URL is what decides, so
+  // read it once more before reporting anything.
+  const finalUrl = await currentUrl(adapter);
+  if (finalUrl !== null && !samePage(finalUrl, loginUrl)) return;
+
+  // Still on the login page. Which failure this is depends on what was
+  // MEASURED AT THE END, not on what was measured at any point before: only a
+  // quiet streak that is still INTACT and has held for its whole window is a
+  // confirmed rejection. A streak the page later invalidated — it went busy
+  // again and was still working when the budget ran out — proves nothing about
+  // the credentials, so it gets the unresolved diagnostic instead.
+  if (quiet && Date.now() - quietSince >= quietWindow) {
     throw new AuthError(
-      `auth persona '${name}': still on ${after} after submitting '${persona.submit}' — the login ` +
+      `auth persona '${name}': still on ${lastUrl} after submitting '${persona.submit}' — the login ` +
         'did not take. Check the credentials and the field keys; if this app signs in WITHOUT ' +
         "navigating away, set 'expect' on the persona to a selector that only exists once signed in.",
     );
   }
+  throw new AuthError(
+    `auth persona '${name}': still on ${lastUrl} after ${budget}ms — the login budget was exhausted ` +
+      'without a settled-and-unmoved page to conclude from (the navigation never settled, or it ' +
+      'settled and the page went busy again before the budget ran out), so the proof could not be ' +
+      'completed. Nothing measured here says why the page did not leave the login page. ' +
+      "Raise the run's timeout, or set 'expect' on the persona to a selector that only exists once signed in.",
+  );
 }
 
 /** Same origin + same path — the query/hash a login flow adds (`?error=1`) does not make it a new page. */
