@@ -41,7 +41,13 @@ const TargetInfoSchema = z.object({
   mode: z
     .enum(['managed', 'attach'])
     .describe('managed = the server launches and owns it; attach = it connects to a running one.'),
-  operational: z.boolean().describe('Whether this adapter is wired and usable.'),
+  operational: z
+    .boolean()
+    .describe(
+      'Whether the adapter kind of this target is wired in this build and supported on the ' +
+        'host platform (false otherwise). A wiring/capability fact — it does NOT mean the target ' +
+        'is up, nor that a later start_debug will succeed.',
+    ),
   url: z.string().optional().describe('Entry url (web targets only).'),
   headless: z.boolean().optional().describe('Headless flag (web targets only).'),
   personas: z

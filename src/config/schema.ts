@@ -149,7 +149,13 @@ export const AndroidTargetSchema = z
     }
   });
 
-/** A single target, discriminated on `adapter`. All three adapters (browser, desktop, android) are operational. */
+/**
+ * A single target, discriminated on `adapter`.
+ *
+ * The schema accepts the three adapter kinds this build wires (browser, desktop,
+ * android) — it says nothing about whether a kind is USABLE here: per-target
+ * availability (wiring plus host-platform support) is what `describe` reports.
+ */
 export const TargetSchema = z.discriminatedUnion('adapter', [
   WebTargetSchema,
   DesktopTargetSchema,

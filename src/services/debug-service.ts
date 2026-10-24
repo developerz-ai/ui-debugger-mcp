@@ -26,6 +26,7 @@
  * already closed) and never participates in the one-run gate.
  */
 
+import { isAdapterOperational } from '../adapters/availability.js';
 import { CONFIG_FILENAME, type ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import {
@@ -113,7 +114,12 @@ export interface TargetInfo {
   adapter: Target['adapter'];
   /** `managed` = the server launches/owns it; `attach` = it connects to a running one. */
   mode: 'managed' | 'attach';
-  /** Whether this adapter is wired. All three (browser/desktop/android) are shipped. */
+  /**
+   * Whether this adapter kind is available HERE: wired in this build AND
+   * supported on the host platform. It is NOT a launch promise — the target may
+   * be down, or its browser/emulator/device missing or disconnected; that fails
+   * loud at launch.
+   */
   operational: boolean;
   /** Web target entry url, when applicable. */
   url?: string;
@@ -192,6 +198,12 @@ export interface DebugServiceDeps {
   /** Injected clock (epoch ms) for session ids + the run deadline; defaults to `Date.now`. */
   now?: () => number;
   /**
+   * The host platform the adapter-availability rule is evaluated against;
+   * defaults to `process.platform`. Injected so `describe` reports the same
+   * fact on every host (the tests pin it).
+   */
+  platform?: NodeJS.Platform;
+  /**
    * Has `.ui-debugger-mcp.json` changed since boot? Config is resolved once and
    * wired into long-lived objects, so a changed file means every later run would
    * silently use the OLD settings — see `config/fingerprint.ts`. Defaults to
@@ -222,6 +234,7 @@ export class DebugService implements DebugApi {
   readonly #state: StatePort;
   readonly #defaultTimeoutMs: number;
   readonly #now: () => number;
+  readonly #platform: NodeJS.Platform;
   readonly #configChanged: () => boolean;
   /** Live wall-clock timer for the active run; cleared when the run ends. */
   #timer: ReturnType<typeof setTimeout> | undefined;
@@ -253,6 +266,7 @@ export class DebugService implements DebugApi {
     this.#state = deps.state ?? noopStatePort;
     this.#defaultTimeoutMs = deps.defaultTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
     this.#now = deps.now ?? (() => Date.now());
+    this.#platform = deps.platform ?? process.platform;
     this.#configChanged = deps.configChanged ?? (() => false);
   }
 
@@ -546,7 +560,7 @@ export class DebugService implements DebugApi {
     }
     const session = this.#currentRun();
     return {
-      targets: selected.map(([name, config]) => describeTarget(name, config)),
+      targets: selected.map(([name, config]) => describeTarget(name, config, this.#platform)),
       models: this.#config.models,
       // The RESOLVED per-project root, not the raw config string: the caller joins
       // this to the relative evidence paths it gets back, and `./tmp/ui-debugger-mcp`
@@ -674,13 +688,18 @@ function isAttach(target: Target): boolean {
   return false;
 }
 
-/** Project one configured target onto its public {@link TargetInfo} (no secrets). */
-function describeTarget(name: string, target: Target): TargetInfo {
+/**
+ * Project one configured target onto its public {@link TargetInfo} (no secrets).
+ *
+ * `operational` is DERIVED, never hardcoded: the adapter kind must be wired in
+ * this build AND supported on the host platform (see `adapters/availability.ts`).
+ */
+function describeTarget(name: string, target: Target, platform: NodeJS.Platform): TargetInfo {
   const base: TargetInfo = {
     name,
     adapter: target.adapter,
     mode: isAttach(target) ? 'attach' : 'managed',
-    operational: true,
+    operational: isAdapterOperational(target.adapter, platform),
     // What the project declares is EXPECTED of this app — the driver already gets
     // it in its prompt; the caller sees it here so "the table is empty" coming back
     // as a non-finding is explainable without opening the config file.

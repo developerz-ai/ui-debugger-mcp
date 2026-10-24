@@ -107,11 +107,12 @@ const UNREACHABLE =
  * Recast a "nothing is listening" navigation failure as an error that names the
  * address, or `null` when the failure was something else.
  *
- * `describe.operational` only ever meant "this adapter is wired" — it says nothing
- * about whether `http://localhost:5173` is actually serving. So a dev server that
- * is down used to spend a whole run: the driver launched, navigated, read an empty
- * page, and reported it as a broken UI — indistinguishable, to the caller, from a
- * real defect. This is that run ending on step zero instead, with the port in the
+ * `describe.operational` reports whether the adapter kind is wired in this build
+ * AND supported on the host platform — it says nothing about whether
+ * `http://localhost:5173` is actually serving. So a dev server that is down used
+ * to spend a whole run: the driver launched, navigated, read an empty page, and
+ * reported it as a broken UI — indistinguishable, to the caller, from a real
+ * defect. This is that run ending on step zero instead, with the port in the
  * message.
  */
 export function unreachableFailure(error: unknown, url: string): AdapterError | null {
