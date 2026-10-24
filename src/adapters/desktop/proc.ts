@@ -88,18 +88,26 @@ export function desktopEnv(display?: string): NodeJS.ProcessEnv {
  * instant instead of by its own default, and a result that arrives after it rejects —
  * the enclosing budget (a run's remaining time, a `waitFor` timeout) is never
  * outlived by a tool that happens to be slow.
+ *
+ * @param now the clock, injectable for tests (defaults to `Date.now`). Shifting the
+ *   global clock from a test leaks into every test file `bun test` runs alongside it;
+ *   a seam keeps the deadline logic deterministic with no cross-file blast radius.
  */
-export function makeExec(env: NodeJS.ProcessEnv, timeoutMs = DEFAULT_EXEC_TIMEOUT_MS): Exec {
+export function makeExec(
+  env: NodeJS.ProcessEnv,
+  timeoutMs = DEFAULT_EXEC_TIMEOUT_MS,
+  now: () => number = Date.now,
+): Exec {
   return async (cmd, args, opts = {}) => {
     const deadline = opts.deadline;
-    if (deadline !== undefined && Date.now() >= deadline) {
+    if (deadline !== undefined && now() >= deadline) {
       // The budget is already spent — starting the tool would only outlive it.
       throw new ExecTimeoutError(
         `desktop: \`${cmd}\` was not started — its deadline (${deadline}) has already passed`,
       );
     }
     const cap =
-      deadline === undefined ? timeoutMs : Math.max(1, Math.min(timeoutMs, deadline - Date.now()));
+      deadline === undefined ? timeoutMs : Math.max(1, Math.min(timeoutMs, deadline - now()));
     try {
       const { stdout } = await pExecFile(cmd, args, {
         env,
@@ -110,7 +118,7 @@ export function makeExec(env: NodeJS.ProcessEnv, timeoutMs = DEFAULT_EXEC_TIMEOU
       // The child may have finished right as the deadline passed (the kill timer and
       // the child's exit race). A result read after the deadline is stale: the caller
       // asked for an answer within its budget, so this is a failure, not a success.
-      if (deadline !== undefined && Date.now() >= deadline) {
+      if (deadline !== undefined && now() >= deadline) {
         throw new ExecTimeoutError(
           `desktop: \`${cmd}\` resolved after its deadline (${deadline}) had passed`,
         );
