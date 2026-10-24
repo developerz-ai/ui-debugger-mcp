@@ -45,9 +45,9 @@ List this project's configured debug targets, resolved per-role models, and work
 |-------|------|----------|-------------|
 | `target` | `string` | no | Narrow output to a single target by name. |
 
-**Returns** — catalog of targets (name, adapter, managed vs attach, wired status, URL/headless for web, `personas[]` — the names a web target's `auth` map configures, valid values for `start_debug`'s `as` — and `notes`, the target's declared preconditions) plus models, workspace, and `session`.
+**Returns** — catalog of targets (name, adapter, managed vs attach, wiring/capability status, URL/headless for web, `personas[]` — the names a web target's `auth` map configures, valid values for `start_debug`'s `as` — and `notes`, the target's declared preconditions) plus models, workspace, and `session`.
 
-> `operational` means "this adapter is wired", not "the target is up". A web target that is not serving fails `start_debug` at the first navigation with an error naming the address, rather than spending a run reporting an empty page.
+> `operational` reports whether the target's adapter kind is wired in this build and supported on this platform (false otherwise) — a wiring/capability fact, never a guarantee that the target is up or that `start_debug` will succeed. A web target that is not serving fails `start_debug` at the first navigation with an error naming the address, rather than spending a run reporting an empty page.
 
 `session` — `{ id, status, goal }` for the run this project currently holds, or
 the last one (kept readable until it is ended or superseded); absent when there is

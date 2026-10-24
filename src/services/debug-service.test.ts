@@ -10,6 +10,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ResolvedConfig } from '../config/load.js';
+import type { Target } from '../config/schema.js';
 import {
   AdapterError,
   SessionBusyError,
@@ -115,7 +116,16 @@ function fakeBuilder(opts: { openFails?: boolean; run?: LoopRunner } = {}): {
 }
 
 function makeService(build: SessionBuilder): DebugService {
-  return new DebugService({ manager, config: CONFIG, cwd: CWD, build, now: () => NOW });
+  // The platform is PINNED: `operational` is derived from the host platform, so
+  // the expectations must not depend on the OS the test happens to run on.
+  return new DebugService({
+    manager,
+    config: CONFIG,
+    cwd: CWD,
+    build,
+    now: () => NOW,
+    platform: 'linux',
+  });
 }
 
 /** Resolve after `ms` — let an armed wall-clock timer fire. */
@@ -369,8 +379,72 @@ test('describe lists every configured target with mode + operational flags', () 
     name: 'phone',
     adapter: 'android',
     mode: 'attach',
-    operational: true, // android adapter is shipped — never advertised as inoperative
+    operational: true, // wired AND supported on the pinned linux host
   });
+});
+
+test('describe reports operational=false for a wired kind on an unsupported platform', () => {
+  // Desktop is Linux tooling (X11/Wayland + AT-SPI): wired in this build, but
+  // the darwin host cannot run it — the flag must say so instead of promising.
+  const { build, log } = fakeBuilder();
+  const svc = new DebugService({
+    manager,
+    config: CONFIG,
+    cwd: CWD,
+    build,
+    now: () => NOW,
+    platform: 'darwin',
+  });
+
+  const targets = svc.describe({}).targets;
+  expect(targets.find((t) => t.name === 'screen')?.operational).toBe(false); // desktop
+  expect(targets.find((t) => t.name === 'web')?.operational).toBe(true); // browser
+  expect(targets.find((t) => t.name === 'phone')?.operational).toBe(true); // android
+  // Describing never starts anything — no browser, no emulator, no session.
+  expect(log.params).toHaveLength(0);
+});
+
+test('describe reports operational=false for an adapter kind this build does not wire', () => {
+  // Off-schema on purpose: the config schema is a closed union, so `loadConfig`
+  // rejects an unknown `adapter` — the unwired case is only reachable through a
+  // cast config (or a direct call to the availability rule).
+  const unwiredConfig: ResolvedConfig = {
+    ...CONFIG,
+    targets: { ...CONFIG.targets, gadget: { adapter: 'sensors' } as unknown as Target },
+  };
+  const { build, log } = fakeBuilder();
+  const svc = new DebugService({
+    manager,
+    config: unwiredConfig,
+    cwd: CWD,
+    build,
+    now: () => NOW,
+    platform: 'linux',
+  });
+
+  const gadget = svc.describe({ target: 'gadget' }).targets[0];
+  expect(gadget?.name).toBe('gadget');
+  expect(gadget?.adapter as string).toBe('sensors');
+  expect(gadget?.operational).toBe(false);
+  // Still nothing launched: no adapter, no session.
+  expect(log.params).toHaveLength(0);
+});
+
+test('describe derives operational from the HOST platform when none is injected', () => {
+  // The service's own default (`deps.platform ?? process.platform`): with no
+  // injected platform the flag must follow THIS host — browser is supported on
+  // every platform this project ships for, desktop is Linux tooling only.
+  const { build, log } = fakeBuilder();
+  const svc = new DebugService({ manager, config: CONFIG, cwd: CWD, build, now: () => NOW });
+
+  const targets = svc.describe({}).targets;
+  expect(targets.find((t) => t.name === 'web')?.operational).toBe(true); // browser
+  // Desktop follows the host: true on linux, false on darwin/win32 — a default
+  // that ignored the host would answer the wrong thing off linux.
+  const desktop = targets.find((t) => t.name === 'screen')?.operational;
+  expect(desktop).toBe(process.platform === 'linux');
+  // Describing launches nothing — the fake builder is never called.
+  expect(log.params).toHaveLength(0);
 });
 
 test('describe reports a browser attach target (cdpUrl set) as mode "attach"', () => {
@@ -387,6 +461,7 @@ test('describe reports a browser attach target (cdpUrl set) as mode "attach"', (
     cwd: CWD,
     build: fakeBuilder().build,
     now: () => NOW,
+    platform: 'linux',
   });
 
   expect(svc.describe({ target: 'web' }).targets[0]).toEqual({

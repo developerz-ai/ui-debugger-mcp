@@ -1,10 +1,11 @@
 /**
  * `describe` — list this project's debug targets + resolved models/workspace.
  *
- * The smart agent's lazy catalog: what targets are configured (and which are
- * wired), so it knows valid `target` values for `start_debug` without reading the
- * config file. Pass `target` to narrow to one. Thin handler: Zod-validate, call
- * {@link DebugApi.describe}.
+ * The smart agent's lazy catalog: what targets are configured (and whether each
+ * adapter kind is wired in this build and supported on the host platform — a
+ * wiring/capability fact, not a promise the target is up), so it knows valid
+ * `target` values for `start_debug` without reading the config file. Pass `target`
+ * to narrow to one. Thin handler: Zod-validate, call {@link DebugApi.describe}.
  */
 
 import { z } from 'zod';
@@ -23,12 +24,15 @@ export function describeTool(service: DebugApi): McpTool {
         {
           title: 'Describe debug targets',
           description:
-            'List the configured targets for this project (name, adapter, managed|attach, whether wired, ' +
-            "web url/headless, any named auth personas, and the target's standing notes — what is " +
-            'expected of the app) plus the resolved per-role models and workspace. Call this first to ' +
-            'pick a valid target — and a valid `as` persona — for start_debug. Pass target to narrow ' +
-            'to one. Also reports `session`: the run this project currently holds, so a lost ' +
-            'session_id can be adopted or ended instead of blocking the next start_debug.',
+            'List the configured targets for this project (name, adapter, managed|attach, ' +
+            'operational — whether the adapter kind is wired in this build and supported on the ' +
+            'host platform; a wiring/capability fact, NOT a promise the target is up or that ' +
+            'start_debug will succeed), web url/headless, any named auth personas, and the ' +
+            "target's standing notes — what is expected of the app) plus the resolved per-role " +
+            'models and workspace. Call this first to pick a valid target — and a valid `as` ' +
+            'persona — for start_debug. Pass target to narrow to one. Also reports `session`: ' +
+            'the run this project currently holds, so a lost session_id can be adopted or ' +
+            'ended instead of blocking the next start_debug.',
           annotations: {
             readOnlyHint: true,
           },

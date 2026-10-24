@@ -4,15 +4,42 @@
  * Maps config targets (`web`, `desktop`, `mobile`, …) to their adapter protocols
  * (CDP browser, X11-Wayland, ADB). Throws {@link TargetNotFoundError} if the target
  * name doesn't exist in the config; throws {@link AdapterError} only for an unknown
- * adapter kind. `browser` (CDP), `desktop` (X11) and `android` (ADB) are operational.
+ * adapter kind. The dispatch below WIRES three kinds — `browser` (CDP), `desktop`
+ * (X11/Wayland) and `android` (ADB) — and {@link isAdapterWired} is the one place
+ * that says so. Whether a kind is usable also depends on the host platform; see
+ * `adapters/availability.ts`.
  */
 
-import type { Config } from '../config/schema.js';
+import type { Config, Target } from '../config/schema.js';
 import { AdapterError, TargetNotFoundError } from '../errors.js';
 import { AndroidAdapter } from './android/android-adapter.js';
 import { BrowserAdapter, type BrowserAdapterInit } from './browser/browser-adapter.js';
 import type { Adapter } from './contract.js';
 import { DesktopAdapter } from './desktop/desktop-adapter.js';
+
+/**
+ * The adapter kinds this build wires — the exact set the dispatch switch below
+ * handles.
+ *
+ * `satisfies` (not `:`) ties the map to `Target['adapter']`: a kind added to the
+ * config schema without a wiring entry here is a TYPE error, and an entry here
+ * without a schema kind is an excess-property error. The switch's `never`
+ * default ties the dispatch to the same union — so the map, the dispatch and
+ * the schema cannot drift apart.
+ */
+const WIRED_ADAPTERS = {
+  browser: true,
+  desktop: true,
+  android: true,
+} satisfies Record<Target['adapter'], true>;
+
+/**
+ * Whether this build wires an adapter kind — a pure lookup that never throws
+ * on an unknown kind (it is simply not wired).
+ */
+export function isAdapterWired(kind: string): kind is Target['adapter'] {
+  return Object.hasOwn(WIRED_ADAPTERS, kind);
+}
 
 /**
  * Create an adapter for a named target from the resolved config.
