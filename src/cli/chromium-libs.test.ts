@@ -547,10 +547,14 @@ test('checkChromiumLibs: the REAL ldd runner reports the missing library', () =>
 //
 // `sudo` is stubbed on PATH (the same trick the real-`ldd` tests above use),
 // so these drive the REAL `probeElevation`/`runInstaller` against a policy
-// that can be shaped per test. The scenario that must never come back: a
-// sudoers rule allowing passwordless `true` while the real install needs a
-// password — the old `sudo -n true` probe passed it and install-deps' inner
-// `sudo -- sh -c …` prompted, hanging the run.
+// that can be shaped per test. The stub models BOTH permissions real sudo
+// keeps separate: LISTING (`-l`, gated by `listpw` — its default `any` needs
+// no password while the user holds ANY NOPASSWD rule) and EXECUTION (the
+// command's own NOPASSWD tag). A stub that rejected the `-l` call for the
+// install command modeled a host where that command is not in the policy at
+// all — the dangerous middle (listed but PASSWD-tagged, listable precisely
+// because `true` is NOPASSWD) is what an exit-status-only probe cleared
+// before install-deps' inner `sudo -- sh -c …` prompted and hung the run.
 
 /**
  * Put a stub `sudo` first on PATH. `body` is the shell body; `$@` is argv.
@@ -581,15 +585,57 @@ function asNonRoot<T>(fn: () => T): T {
   }
 }
 
-/** A sudoers rule: NOPASSWD for `true` ONLY — everything else needs a password. */
-const SUDO_TRUE_ONLY = `[ "$1" = "-n" ] && shift
-[ "$1" = "-l" ] && shift
-[ "$1" = "true" ] && exit 0
-echo 'sudo: a password is required' >&2
-exit 1`;
-
+/**
+ * Record the argv it was called with AND print a NOPASSWD-tagged listing —
+ * the probe reads the tag (the execution answer), not just the exit status.
+ */
 const SUDO_ARGV_RECORD = (record: string) =>
-  `printf '%s\\n' "$@" >> ${JSON.stringify(record)}\nexit 0`;
+  `printf '%s\\n' "$@" >> ${JSON.stringify(record)}\necho '(ALL) NOPASSWD: ALL'\nexit 0`;
+
+/** One sudoers rule, as the policy stub models it: a tag plus a command word. */
+type SudoPolicyRule = { tag: 'NOPASSWD' | 'PASSWD'; command: string };
+
+/**
+ * Install a sudo stub + sudoers policy modeling the two permissions real sudo
+ * keeps separate, under its DEFAULT `listpw=any`:
+ *  - LISTING (`sudo -n -l <cmd>`) runs without a password iff the policy holds
+ *    ANY NOPASSWD rule; it prints the matching rules with their tags, or
+ *    "Sorry, user … may not run" (exit 1) for an unlisted command. With no
+ *    NOPASSWD rule anywhere, listing itself needs a password and `-n` fails.
+ *  - EXECUTION (`sudo -n <cmd>`) succeeds only when the command's own rule is
+ *    NOPASSWD; otherwise "sudo: a password is required" (exit 1).
+ * Rules match on the command WORD (`node`, `true`) — all the probe and the
+ * installer pass. Returns the PATH to restore.
+ */
+function installSudoPolicyStub(dir: string, rules: SudoPolicyRule[]): string {
+  const policy = join(dir, 'sudoers');
+  const body = `policy=${JSON.stringify(policy)}
+list=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n) shift ;;
+    -l) list=1; shift ;;
+    *) break ;;
+  esac
+done
+cmd="$1"
+if [ "$list" = 1 ]; then
+  grep -q '^NOPASSWD:' "$policy" || { echo 'sudo: a password is required' >&2; exit 1; }
+  matched=$(grep " $cmd\$" "$policy")
+  if [ -z "$matched" ]; then
+    echo "Sorry, user tester may not run $cmd on this host." >&2
+    exit 1
+  fi
+  echo "$matched"
+  exit 0
+fi
+grep -q "^NOPASSWD: $cmd\$" "$policy" || { echo 'sudo: a password is required' >&2; exit 1; }
+`;
+  // installSudoStub wipes `dir` first — the policy file must be written after.
+  const previousPath = installSudoStub(dir, body);
+  writeFileSync(policy, `${rules.map((r) => `${r.tag}: ${r.command}`).join('\n')}\n`, 'utf8');
+  return previousPath;
+}
 
 /** A sudo that demands a password — what `sudo -n` must surface as a LOUD failure. */
 const SUDO_DEMANDS_PASSWORD = `echo 'sudo: a password is required' >&2\nexit 1`;
@@ -616,15 +662,110 @@ test('probeElevation: asks the POLICY about the ACTUAL install command (sudo -n 
   }
 });
 
-test('probeElevation: a passwordless-`true`-only rule does NOT clear the real install command', () => {
-  const dir = join(TMP, 'sudo-true-only');
-  const previousPath = installSudoStub(dir, SUDO_TRUE_ONLY);
+test('probeElevation: NOPASSWD true + PASSWD node — the install is LISTED, yet NOT elevated', () => {
+  // The dangerous middle: `true` is passwordless, the install command is IN
+  // the policy but PASSWORD-tagged. Under the default listpw=any the listing
+  // succeeds without a password — `sudo -n -l node …` exits 0 — so an
+  // exit-status-only probe cleared the install and ran into the password
+  // demand mid-install. The tag on the listed rule is the real answer: none
+  // here.
+  const dir = join(TMP, 'sudo-mixed-policy');
+  const previousPath = installSudoPolicyStub(dir, [
+    { tag: 'NOPASSWD', command: 'true' },
+    { tag: 'PASSWD', command: 'node' },
+  ]);
   try {
-    // The rule really covers `true`…
     expect(asNonRoot(() => probeElevation('true'))).toBe(true);
-    // …and yet the command the installer runs is refused: no probe pass that
-    // would let install-deps prompt mid-install.
     expect(asNonRoot(() => probeElevation(INSTALL_DEPS_COMMAND))).toBe(false);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('probeElevation: a command OUTSIDE the policy is refused even under listpw=any', () => {
+  const dir = join(TMP, 'sudo-unlisted');
+  const previousPath = installSudoPolicyStub(dir, [{ tag: 'NOPASSWD', command: 'true' }]);
+  try {
+    // Listing is free under listpw=any, but nothing lists for this command:
+    // "Sorry, user … may not run" → exit 1 → no elevation.
+    expect(asNonRoot(() => probeElevation(INSTALL_DEPS_COMMAND))).toBe(false);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('probeElevation: with NO NOPASSWD rule anywhere, even the LISTING needs a password', () => {
+  const dir = join(TMP, 'sudo-listpw-needs-password');
+  const previousPath = installSudoPolicyStub(dir, [{ tag: 'PASSWD', command: 'node' }]);
+  try {
+    // `-n` cannot answer the list either — exit 1. The check answers with its
+    // blocked diagnostic, never a doomed install attempt.
+    expect(asNonRoot(() => probeElevation(INSTALL_DEPS_COMMAND))).toBe(false);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('probeElevation: a NOPASSWD rule for the ACTUAL install command clears it', () => {
+  const dir = join(TMP, 'sudo-nopasswd-node');
+  const previousPath = installSudoPolicyStub(dir, [{ tag: 'NOPASSWD', command: 'node' }]);
+  try {
+    expect(asNonRoot(() => probeElevation(INSTALL_DEPS_COMMAND))).toBe(true);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runInstaller: the same mixed policy fails the install LOUD — probe and installer agree', () => {
+  const dir = join(TMP, 'sudo-mixed-install');
+  const previousPath = installSudoPolicyStub(dir, [
+    { tag: 'NOPASSWD', command: 'true' },
+    { tag: 'PASSWD', command: 'node' },
+  ]);
+  try {
+    // The listing said PASSWD, the run says a password is required — same
+    // policy, two permissions. `sudo -n` fails instantly, never prompting.
+    expect(() => asNonRoot(() => runInstaller(INSTALL_DEPS_COMMAND))).toThrow(
+      'Command failed: sudo -n node node_modules/playwright-core/cli.js install-deps chromium',
+    );
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkChromiumLibs: the mixed policy BLOCKS with the diagnostic, never a doomed install', () => {
+  // End-to-end over the REAL probe + installer (only sudo/ldd are stubbed):
+  // the probe refuses the mixed policy, so the failure is the blocked
+  // diagnostic naming the libs and the fix — not the "remediation failed" of
+  // an install attempted and bounced off the same password demand.
+  const dir = join(TMP, 'sudo-mixed-check');
+  const previousPath = installSudoPolicyStub(dir, [
+    { tag: 'NOPASSWD', command: 'true' },
+    { tag: 'PASSWD', command: 'node' },
+  ]);
+  try {
+    let thrown: unknown;
+    try {
+      asNonRoot(() =>
+        checkChromiumLibs(dir, {
+          locateBinary: () => BINARY,
+          ldd: () => LDD_WITH_MISSING,
+        }),
+      );
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(ChromiumLibsMissingError);
+    const message = thrown instanceof Error ? thrown.message : String(thrown);
+    expect(message.startsWith(MISSING_LIBS_MARKER)).toBe(true);
+    expect(message).toContain('libX.so');
+    expect(message).toContain(INSTALL_DEPS_COMMAND);
+    expect(message).not.toContain('remediation failed');
   } finally {
     process.env.PATH = previousPath;
     rmSync(dir, { recursive: true, force: true });

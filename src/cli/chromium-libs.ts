@@ -29,12 +29,16 @@
  * through `sudo -- sh -c ...` and PROMPTS for a password when sudo wants one,
  * which would hang a CI/setup run forever. So noninteractivity is enforced on
  * the invocation itself — the installer runs under `sudo -n` (never a bare
- * sudo; as root, without sudo at all), and the probe asks the POLICY
- * (`sudo -n -l <command>`) whether that exact command may run passwordlessly.
- * A sudoers rule permitting passwordless `true` while `sh` needs a password
- * therefore fails here, loud, instead of passing a generic probe and prompting
- * mid-install. Without elevation the check fails with the diagnostic instead
- * of attempting an install that would block on a prompt.
+ * sudo; as root, without sudo at all), and the probe reads the POLICY
+ * (`sudo -n -l <command>`) for that exact argv. Exit 0 alone is only the
+ * LISTING answer: under sudo's default `listpw=any` a password-required
+ * command is listed without a password whenever the user holds ANY NOPASSWD
+ * rule — so elevation additionally requires the `NOPASSWD` tag on the listed
+ * spec. A sudoers rule permitting passwordless `true` while the install
+ * command itself needs a password therefore fails here, loud, instead of
+ * passing a probe and hitting the password demand mid-install. Without
+ * elevation the check fails with the diagnostic instead of attempting an
+ * install that would block on a prompt.
  *
  * A failing install stays a failure. `install-deps` is allowed to fix the
  * machine; it is never allowed to make a broken machine look healthy.
@@ -357,23 +361,37 @@ function isRoot(): boolean {
 }
 
 /**
- * Default elevation probe: COMMAND-SCOPED — `sudo -n -l <command…>` asks the
- * policy whether THIS exact command may run passwordlessly, without running it
- * and never prompting. The old `sudo -n true` probe could be fooled by a
- * sudoers rule permitting passwordless `true` (or any single unrelated binary)
- * while the real install still needed a password — then install-deps' inner
- * `sudo -- sh -c …` would prompt and hang the run. `-l` cannot be fooled: it
- * checks the very argv the installer will run. uid 0 counts as elevated (no
- * sudo needed at all).
+ * Default elevation probe: COMMAND-SCOPED, reading BOTH permissions sudo
+ * keeps separate. `sudo -n -l <command…>` lists the policy for THIS exact
+ * argv — no execution, no prompt — but its exit status is only the LISTING
+ * answer: under sudo's default `listpw=any`, listing a command that would
+ * demand a password succeeds without one as soon as the user holds ANY
+ * NOPASSWD rule (a passwordless `true` is enough). The EXECUTION answer is
+ * in the listing itself: the matched spec carries the `NOPASSWD` tag exactly
+ * when `sudo -n <command…>` can succeed. So elevation requires both — exit 0
+ * AND `NOPASSWD` in the listing, with the locale pinned to C so the tag's
+ * spelling is stable. An exit-status-only read cleared the install under
+ * exactly that mixed rule set, and the password demand then hit mid-install;
+ * the older `sudo -n true` probe was fooled even earlier — by any passwordless
+ * unrelated binary. uid 0 counts as elevated (no sudo needed at all).
  */
 export const probeElevation: ElevationProbe = (command) => {
   if (isRoot()) return true;
   const parsed = splitCommand(command);
   if (!parsed) return false;
   try {
-    execFileSync('sudo', ['-n', '-l', parsed.bin, ...parsed.args], { stdio: 'ignore' });
-    return true;
+    const listing = execFileSync('sudo', ['-n', '-l', parsed.bin, ...parsed.args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // The prose around the rules is localized; the tag is sudoers syntax.
+      // Pin the locale anyway, so the token matched below is never translated.
+      env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+    });
+    return /\bNOPASSWD\b/.test(listing);
   } catch {
+    // Non-zero: the command is unlisted ("Sorry, user … may not run …"), or
+    // even the LISTING needed a password (no NOPASSWD rule anywhere, per the
+    // default `listpw=any`). Neither is passwordless elevation.
     return false;
   }
 };
