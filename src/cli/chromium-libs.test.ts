@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ChromiumLibsMissingError } from '../errors.js';
@@ -543,18 +544,19 @@ test('checkChromiumLibs: the REAL ldd runner reports the missing library', () =>
   }
 });
 
-// --- the REAL elevation probe and installer ------------------------------
+// --- the elevation probe and installer -----------------------------------
 //
 // `sudo` is stubbed on PATH (the same trick the real-`ldd` tests above use),
 // so these drive the REAL `probeElevation`/`runInstaller` against a policy
-// that can be shaped per test. The stub models BOTH permissions real sudo
-// keeps separate: LISTING (`-l`, gated by `listpw` — its default `any` needs
-// no password while the user holds ANY NOPASSWD rule) and EXECUTION (the
-// command's own NOPASSWD tag). A stub that rejected the `-l` call for the
-// install command modeled a host where that command is not in the policy at
-// all — the dangerous middle (listed but PASSWD-tagged, listable precisely
-// because `true` is NOPASSWD) is what an exit-status-only probe cleared
-// before install-deps' inner `sudo -- sh -c …` prompted and hung the run.
+// that can be shaped per test. The stub prints the LONG-form entries real
+// sudo (1.9.15p5) prints for `sudo -n -ll <command>` — captured verbatim from
+// a scratch user holding one NOPASSWD and one PASSWD rule, NOT invented. The
+// capture discipline is the point: the stub this section replaced modeled the
+// SHORT `sudo -l <command>` listing as carrying a `(ALL) NOPASSWD: ALL` tag —
+// output real sudo never prints (the short listing is just the resolved path
+// and arguments, tagless) — so a probe parsed against it rejected every
+// passwordless host. The real-sudo regressions at the bottom pin the format
+// against the host's OWN sudo.
 
 /**
  * Put a stub `sudo` first on PATH. `body` is the shell body; `$@` is argv.
@@ -586,22 +588,40 @@ function asNonRoot<T>(fn: () => T): T {
 }
 
 /**
- * Record the argv it was called with AND print a NOPASSWD-tagged listing —
- * the probe reads the tag (the execution answer), not just the exit status.
+ * Record the argv it was called with AND print a long-form entry carrying the
+ * `!authenticate` render of a NOPASSWD tag — the probe reads the tag (the
+ * execution answer), not just the exit status.
  */
 const SUDO_ARGV_RECORD = (record: string) =>
-  `printf '%s\\n' "$@" >> ${JSON.stringify(record)}\necho '(ALL) NOPASSWD: ALL'\nexit 0`;
+  `printf '%s\\n' "$@" >> ${JSON.stringify(record)}\necho '    Options: !authenticate'\nexit 0`;
 
 /** One sudoers rule, as the policy stub models it: a tag plus a command word. */
 type SudoPolicyRule = { tag: 'NOPASSWD' | 'PASSWD'; command: string };
 
 /**
+ * The long-form entry real sudo prints for a MATCHED command — verbatim shape
+ * of the real-sudo captures, with the authentication tag rendered as an
+ * option: `!authenticate` (NOPASSWD) or `authenticate` (PASSWD).
+ */
+function longEntry(rule: SudoPolicyRule): string {
+  return [
+    'Sudoers entry: /etc/sudoers.d/dz-test-policy',
+    '    RunAsUsers: ALL',
+    `    Options: ${rule.tag === 'NOPASSWD' ? '!authenticate' : 'authenticate'}`,
+    '    Commands:',
+    `\t${rule.command}`,
+    `    Matched: ${rule.command}`,
+  ].join('\n');
+}
+
+/**
  * Install a sudo stub + sudoers policy modeling the two permissions real sudo
  * keeps separate, under its DEFAULT `listpw=any`:
- *  - LISTING (`sudo -n -l <cmd>`) runs without a password iff the policy holds
- *    ANY NOPASSWD rule; it prints the matching rules with their tags, or
- *    "Sorry, user … may not run" (exit 1) for an unlisted command. With no
- *    NOPASSWD rule anywhere, listing itself needs a password and `-n` fails.
+ *  - LISTING (`sudo -n -ll <cmd>`) runs without a password iff the policy
+ *    holds ANY NOPASSWD rule; it prints the matched entry with its tag
+ *    rendered as an option (`!authenticate` / `authenticate`), or "Sorry,
+ *    user … may not run" (exit 1) for an unlisted command. With no NOPASSWD
+ *    rule anywhere, listing itself needs a password and `-n` fails.
  *  - EXECUTION (`sudo -n <cmd>`) succeeds only when the command's own rule is
  *    NOPASSWD; otherwise "sudo: a password is required" (exit 1).
  * Rules match on the command WORD (`node`, `true`) — all the probe and the
@@ -609,38 +629,41 @@ type SudoPolicyRule = { tag: 'NOPASSWD' | 'PASSWD'; command: string };
  */
 function installSudoPolicyStub(dir: string, rules: SudoPolicyRule[]): string {
   const policy = join(dir, 'sudoers');
-  const body = `policy=${JSON.stringify(policy)}
-list=0
+  const body = `dir=${JSON.stringify(dir)}
+listed=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -n) shift ;;
-    -l) list=1; shift ;;
+    -ll) listed=1; shift ;;
     *) break ;;
   esac
 done
 cmd="$1"
-if [ "$list" = 1 ]; then
-  grep -q '^NOPASSWD:' "$policy" || { echo 'sudo: a password is required' >&2; exit 1; }
-  matched=$(grep " $cmd\$" "$policy")
-  if [ -z "$matched" ]; then
+if [ "$listed" = 1 ]; then
+  grep -q '^NOPASSWD:' "$dir/sudoers" || { echo 'sudo: a password is required' >&2; exit 1; }
+  entry="$dir/entry-$cmd"
+  if [ ! -f "$entry" ]; then
     echo "Sorry, user tester may not run $cmd on this host." >&2
     exit 1
   fi
-  echo "$matched"
+  cat "$entry"
   exit 0
 fi
-grep -q "^NOPASSWD: $cmd\$" "$policy" || { echo 'sudo: a password is required' >&2; exit 1; }
+grep -q "^NOPASSWD: $cmd\\$" "$dir/sudoers" || { echo 'sudo: a password is required' >&2; exit 1; }
 `;
-  // installSudoStub wipes `dir` first — the policy file must be written after.
+  // installSudoStub wipes `dir` first — policy and entries are written after.
   const previousPath = installSudoStub(dir, body);
   writeFileSync(policy, `${rules.map((r) => `${r.tag}: ${r.command}`).join('\n')}\n`, 'utf8');
+  for (const rule of rules) {
+    writeFileSync(join(dir, `entry-${rule.command}`), `${longEntry(rule)}\n`, 'utf8');
+  }
   return previousPath;
 }
 
 /** A sudo that demands a password — what `sudo -n` must surface as a LOUD failure. */
 const SUDO_DEMANDS_PASSWORD = `echo 'sudo: a password is required' >&2\nexit 1`;
 
-test('probeElevation: asks the POLICY about the ACTUAL install command (sudo -n -l <argv>)', () => {
+test('probeElevation: queries the LONG policy listing for the ACTUAL install command (sudo -n -ll <argv>)', () => {
   const dir = join(TMP, 'sudo-probe');
   const record = join(dir, 'argv.txt');
   const previousPath = installSudoStub(dir, SUDO_ARGV_RECORD(record));
@@ -650,7 +673,7 @@ test('probeElevation: asks the POLICY about the ACTUAL install command (sudo -n 
     // "sudo works" probe is what let a passwordless-`true` sudoers rule pass.
     expect(readFileSync(record, 'utf8').split('\n').filter(Boolean)).toEqual([
       '-n',
-      '-l',
+      '-ll',
       'node',
       'node_modules/playwright-core/cli.js',
       'install-deps',
@@ -665,10 +688,11 @@ test('probeElevation: asks the POLICY about the ACTUAL install command (sudo -n 
 test('probeElevation: NOPASSWD true + PASSWD node — the install is LISTED, yet NOT elevated', () => {
   // The dangerous middle: `true` is passwordless, the install command is IN
   // the policy but PASSWORD-tagged. Under the default listpw=any the listing
-  // succeeds without a password — `sudo -n -l node …` exits 0 — so an
+  // succeeds without a password — `sudo -n -ll node …` exits 0 — so an
   // exit-status-only probe cleared the install and ran into the password
-  // demand mid-install. The tag on the listed rule is the real answer: none
-  // here.
+  // demand mid-install. The matched entry's tag is the real answer: real sudo
+  // renders it `authenticate` (vs `!authenticate` for NOPASSWD), so the probe
+  // reads not-elevated.
   const dir = join(TMP, 'sudo-mixed-policy');
   const previousPath = installSudoPolicyStub(dir, [
     { tag: 'NOPASSWD', command: 'true' },
@@ -806,4 +830,101 @@ test('runInstaller: a sudo that wants a password fails LOUD instead of prompting
     process.env.PATH = previousPath;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- REAL-sudo regressions (nothing stubbed) ------------------------------
+//
+// The stubs above model what we BELIEVE sudo prints — and the bug this file
+// once shipped was exactly a stub inventing format: it printed a
+// NOPASSWD-tagged listing for `sudo -l <command>`, which real sudo never does
+// (the short listing is just the resolved path and arguments). These tests
+// drive the host's OWN sudo and the REAL probeElevation, so the ground truth
+// is sudo's own output. They skip where the host offers none (no sudo binary,
+// running as root — the probe short-circuits — or a policy that cannot
+// establish the ground truth without executing something) and are assertive
+// everywhere else: GitHub Actions runners and typical dev boxes hold
+// `NOPASSWD: ALL`, so they fire in CI.
+
+/** The absolute path of the real `sudo`, or null when the host has none. */
+function findRealSudo(): string | null {
+  for (const dir of (process.env.PATH ?? '').split(':')) {
+    if (!dir) continue;
+    const candidate = join(dir, 'sudo');
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      return candidate;
+    } catch {
+      // Not here — keep looking.
+    }
+  }
+  return null;
+}
+
+/**
+ * Skip guard for the real-sudo tests: the real sudo, or null when the probe's
+ * sudo path cannot be exercised here (no sudo, or running as root — uid 0
+ * short-circuits the probe before any policy is read).
+ */
+function realSudoOrSkip(): string | null {
+  const sudo = findRealSudo();
+  if (!sudo) return null;
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return null;
+  return sudo;
+}
+
+/**
+ * Can this non-root user sudo EVERYTHING without a password? Read from sudo's
+ * own FULL listing — the one format whose NOPASSWD tags are real: it renders
+ * every privilege with its tag, so `NOPASSWD: ALL` there is ground truth
+ * without executing anything.
+ */
+function hostIsPasswordlessAll(realSudo: string): boolean {
+  try {
+    const listing = execFileSync(realSudo, ['-n', '-l'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return listing.includes('NOPASSWD: ALL');
+  } catch {
+    return false;
+  }
+}
+
+/** A command real sudo can always resolve and list (and, for `-n`, never runs). */
+const PROBE_BINARY = '/bin/true';
+
+test('REAL sudo: a passwordless host is RECOGNIZED — the probe answers true', () => {
+  const sudo = realSudoOrSkip();
+  if (!sudo || !hostIsPasswordlessAll(sudo)) return;
+  // The OLD probe read the tag from the short `sudo -l <command>` listing,
+  // which carries none: on this very host it answered false and rejected
+  // passwordless remediation. Nothing is stubbed here — the host policy is
+  // the oracle, and on a NOPASSWD: ALL host the answer must be true.
+  expect(asNonRoot(() => probeElevation(PROBE_BINARY))).toBe(true);
+});
+
+test('REAL sudo: the short listing is TAGLESS — the format fact the probe depends on', () => {
+  const sudo = realSudoOrSkip();
+  if (!sudo) return;
+  let short: string;
+  try {
+    short = execFileSync(sudo, ['-n', '-l', PROBE_BINARY], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch {
+    return; // This host does not list the probe binary — no format to pin.
+  }
+  // Real sudo prints the resolved command and NO tag — a probe reading
+  // `NOPASSWD` out of this listing reads nothing. If a sudo ever starts
+  // tagging the short listing, this fires and the probe can be re-tightened.
+  expect(short).not.toContain('NOPASSWD');
+  // The long listing for the same command DOES carry the execution answer:
+  // on a passwordless host it renders the NOPASSWD tag as `!authenticate`.
+  if (!hostIsPasswordlessAll(sudo)) return;
+  const long = execFileSync(sudo, ['-n', '-ll', PROBE_BINARY], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  expect(long).toContain('!authenticate');
 });

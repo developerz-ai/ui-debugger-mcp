@@ -29,16 +29,20 @@
  * through `sudo -- sh -c ...` and PROMPTS for a password when sudo wants one,
  * which would hang a CI/setup run forever. So noninteractivity is enforced on
  * the invocation itself — the installer runs under `sudo -n` (never a bare
- * sudo; as root, without sudo at all), and the probe reads the POLICY
- * (`sudo -n -l <command>`) for that exact argv. Exit 0 alone is only the
- * LISTING answer: under sudo's default `listpw=any` a password-required
- * command is listed without a password whenever the user holds ANY NOPASSWD
- * rule — so elevation additionally requires the `NOPASSWD` tag on the listed
- * spec. A sudoers rule permitting passwordless `true` while the install
- * command itself needs a password therefore fails here, loud, instead of
- * passing a probe and hitting the password demand mid-install. Without
- * elevation the check fails with the diagnostic instead of attempting an
- * install that would block on a prompt.
+ * sudo; as root, without sudo at all), and the probe reads the POLICY for
+ * that exact argv via `sudo -n -ll <command…>` — the long listing, the only
+ * COMMAND-SCOPED query whose output carries the authentication tag (the short
+ * `sudo -l <command…>` prints just the fully-qualified path and arguments,
+ * with no tag at all). Exit 0 alone is only the LISTING answer: under sudo's
+ * default `listpw=any` a password-required command is listed without a
+ * password whenever the user holds ANY NOPASSWD rule — so elevation
+ * additionally requires the matched entry to render the NOPASSWD tag, which
+ * the long form spells `!authenticate` (`authenticate` there = PASSWD). A
+ * sudoers rule permitting passwordless `true` while the install command
+ * itself needs a password therefore fails here, loud, instead of passing a
+ * probe and hitting the password demand mid-install. Without elevation the
+ * check fails with the diagnostic instead of attempting an install that
+ * would block on a prompt.
  *
  * A failing install stays a failure. `install-deps` is allowed to fix the
  * machine; it is never allowed to make a broken machine look healthy.
@@ -362,32 +366,54 @@ function isRoot(): boolean {
 
 /**
  * Default elevation probe: COMMAND-SCOPED, reading BOTH permissions sudo
- * keeps separate. `sudo -n -l <command…>` lists the policy for THIS exact
- * argv — no execution, no prompt — but its exit status is only the LISTING
- * answer: under sudo's default `listpw=any`, listing a command that would
- * demand a password succeeds without one as soon as the user holds ANY
- * NOPASSWD rule (a passwordless `true` is enough). The EXECUTION answer is
- * in the listing itself: the matched spec carries the `NOPASSWD` tag exactly
- * when `sudo -n <command…>` can succeed. So elevation requires both — exit 0
- * AND `NOPASSWD` in the listing, with the locale pinned to C so the tag's
- * spelling is stable. An exit-status-only read cleared the install under
- * exactly that mixed rule set, and the password demand then hit mid-install;
- * the older `sudo -n true` probe was fooled even earlier — by any passwordless
- * unrelated binary. uid 0 counts as elevated (no sudo needed at all).
+ * keeps separate — via the LONG listing (`sudo -n -ll <command…>`), the only
+ * command-scoped query whose output carries the authentication tag.
+ *
+ * The short listing (`sudo -l <command…>`) does NOT: real sudo (verified
+ * against 1.9.15p5; pinned by the real-sudo regressions in
+ * `chromium-libs.test.ts`) prints just the fully-qualified path and arguments
+ * for a permitted command — no `NOPASSWD` token, whether the matched rule is
+ * NOPASSWD or PASSWD — so a tag read over the short listing rejects every
+ * passwordless host.
+ *
+ * `-ll` on a listed command prints the matched sudoers entry, rendering the
+ * tag as an option:
+ *
+ *     Sudoers entry: /etc/sudoers.d/ci
+ *         RunAsUsers: ALL
+ *         Options: !authenticate        <- the NOPASSWD tag ...
+ *         Commands:
+ *             /bin/true
+ *         Matched: /bin/true
+ *
+ * ... and `Options: authenticate` when the matched rule is PASSWD-tagged —
+ * the dangerous middle that motivated command-scoping in the first place:
+ * under sudo's default `listpw=any` the listing succeeds without a password
+ * as soon as the user holds ANY NOPASSWD rule, so a passwordless `true`
+ * lists a password-required install command. Exit 0 alone is therefore only
+ * the LISTING answer; the EXECUTION answer is the tag on the matched entry,
+ * read with the locale pinned to C so the rendering is stable. An exit-1 run
+ * — unlisted ("Sorry, user … may not run …"), unresolvable, or a listing
+ * that itself needed a password (no NOPASSWD rule anywhere) — is not
+ * passwordless elevation. uid 0 counts as elevated (no sudo needed at all).
+ * An old sudo whose `-ll <command…>` disagrees degrades to `false`: the
+ * blocked diagnostic, never a doomed install.
  */
 export const probeElevation: ElevationProbe = (command) => {
   if (isRoot()) return true;
   const parsed = splitCommand(command);
   if (!parsed) return false;
   try {
-    const listing = execFileSync('sudo', ['-n', '-l', parsed.bin, ...parsed.args], {
+    const listing = execFileSync('sudo', ['-n', '-ll', parsed.bin, ...parsed.args], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
-      // The prose around the rules is localized; the tag is sudoers syntax.
+      // The long-form labels are localized; `!authenticate` is the tag render.
       // Pin the locale anyway, so the token matched below is never translated.
       env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
     });
-    return /\bNOPASSWD\b/.test(listing);
+    // Exit 0 = the command is LISTED. `!authenticate` in the matched entry is
+    // exactly when `sudo -n <command…>` can succeed without a password.
+    return listing.includes('!authenticate');
   } catch {
     // Non-zero: the command is unlisted ("Sorry, user … may not run …"), or
     // even the LISTING needed a password (no NOPASSWD rule anywhere, per the
