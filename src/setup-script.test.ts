@@ -51,6 +51,37 @@ test('the launch verification is still the final gate', () => {
   expect(readyLine).toBeGreaterThan(launchLine);
 });
 
+test("the launch invocation propagates failure — it can't be made to swallow one", () => {
+  // `|| true` (or a `&&` chain) appended to the launch command would let setup
+  // succeed after a failed launch while every ordering assertion still passes.
+  // The invocation spans several lines (`bun -e '…'` with an embedded script),
+  // so EVERY code line between the launch echo and the ready message is
+  // checked — not just the first.
+  const launchLine = codeLineOf('verify chromium launches');
+  const readyLine = codeLineOf('==> ready.');
+  expect(launchLine).toBeGreaterThan(0);
+  expect(readyLine).toBeGreaterThan(launchLine);
+
+  const invocationLines = codeLines.filter(
+    (entry) => entry.line > launchLine && entry.line < readyLine,
+  );
+  expect(invocationLines.length).toBeGreaterThan(0);
+  for (const entry of invocationLines) {
+    expect(entry.text).not.toContain('||');
+    expect(entry.text).not.toContain('&&');
+  }
+});
+
+test('the launch payload itself exits non-zero when the launch throws', () => {
+  // The in-script `.catch` handler is what turns a failed launch into a
+  // non-zero exit — without it an unhandled rejection could be absorbed by an
+  // outer runner. Together with `set -e` (asserted above) and the no-`||`
+  // rule, a failed launch cannot reach the ready message.
+  expect(codeLineOf("bun -e '(async () => {")).toBeGreaterThan(0);
+  expect(codeLineOf('.catch((err) =>')).toBeGreaterThan(0);
+  expect(codeLineOf('process.exit(1)')).toBeGreaterThan(0);
+});
+
 test('the library check is actually invoked, not merely mentioned', () => {
   // The invocation is a CODE line — a comment naming the module does not count.
   expect(codeLineOf('bun src/cli/chromium-libs.ts "$CACHE_DIR"')).toBeGreaterThan(0);

@@ -9,7 +9,10 @@ import {
   locateHeadlessShell,
   MISSING_LIBS_MARKER,
   parseMissingLibs,
+  probeElevation,
+  readPinnedHeadlessShellRevision,
   remediationPlan,
+  runInstaller,
   runLdd,
 } from './chromium-libs.js';
 
@@ -219,6 +222,61 @@ test('a missing headless-shell binary fails loudly instead of reporting missing 
   expect(message).toContain('/cache');
 });
 
+test('checkChromiumLibs: the PINNED revision drives which binary is inspected', () => {
+  const located = { revision: 'unset' as number | null | undefined | 'unset' };
+  const result = checkChromiumLibs('/cache', {
+    pinnedRevision: () => 1228,
+    locateBinary: (_cacheDir, revision) => {
+      located.revision = revision;
+      return BINARY;
+    },
+    ldd: () => LDD_CLEAN,
+    probeElevation: () => false,
+  });
+  expect(result.ok).toBe(true);
+  expect(located.revision).toBe(1228);
+});
+
+test('checkChromiumLibs: an absent PINNED revision fails loud naming it — never a foreign pass', () => {
+  // Even a locator that would happily return a newer revision's binary must
+  // not be consulted into a false healthy: null for the pinned revision is
+  // the answer, with the revision named.
+  let thrown: unknown;
+  try {
+    checkChromiumLibs('/cache', {
+      pinnedRevision: () => 1228,
+      locateBinary: (_cacheDir, revision) => (revision === 9999 ? '/cache/rev-9999/shell' : null),
+      ldd: () => LDD_CLEAN,
+      probeElevation: () => false,
+    });
+  } catch (err) {
+    thrown = err;
+  }
+  expect(thrown).toBeInstanceOf(ChromiumLibsMissingError);
+  const message = thrown instanceof Error ? thrown.message : String(thrown);
+  expect(message).toContain('revision 1228');
+  expect(message).toContain('/cache');
+});
+
+test('checkChromiumLibs: the elevation probe is asked about the ACTUAL install command', () => {
+  const asked = { command: null as string | null };
+  let thrown: unknown;
+  try {
+    checkChromiumLibs('/cache', {
+      locateBinary: () => BINARY,
+      ldd: () => LDD_WITH_MISSING,
+      probeElevation: (command) => {
+        asked.command = command;
+        return false;
+      },
+    });
+  } catch (err) {
+    thrown = err;
+  }
+  expect(thrown).toBeInstanceOf(ChromiumLibsMissingError);
+  expect(asked.command).toBe(INSTALL_DEPS_COMMAND);
+});
+
 // --- locating the headless shell in the Playwright cache ----------------
 
 /** Create a fake cache dir with a headless shell at `rel`. */
@@ -246,7 +304,30 @@ test('locateHeadlessShell: finds the linux-arm64 layout', () => {
   rmSync(TMP, { recursive: true, force: true });
 });
 
-test('locateHeadlessShell: picks the HIGHEST revision, not the lexically first', () => {
+test('locateHeadlessShell: the PINNED revision wins when the cache holds both 1228 and 9999', () => {
+  // The launch uses the revision playwright-core pins — checking the newer
+  // 9999 binary instead would answer the wrong question in both directions.
+  rmSync(TMP, { recursive: true, force: true });
+  const expected = makeCache(
+    'chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell',
+  );
+  makeCache('chromium_headless_shell-9999/chrome-headless-shell-linux64/chrome-headless-shell');
+  expect(locateHeadlessShell(join(TMP, 'cache'), 1228)).toBe(expected);
+  rmSync(TMP, { recursive: true, force: true });
+});
+
+test('locateHeadlessShell: an ABSENT pinned revision yields null — never a foreign binary', () => {
+  // A newer revision on disk must not stand in for the pinned one: the launch
+  // would fail too, so "healthy" off the foreign binary is a false answer.
+  rmSync(TMP, { recursive: true, force: true });
+  makeCache('chromium_headless_shell-9999/chrome-headless-shell-linux64/chrome-headless-shell');
+  expect(locateHeadlessShell(join(TMP, 'cache'), 1228)).toBeNull();
+  rmSync(TMP, { recursive: true, force: true });
+});
+
+test('locateHeadlessShell: with NO pinned revision, the scan falls back to the HIGHEST revision', () => {
+  // Fallback for an unreadable manifest; the numeric sort still beats the
+  // lexical one that would put "9999" before "1228".
   rmSync(TMP, { recursive: true, force: true });
   makeCache('chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell');
   const expected = makeCache(
@@ -258,6 +339,64 @@ test('locateHeadlessShell: picks the HIGHEST revision, not the lexically first',
 
 test('locateHeadlessShell: an absent cache dir yields null, not a wrong answer', () => {
   expect(locateHeadlessShell(join(TMP, 'no-such-cache'))).toBeNull();
+});
+
+// --- the pinned revision from playwright-core's manifest -----------------
+
+test('readPinnedHeadlessShellRevision: parses the headless-shell entry', () => {
+  const manifest = join(TMP, 'browsers.json');
+  rmSync(TMP, { recursive: true, force: true });
+  mkdirSync(TMP, { recursive: true });
+  writeFileSync(
+    manifest,
+    JSON.stringify({
+      comment: '...',
+      browsers: [
+        { name: 'chromium', revision: '1228' },
+        { name: 'chromium-headless-shell', revision: '1228' },
+      ],
+    }),
+    'utf8',
+  );
+  expect(readPinnedHeadlessShellRevision(manifest)).toBe(1228);
+  rmSync(TMP, { recursive: true, force: true });
+});
+
+test('readPinnedHeadlessShellRevision: falls back to the chromium entry on older manifests', () => {
+  const manifest = join(TMP, 'browsers-old.json');
+  rmSync(TMP, { recursive: true, force: true });
+  mkdirSync(TMP, { recursive: true });
+  writeFileSync(
+    manifest,
+    JSON.stringify({ browsers: [{ name: 'chromium', revision: '1148' }] }),
+    'utf8',
+  );
+  expect(readPinnedHeadlessShellRevision(manifest)).toBe(1148);
+  rmSync(TMP, { recursive: true, force: true });
+});
+
+test('readPinnedHeadlessShellRevision: an unreadable or invalid manifest yields null, not a guess', () => {
+  expect(readPinnedHeadlessShellRevision(join(TMP, 'no-such-browsers.json'))).toBeNull();
+  const manifest = join(TMP, 'browsers-broken.json');
+  rmSync(TMP, { recursive: true, force: true });
+  mkdirSync(TMP, { recursive: true });
+  writeFileSync(manifest, '{not json', 'utf8');
+  expect(readPinnedHeadlessShellRevision(manifest)).toBeNull();
+  writeFileSync(
+    manifest,
+    JSON.stringify({ browsers: [{ name: 'firefox', revision: '9999' }] }),
+    'utf8',
+  );
+  expect(readPinnedHeadlessShellRevision(manifest)).toBeNull();
+  rmSync(TMP, { recursive: true, force: true });
+});
+
+test('readPinnedHeadlessShellRevision: the INSTALLED playwright-core manifest resolves', () => {
+  // The default path is module-relative — this is the property bin/setup
+  // depends on: the check pins the same revision the launch will use.
+  const revision = readPinnedHeadlessShellRevision();
+  expect(typeof revision).toBe('number');
+  expect(revision ?? Number.NaN).toBeGreaterThan(0);
 });
 
 // --- the REAL ldd runner -------------------------------------------------
@@ -398,6 +537,130 @@ test('checkChromiumLibs: the REAL ldd runner reports the missing library', () =>
     expect(message.startsWith(MISSING_LIBS_MARKER)).toBe(true);
     expect(message).toContain(PATCH_TO);
     expect(message).toContain(INSTALL_DEPS_COMMAND);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- the REAL elevation probe and installer ------------------------------
+//
+// `sudo` is stubbed on PATH (the same trick the real-`ldd` tests above use),
+// so these drive the REAL `probeElevation`/`runInstaller` against a policy
+// that can be shaped per test. The scenario that must never come back: a
+// sudoers rule allowing passwordless `true` while the real install needs a
+// password — the old `sudo -n true` probe passed it and install-deps' inner
+// `sudo -- sh -c …` prompted, hanging the run.
+
+/**
+ * Put a stub `sudo` first on PATH. `body` is the shell body; `$@` is argv.
+ * Returns the PATH to restore.
+ */
+function installSudoStub(dir: string, body: string): string {
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const stub = join(dir, 'sudo');
+  writeFileSync(stub, `#!/bin/sh\n${body}\n`, 'utf8');
+  chmodSync(stub, 0o755);
+  const previous = process.env.PATH ?? '';
+  process.env.PATH = `${dir}:${previous}`;
+  return previous;
+}
+
+/**
+ * Run `fn` with `process.getuid` reporting non-root, so the sudo paths of the
+ * probe and installer are exercised even on a host running the suite as root.
+ */
+function asNonRoot<T>(fn: () => T): T {
+  const real = process.getuid;
+  process.getuid = () => 1000;
+  try {
+    return fn();
+  } finally {
+    process.getuid = real;
+  }
+}
+
+/** A sudoers rule: NOPASSWD for `true` ONLY — everything else needs a password. */
+const SUDO_TRUE_ONLY = `[ "$1" = "-n" ] && shift
+[ "$1" = "-l" ] && shift
+[ "$1" = "true" ] && exit 0
+echo 'sudo: a password is required' >&2
+exit 1`;
+
+const SUDO_ARGV_RECORD = (record: string) =>
+  `printf '%s\\n' "$@" >> ${JSON.stringify(record)}\nexit 0`;
+
+/** A sudo that demands a password — what `sudo -n` must surface as a LOUD failure. */
+const SUDO_DEMANDS_PASSWORD = `echo 'sudo: a password is required' >&2\nexit 1`;
+
+test('probeElevation: asks the POLICY about the ACTUAL install command (sudo -n -l <argv>)', () => {
+  const dir = join(TMP, 'sudo-probe');
+  const record = join(dir, 'argv.txt');
+  const previousPath = installSudoStub(dir, SUDO_ARGV_RECORD(record));
+  try {
+    expect(asNonRoot(() => probeElevation(INSTALL_DEPS_COMMAND))).toBe(true);
+    // The probe must name the exact argv the installer will run — a generic
+    // "sudo works" probe is what let a passwordless-`true` sudoers rule pass.
+    expect(readFileSync(record, 'utf8').split('\n').filter(Boolean)).toEqual([
+      '-n',
+      '-l',
+      'node',
+      'node_modules/playwright-core/cli.js',
+      'install-deps',
+      'chromium',
+    ]);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('probeElevation: a passwordless-`true`-only rule does NOT clear the real install command', () => {
+  const dir = join(TMP, 'sudo-true-only');
+  const previousPath = installSudoStub(dir, SUDO_TRUE_ONLY);
+  try {
+    // The rule really covers `true`…
+    expect(asNonRoot(() => probeElevation('true'))).toBe(true);
+    // …and yet the command the installer runs is refused: no probe pass that
+    // would let install-deps prompt mid-install.
+    expect(asNonRoot(() => probeElevation(INSTALL_DEPS_COMMAND))).toBe(false);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runInstaller: elevates the ACTUAL command under sudo -n, never a bare sudo', () => {
+  const dir = join(TMP, 'sudo-install');
+  const record = join(dir, 'argv.txt');
+  const previousPath = installSudoStub(dir, SUDO_ARGV_RECORD(record));
+  try {
+    asNonRoot(() => runInstaller(INSTALL_DEPS_COMMAND));
+    // Exactly the noninteractive wrapper + the pinned installer argv.
+    expect(readFileSync(record, 'utf8').split('\n').filter(Boolean)).toEqual([
+      '-n',
+      'node',
+      'node_modules/playwright-core/cli.js',
+      'install-deps',
+      'chromium',
+    ]);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runInstaller: a sudo that wants a password fails LOUD instead of prompting', () => {
+  const dir = join(TMP, 'sudo-password');
+  const previousPath = installSudoStub(dir, SUDO_DEMANDS_PASSWORD);
+  try {
+    // `sudo -n` must FAIL here — instantly, non-zero, naming the invocation —
+    // never hang on a prompt. (The stub's message lands on the terminal via
+    // `stdio: 'inherit'`; the thrown error names the failed invocation.)
+    expect(() => asNonRoot(() => runInstaller(INSTALL_DEPS_COMMAND))).toThrow(
+      'Command failed: sudo -n node node_modules/playwright-core/cli.js install-deps chromium',
+    );
   } finally {
     process.env.PATH = previousPath;
     rmSync(dir, { recursive: true, force: true });

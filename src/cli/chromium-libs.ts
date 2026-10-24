@@ -15,13 +15,26 @@
  *    carries a message STARTING WITH `X_CHROMIUM_LIBS_MISSING:` naming every
  *    missing library and the remediation command.
  *
- * Remediation runs only when the libraries are missing AND noninteractive
- * elevation is available: `node node_modules/playwright-core/cli.js install-deps
- * chromium` elevates through `sudo -- sh -c ...` and PROMPTS for a password
- * when sudo wants one, which would hang a CI/setup run forever. So the
- * elevation probe is `sudo -n true` (never a bare `sudo true`), and without it
- * the check fails with the diagnostic instead of attempting an install that
- * would block on a prompt.
+ * The binary checked is the one playwright-core will actually LAUNCH: the
+ * `chromium_headless_shell-<rev>` dir whose revision the installed
+ * playwright-core pins in `node_modules/playwright-core/browsers.json`. A
+ * cache that also holds other revisions (left by earlier playwright versions)
+ * must not be mistaken for the pinned one — a healthy foreign binary says
+ * nothing about the pinned one, and a broken foreign one would block a
+ * healthy pinned browser on unrelated dependencies.
+ *
+ * Remediation runs only when the libraries are missing AND elevation for the
+ * ACTUAL installer command is available noninteractively.
+ * `node node_modules/playwright-core/cli.js install-deps chromium` elevates
+ * through `sudo -- sh -c ...` and PROMPTS for a password when sudo wants one,
+ * which would hang a CI/setup run forever. So noninteractivity is enforced on
+ * the invocation itself — the installer runs under `sudo -n` (never a bare
+ * sudo; as root, without sudo at all), and the probe asks the POLICY
+ * (`sudo -n -l <command>`) whether that exact command may run passwordlessly.
+ * A sudoers rule permitting passwordless `true` while `sh` needs a password
+ * therefore fails here, loud, instead of passing a generic probe and prompting
+ * mid-install. Without elevation the check fails with the diagnostic instead
+ * of attempting an install that would block on a prompt.
  *
  * A failing install stays a failure. `install-deps` is allowed to fix the
  * machine; it is never allowed to make a broken machine look healthy.
@@ -31,7 +44,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ChromiumLibsMissingError } from '../errors.js';
 
@@ -62,6 +75,51 @@ const HEADLESS_SHELL_BINARIES = ['chrome-headless-shell', 'headless_shell'];
 
 /** Subdirectories (relative to the cache dir) the headless shell may live in. */
 const HEADLESS_SHELL_SUBDIRS = ['chrome-headless-shell-linux64', 'chrome-linux', 'chrome-linux64'];
+
+/**
+ * The installed playwright-core's revision manifest — the same one `bin/setup`
+ * reads for the skip-when-cached check. Resolved relative to this module, so
+ * the CLI works from any cwd as long as it runs from this checkout.
+ */
+export const BROWSERS_JSON_PATH = join(
+  import.meta.dirname,
+  '../../node_modules/playwright-core/browsers.json',
+);
+
+/**
+ * Parse the headless-shell revision the installed playwright-core pins — the
+ * revision of the binary a `chromium.launch({ headless: true })` will run.
+ *
+ * Modern manifests name it `chromium-headless-shell`; older ones only name
+ * `chromium` (same revision for both). `null` when the manifest is unreadable,
+ * invalid, or names neither — the caller then falls back to scanning the cache
+ * rather than answering from a guess.
+ */
+export function readPinnedHeadlessShellRevision(
+  manifestPath: string = BROWSERS_JSON_PATH,
+): number | null {
+  let raw: string;
+  try {
+    raw = readFileSync(manifestPath, 'utf8');
+  } catch {
+    return null;
+  }
+  let manifest: { browsers?: Array<{ name?: unknown; revision?: unknown }> };
+  try {
+    manifest = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(manifest.browsers)) return null;
+  const entry =
+    manifest.browsers.find((b) => b.name === 'chromium-headless-shell') ??
+    manifest.browsers.find((b) => b.name === 'chromium');
+  if (!entry || (typeof entry.revision !== 'string' && typeof entry.revision !== 'number')) {
+    return null;
+  }
+  const rev = Number.parseInt(String(entry.revision), 10);
+  return Number.isNaN(rev) ? null : rev;
+}
 
 /**
  * Parse the shared libraries `ldd` could not resolve.
@@ -143,14 +201,22 @@ export function remediationPlan(
 /** Seam: run `ldd` on a binary; returns combined stdout+stderr. */
 export type LddRunner = (binary: string) => string;
 
-/** Seam: is noninteractive elevation available? */
-export type ElevationProbe = () => boolean;
+/**
+ * Seam: is noninteractive elevation available for THIS command? The command is
+ * the one the installer will run — the probe is command-scoped, not a generic
+ * "can I sudo something".
+ */
+export type ElevationProbe = (command: string) => boolean;
 
 /** Seam: run the remediation command; throws on failure. */
 export type Installer = (command: string) => void;
 
-/** Seam: locate the headless shell binary; `null` when absent. */
-export type BinaryLocator = (cacheDir: string) => string | null;
+/**
+ * Seam: locate the headless shell binary; `null` when absent. `pinnedRevision`
+ * is the revision resolved from the installed playwright-core manifest — when
+ * known, ONLY that revision's dir is acceptable (see {@link locateHeadlessShell}).
+ */
+export type BinaryLocator = (cacheDir: string, pinnedRevision?: number | null) => string | null;
 
 /**
  * The revision number of a `chromium_headless_shell-<rev>` dir name, or -1
@@ -163,13 +229,50 @@ function shellRevision(dirName: string): number {
 }
 
 /**
- * Locate the pinned Chromium headless-shell binary inside the Playwright
- * cache dir. Scans the dir for the `chromium_headless_shell-<rev>` folder and
- * the known executable names/subpaths inside it — the layout moves between
- * playwright-core versions, so it is discovered, never hardcoded.
+ * Scan ONE `chromium_headless_shell-<rev>` dir for the executable — the known
+ * names/subpaths first, then a shallow scan of the dir itself: a layout that
+ * changed in an unforeseen way still resolves rather than reporting a missing
+ * binary. `null` when this dir holds no executable we recognize.
  */
-export function locateHeadlessShell(cacheDir: string): string | null {
+function shellBinaryIn(base: string): string | null {
+  for (const sub of HEADLESS_SHELL_SUBDIRS) {
+    for (const bin of HEADLESS_SHELL_BINARIES) {
+      const candidate = join(base, sub, bin);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  for (const bin of HEADLESS_SHELL_BINARIES) {
+    const candidate = join(base, bin);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Locate the PINNED Chromium headless-shell binary inside the Playwright
+ * cache dir — the binary `chromium.launch()` will actually execute.
+ *
+ * With a `pinnedRevision` (from {@link readPinnedHeadlessShellRevision}), ONLY
+ * that revision's `chromium_headless_shell-<rev>` dir is acceptable: a cache
+ * holding a NEWER revision too (left by another playwright version) must not
+ * be checked in its place — the launch uses the pinned one, and a foreign
+ * binary answers the wrong question in both directions. When the pinned dir is
+ * absent the check must fail (launch would fail too), never pass off another
+ * revision's binary.
+ *
+ * Without a pinned revision (manifest unreadable), it falls back to scanning
+ * for the `chromium_headless_shell-<rev>` folder and the known executable
+ * names/subpaths inside it — the layout moves between playwright-core
+ * versions, so it is discovered, never hardcoded.
+ */
+export function locateHeadlessShell(
+  cacheDir: string,
+  pinnedRevision?: number | null,
+): string | null {
   if (!existsSync(cacheDir)) return null;
+  if (pinnedRevision !== undefined && pinnedRevision !== null) {
+    return shellBinaryIn(join(cacheDir, `${HEADLESS_SHELL_DIR_PREFIX}${pinnedRevision}`));
+  }
   let entries: string[];
   try {
     entries = readdirSync(cacheDir);
@@ -182,20 +285,8 @@ export function locateHeadlessShell(cacheDir: string): string | null {
     // put "9999" before "1228" (the pinned revision is the older one here).
     .sort((a, b) => shellRevision(b) - shellRevision(a));
   for (const dir of shellDirs) {
-    const base = join(cacheDir, dir);
-    for (const sub of HEADLESS_SHELL_SUBDIRS) {
-      for (const bin of HEADLESS_SHELL_BINARIES) {
-        const candidate = join(base, sub, bin);
-        if (existsSync(candidate)) return candidate;
-      }
-    }
-    // Fall back to a shallow scan of the shell dir itself: a layout that
-    // changed in an unforeseen way still resolves rather than reporting a
-    // missing binary.
-    for (const bin of HEADLESS_SHELL_BINARIES) {
-      const candidate = join(base, bin);
-      if (existsSync(candidate)) return candidate;
-    }
+    const found = shellBinaryIn(join(cacheDir, dir));
+    if (found) return found;
   }
   return null;
 }
@@ -254,32 +345,64 @@ export const runLdd: LddRunner = (binary) => {
   }
 };
 
+/** Split a fixed, repo-owned command string on whitespace (never user input). */
+function splitCommand(command: string): { bin: string; args: string[] } | null {
+  const [bin, ...args] = command.split(' ');
+  return bin ? { bin, args } : null;
+}
+
+/** Is this process running as root (no sudo needed at all)? */
+function isRoot(): boolean {
+  return typeof process.getuid === 'function' && process.getuid() === 0;
+}
+
 /**
- * Default elevation probe: `sudo -n true` — the noninteractive form, which
- * fails instead of prompting when a password is required. uid 0 counts as
- * elevated (no sudo needed at all).
+ * Default elevation probe: COMMAND-SCOPED — `sudo -n -l <command…>` asks the
+ * policy whether THIS exact command may run passwordlessly, without running it
+ * and never prompting. The old `sudo -n true` probe could be fooled by a
+ * sudoers rule permitting passwordless `true` (or any single unrelated binary)
+ * while the real install still needed a password — then install-deps' inner
+ * `sudo -- sh -c …` would prompt and hang the run. `-l` cannot be fooled: it
+ * checks the very argv the installer will run. uid 0 counts as elevated (no
+ * sudo needed at all).
  */
-export const probeElevation: ElevationProbe = () => {
-  if (typeof process.getuid === 'function' && process.getuid() === 0) return true;
+export const probeElevation: ElevationProbe = (command) => {
+  if (isRoot()) return true;
+  const parsed = splitCommand(command);
+  if (!parsed) return false;
   try {
-    execFileSync('sudo', ['-n', 'true'], { stdio: 'ignore' });
+    execFileSync('sudo', ['-n', '-l', parsed.bin, ...parsed.args], { stdio: 'ignore' });
     return true;
   } catch {
     return false;
   }
 };
 
-/** Default installer: run the command verbatim, throwing when it fails. */
+/**
+ * Default installer: run the command under NONINTERACTIVE elevation.
+ *
+ * As root the command runs directly (install-deps then invokes its package
+ * manager without any inner sudo). Otherwise the WHOLE installer is invoked as
+ * `sudo -n …`: elevation is enforced on the actual invocation, so a sudoers
+ * rule that allows passwordless `true` but wants a password for `sh` makes
+ * sudo FAIL here, instantly — instead of install-deps' ordinary `sudo -- sh -c
+ * …` prompting a CI/setup run into a permanent hang. Running as root also
+ * means install-deps skips its own sudo entirely.
+ */
 export const runInstaller: Installer = (command) => {
-  // The command is a fixed, repo-owned string — not user input — so it is
-  // split on whitespace rather than run through a shell.
-  const [bin, ...args] = command.split(' ');
-  if (!bin) throw new ChromiumLibsMissingError(`${MISSING_LIBS_MARKER} empty install command`);
-  execFileSync(bin, args, { stdio: 'inherit' });
+  const parsed = splitCommand(command);
+  if (!parsed) throw new ChromiumLibsMissingError(`${MISSING_LIBS_MARKER} empty install command`);
+  if (isRoot()) {
+    execFileSync(parsed.bin, parsed.args, { stdio: 'inherit' });
+    return;
+  }
+  execFileSync('sudo', ['-n', parsed.bin, ...parsed.args], { stdio: 'inherit' });
 };
 
 /** The injectable seams of {@link checkChromiumLibs}. */
 export type ChromiumLibsDeps = {
+  /** The installed playwright-core's pinned headless-shell revision. */
+  pinnedRevision?: () => number | null;
   locateBinary?: BinaryLocator;
   ldd?: LddRunner;
   probeElevation?: ElevationProbe;
@@ -296,15 +419,18 @@ export type ChromiumLibsOk = { ok: true; binary: string; missing: string[] };
  * not be installed (no elevation, or the install failed).
  */
 export function checkChromiumLibs(cacheDir: string, deps: ChromiumLibsDeps = {}): ChromiumLibsOk {
+  const pinnedRevision = deps.pinnedRevision ?? readPinnedHeadlessShellRevision;
   const locate = deps.locateBinary ?? locateHeadlessShell;
   const ldd = deps.ldd ?? runLdd;
   const probe = deps.probeElevation ?? probeElevation;
   const install = deps.install ?? runInstaller;
 
-  const binary = locate(cacheDir);
+  const revision = pinnedRevision();
+  const binary = locate(cacheDir, revision);
   if (!binary) {
+    const pinned = revision !== null && revision !== undefined ? ` (revision ${revision})` : '';
     throw new ChromiumLibsMissingError(
-      `${MISSING_LIBS_MARKER} Chromium headless shell not found under ${cacheDir}. ` +
+      `${MISSING_LIBS_MARKER} Chromium headless shell${pinned} not found under ${cacheDir}. ` +
         `Install it with: node node_modules/playwright-core/cli.js install chromium`,
     );
   }
@@ -314,7 +440,10 @@ export function checkChromiumLibs(cacheDir: string, deps: ChromiumLibsDeps = {})
   // it shells out to `sudo`, and a healthy machine must not pay for it.
   if (missing.length === 0) return { ok: true, binary, missing };
 
-  const plan = remediationPlan(missing, probe());
+  const installCommand = INSTALL_DEPS_COMMAND;
+  // The probe is asked about the exact command the installer will run — a
+  // command-scoped answer, not a generic "sudo exists".
+  const plan = remediationPlan(missing, probe(installCommand), installCommand);
   if (plan.kind === 'none') return { ok: true, binary, missing };
 
   if (plan.kind === 'blocked') {
