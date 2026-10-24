@@ -468,7 +468,11 @@ export class BrowserAdapter implements Adapter {
       return Promise.all(
         pages.map(async (page, index) => ({
           index,
-          url: page.url(),
+          // Tab URLs reach the driver verbatim via observe({kind:'tabs'}) and
+          // act's multi-tab hint, so credential-bearing query values (?code=,
+          // ?token=, ?signature=…) are redacted here at the source — the same
+          // posture as network entries and the #onLoad unrequested-load queue.
+          url: redactUrl(page.url()),
           // A tab opened a moment ago may not have a document yet.
           title: await page.title().catch(() => ''),
           active: page === this.#page,
