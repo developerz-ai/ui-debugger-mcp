@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ExecTimeoutError } from '../../errors.js';
@@ -74,6 +74,63 @@ test('makeExec passes a missing binary through raw as ENOENT', async () => {
   const error = await exec('uidbg-no-such-binary', []).catch((e: unknown) => e);
   expect(error).not.toBeInstanceOf(ExecTimeoutError);
   expect(isEnoent(error)).toBe(true);
+});
+
+// --- makeExec with an absolute deadline ---------------------------------------
+
+test('makeExec kills a wedged tool at the DEADLINE, not at its own default cap', async () => {
+  // The adapter's own cap is 10s; the enclosing budget is 300ms. A tool that wedges
+  // must be cut at the deadline — otherwise the run's remaining wall-clock is gone.
+  const exec = makeExec(process.env);
+  const started = Date.now();
+  const promise = exec('sleep', ['30'], { deadline: Date.now() + 300 });
+  await expect(promise).rejects.toThrow(ExecTimeoutError);
+  await expect(promise).rejects.toThrow(/`sleep` timed out after 300ms \(SIGKILLed/);
+  const elapsed = Date.now() - started;
+  expect(elapsed).toBeLessThan(5_000); // cut at the deadline, not parked on the child
+});
+
+test('makeExec rejects a call whose deadline has already passed instead of running it', async () => {
+  // A spent budget must not buy another subprocess: the call fails loud at once.
+  const exec = makeExec(process.env);
+  const promise = exec('sh', ['-c', 'printf late'], { deadline: Date.now() - 1 });
+  await expect(promise).rejects.toThrow(ExecTimeoutError);
+  await expect(promise).rejects.toThrow(/deadline .* has already passed/);
+});
+
+test('makeExec rejects a call that RESOLVES after its deadline instead of returning stdout', async () => {
+  // The kill-vs-exit race. The subprocess cap is bounded by the time left to the
+  // deadline, so a real child is always SIGKILLed at (or just before) it and can only
+  // finish "after the deadline" by exiting right as the kill lands — the
+  // post-resolution guard in `makeExec` is what turns such a late result into a
+  // failure. A controlled clock, injected through `makeExec`'s `now` seam (the same
+  // injected-seam doctrine as `DesktopAdapterInit.atspi` — never a global clock patch,
+  // which leaks into every test file running alongside), walks that race
+  // deterministically: the child exits successfully inside its 300ms cap, but the
+  // seam's clock is pushed past the deadline while it runs, so the result lands late.
+  // The assertion requires the late-RESOLUTION error specifically — the per-invocation
+  // cap error (`timed out after Nms`) must NOT satisfy it, so deleting the guard fails
+  // here instead of passing silently.
+  const dir = await mkdtemp(join(tmpdir(), 'uidbg-proc-'));
+  const go = join(dir, 'go');
+  let nowMs = 0;
+  const exec = makeExec(process.env, 10_000, () => nowMs);
+  const promise = exec(
+    'sh',
+    ['-c', `while [ ! -e ${JSON.stringify(go)} ]; do sleep 0.02; done; printf late`],
+    { deadline: nowMs + 300 }, // cap = 300ms — the child finishes inside it
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50)); // the child is up, polling
+  nowMs = 500; // the budget expires while the child is still running
+  await writeFile(go, ''); // unblock it — it now exits successfully, but past the deadline
+  await expect(promise).rejects.toThrow(ExecTimeoutError);
+  await expect(promise).rejects.toThrow(/resolved after its deadline/);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('makeExec resolves normally when the deadline is still in the future', async () => {
+  const exec = makeExec(process.env);
+  expect(await exec('sh', ['-c', 'printf ok'], { deadline: Date.now() + 5_000 })).toBe('ok');
 });
 
 // --- terminateGroup (real detached process groups) ----------------------------

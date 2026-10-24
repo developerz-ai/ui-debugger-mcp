@@ -141,7 +141,12 @@ export class DesktopAdapter implements Adapter {
       }
       const { died } = this.#launch();
       // The window wait fits inside the run's remaining cap when that is the shorter one.
-      const activated = this.#input.activateWindow(match, capWait(WINDOW_WAIT_MS, timeoutMs));
+      const waitMs = capWait(WINDOW_WAIT_MS, timeoutMs);
+      // The wait gets an ABSOLUTE deadline, not just a duration: the xdotool calls it
+      // makes are capped by the time left until then, so an in-flight search cannot
+      // outlive the budget the run has left.
+      const deadline = Date.now() + waitMs;
+      const activated = this.#input.activateWindow(match, waitMs, deadline);
       // Pre-handle the loser: when the child dies first, the window wait keeps polling
       // (bounded by the cap above) and its later rejection must not go unhandled.
       activated.catch(() => {});
@@ -267,7 +272,16 @@ export class DesktopAdapter implements Adapter {
     await this.#run('waitFor', async () => {
       const deadline = Date.now() + timeout;
       for (;;) {
-        if (await this.#present(query, deadline)) return;
+        if (await this.#present(query, deadline)) {
+          // A match that only landed after the deadline is not a success: the wait is
+          // over, so resolving now would report a node the caller waited too long for.
+          if (Date.now() > deadline) {
+            throw new AdapterError(
+              `desktop: waitFor timed out after ${timeout}ms (${query}) — the query matched only after the deadline`,
+            );
+          }
+          return;
+        }
         if (Date.now() >= deadline) {
           throw new AdapterError(`desktop: waitFor timed out after ${timeout}ms (${query})`);
         }

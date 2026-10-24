@@ -117,6 +117,59 @@ test('a maxBuffer overflow is reported as itself, never as a timeout/wedge', asy
 });
 
 // ---------------------------------------------------------------------------
+// AdbCli — deadlines (the enclosing budget outranks the transport's own cap)
+// ---------------------------------------------------------------------------
+
+test('a deadline shortens the per-call cap to the time left, not the 30s default', async () => {
+  const { calls, exec } = recorder();
+  const cli = new AdbCli([], { exec });
+  const deadline = Date.now() + 5000;
+  await cli.shell(['getprop'], deadline);
+  expect(calls[0]?.timeoutMs).toBeLessThanOrEqual(5000);
+  expect(calls[0]?.timeoutMs).toBeGreaterThan(0);
+  // The transport's own default is 30 s — a deadline under it must win.
+  expect(calls[0]?.timeoutMs).toBeLessThan(30_000);
+});
+
+test('no deadline keeps the transport default (30s)', async () => {
+  const { calls, exec } = recorder();
+  await new AdbCli([], { exec }).shell(['getprop']);
+  expect(calls[0]?.timeoutMs).toBe(30_000);
+});
+
+test('a wedged call is killed at the deadline instead of the 30s default', async () => {
+  // `sleep 30` would run for half a minute under the transport's own cap; the
+  // deadline must cut it short — the caller's budget outranks our default.
+  const cli = new AdbCli([], { bin: 'sleep' });
+  const started = Date.now();
+  const err = await cli.adb(['30'], Date.now() + 150).catch((e: unknown) => e);
+  expect(err).toBeInstanceOf(AdbError);
+  expect((err as AdbError).message).toContain('timed out after');
+  expect(Date.now() - started).toBeLessThan(5000);
+});
+
+test('a call that resolves AFTER the deadline rejects instead of reporting success', async () => {
+  // The subprocess cap bounds the child, not the answer: a child that exits just
+  // after the deadline still resolves. Reporting that as success would let a wedged
+  // adb answer minutes past the caller's budget.
+  const exec: AdbExec = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    return new Uint8Array([1]);
+  };
+  const err = await new AdbCli([], { exec })
+    .shell(['getprop'], Date.now() + 30)
+    .catch((e: unknown) => e);
+  expect(err).toBeInstanceOf(AdbError);
+  expect((err as AdbError).message).toContain('after its deadline');
+});
+
+test('a call that resolves before the deadline still succeeds', async () => {
+  const { exec } = recorder(new TextEncoder().encode('ok'));
+  const out = await new AdbCli([], { exec }).shell(['getprop'], Date.now() + 5000);
+  expect(out).toBe('ok');
+});
+
+// ---------------------------------------------------------------------------
 // pendingStateOrThrow — only "not up yet" keeps a boot poll waiting
 // ---------------------------------------------------------------------------
 

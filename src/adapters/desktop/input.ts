@@ -191,7 +191,15 @@ export interface PointerInput {
   typeText(text: string): Promise<void>;
   key(chord: string): Promise<void>;
   scroll(direction: ScrollDirection, repeat: number): Promise<void>;
-  activateWindow(match: WindowMatch, timeoutMs: number): Promise<void>;
+  /**
+   * Wait for the matching window and activate it.
+   *
+   * `timeoutMs` is how long the wait may take; `deadline` is the absolute instant
+   * (epoch ms) it must not run past — the caller hands down its own budget's
+   * deadline so an in-flight `xdotool` cannot outlive it. Omit it and the wait
+   * derives one from `timeoutMs`.
+   */
+  activateWindow(match: WindowMatch, timeoutMs: number, deadline?: number): Promise<void>;
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -224,15 +232,24 @@ export class Xdotool implements PointerInput {
     return this.#do(scrollArgs(direction, repeat));
   }
 
-  /** Poll `search` until the window exists, then `windowactivate --sync`; throw loud on timeout. */
-  async activateWindow(match: WindowMatch, timeoutMs: number): Promise<void> {
+  /**
+   * Poll `search` until the window exists, then `windowactivate --sync`; throw loud on timeout.
+   *
+   * Every invocation is bounded by `deadline` (the enclosing budget's instant), so a
+   * wedged `xdotool` cannot hold the wait — and the `open` that asked for it — past
+   * the time the run has left.
+   */
+  async activateWindow(
+    match: WindowMatch,
+    timeoutMs: number,
+    deadline = Date.now() + timeoutMs,
+  ): Promise<void> {
     const args = searchArgs(match);
-    const start = Date.now();
     for (;;) {
       // `search` exits non-zero with EMPTY stderr when nothing matches (→ rejects);
       // that means "not up yet", so keep polling. Anything on stderr is a real
       // failure (e.g. `Can't open display`) — fatal, loud. Missing xdotool too.
-      const out = await this.#exec(XDOTOOL, args).catch((error: unknown) => {
+      const out = await this.#exec(XDOTOOL, args, { deadline }).catch((error: unknown) => {
         // An expired per-call cap (`proc.ts`) arrives already loud, with no stderr —
         // never mistake a wedged xdotool for "no window yet" and keep polling.
         if (error instanceof AdapterError) throw error;
@@ -251,12 +268,12 @@ export class Xdotool implements PointerInput {
         .map((line) => line.trim())
         .find((line) => line.length > 0);
       if (id) {
-        await this.#do(['windowactivate', '--sync', id]);
+        await this.#do(['windowactivate', '--sync', id], deadline);
         return;
       }
-      if (Date.now() - start >= timeoutMs) {
+      if (Date.now() >= deadline) {
         throw new AdapterError(
-          `desktop: window not found within ${timeoutMs}ms (${JSON.stringify(match)})`,
+          `desktop: window not found within ${timeoutMs}ms (deadline ${deadline}) (${JSON.stringify(match)})`,
         );
       }
       await delay(POLL_MS);
@@ -264,9 +281,9 @@ export class Xdotool implements PointerInput {
   }
 
   /** Run one xdotool invocation, re-throwing any failure as a loud {@link AdapterError}. */
-  async #do(args: string[]): Promise<void> {
+  async #do(args: string[], deadline?: number): Promise<void> {
     try {
-      await this.#exec(XDOTOOL, args);
+      await this.#exec(XDOTOOL, args, deadline === undefined ? undefined : { deadline });
     } catch (error) {
       // Already-loud failures (a per-call timeout) surface verbatim, not re-prefixed.
       if (error instanceof AdapterError) throw error;

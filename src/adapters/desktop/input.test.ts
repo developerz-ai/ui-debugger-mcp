@@ -14,6 +14,7 @@ import {
   typeArgs,
   Xdotool,
 } from './input.js';
+import type { Exec, ExecOptions } from './proc.js';
 
 // --- mapKeyChord ------------------------------------------------------------
 
@@ -185,4 +186,94 @@ test('activateWindow throws immediately when xdotool reports a real error on std
   await expect(promise).rejects.toThrow(AdapterError);
   await expect(promise).rejects.toThrow(/Can't open display: :99/);
   expect(fake.calls()).toBe(1); // no 10s poll masking the root cause
+});
+
+// --- activateWindow: the enclosing budget's deadline -------------------------
+
+/**
+ * An exec that honours the deadline contract the real `makeExec` implements: a
+ * call whose deadline has already passed is refused, and one that resolves after
+ * it is refused too. Without the deadline handed down, neither can happen.
+ */
+function deadlineAwareExec(
+  onCall: (args: string[], opts?: ExecOptions) => void,
+  answer: (args: string[]) => string,
+): Exec {
+  return async (_cmd, args, opts) => {
+    onCall(args, opts);
+    const deadline = opts?.deadline;
+    if (deadline !== undefined && Date.now() >= deadline) {
+      throw new ExecTimeoutError(
+        `desktop: \`xdotool\` was not started — its deadline (${deadline}) has already passed`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    if (deadline !== undefined && Date.now() >= deadline) {
+      throw new ExecTimeoutError(
+        `desktop: \`xdotool\` resolved after its deadline (${deadline}) had passed`,
+      );
+    }
+    return answer(args);
+  };
+}
+
+test('activateWindow hands its deadline to every xdotool call it makes', async () => {
+  // The window search/activation inside `open` is only bounded if the deadline
+  // reaches the subprocess: `search` and `windowactivate` must both be capped by
+  // the time left until it, not by the adapter's own 10s default.
+  const seen: { args: string[]; deadline: number | undefined }[] = [];
+  const exec = deadlineAwareExec(
+    (args, opts) => seen.push({ args, deadline: opts?.deadline }),
+    (args) => (args[0] === 'search' ? '12345' : ''),
+  );
+  const deadline = Date.now() + 60_000;
+  await new Xdotool({ exec }).activateWindow({ title: 'App' }, 10_000, deadline);
+
+  expect(seen.length).toBeGreaterThan(0);
+  for (const call of seen) expect(call.deadline).toBe(deadline);
+  // Both halves of the activation — the poll and the activate — are bounded.
+  expect(seen.some((c) => c.args[0] === 'search')).toBe(true);
+  expect(seen.some((c) => c.args[0] === 'windowactivate')).toBe(true);
+});
+
+test('activateWindow derives a deadline from its timeout when the caller gives none', async () => {
+  const seen: (number | undefined)[] = [];
+  const exec = deadlineAwareExec(
+    (_args, opts) => seen.push(opts?.deadline),
+    (args) => (args[0] === 'search' ? '12345' : ''),
+  );
+  const started = Date.now();
+  await new Xdotool({ exec }).activateWindow({ title: 'App' }, 10_000);
+
+  expect(seen.length).toBeGreaterThan(0);
+  for (const deadline of seen) {
+    expect(typeof deadline).toBe('number');
+    expect(deadline as number).toBeGreaterThanOrEqual(started + 10_000);
+  }
+});
+
+test('activateWindow refuses to start a search whose deadline has already passed', async () => {
+  // A spent budget must not buy another subprocess: the wait fails loud at once
+  // instead of starting a poll that could only outlive the caller's deadline.
+  const exec = deadlineAwareExec(
+    () => undefined,
+    () => '12345',
+  );
+  await expect(
+    new Xdotool({ exec }).activateWindow({ title: 'App' }, 10_000, Date.now() - 1),
+  ).rejects.toThrow(ExecTimeoutError);
+});
+
+test('activateWindow rejects a window that only appeared after the deadline', async () => {
+  // The search resolves only after the deadline: the window it names is stale —
+  // the caller asked for an answer within its budget. Resolving here would
+  // report a match the caller waited too long for, so the wait fails loud.
+  const deadline = Date.now() + 20;
+  const exec = deadlineAwareExec(
+    () => undefined,
+    (args) => (args[0] === 'search' ? '12345' : ''),
+  );
+  await expect(
+    new Xdotool({ exec }).activateWindow({ title: 'App' }, 10_000, deadline),
+  ).rejects.toThrow(ExecTimeoutError);
 });

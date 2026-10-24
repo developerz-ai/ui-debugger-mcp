@@ -55,16 +55,27 @@ function makeNode(overrides: Partial<AndroidNode> = {}): AndroidNode {
 
 /** Fake ADB seam — records calls, canned responses (used by the {@link AdbUiAutomator} tests). */
 class FakeAdb implements Adb {
-  calls: Array<{ args: string[] }> = [];
+  calls: Array<{ args: string[]; deadline?: number }> = [];
   responses: Map<string, string> = new Map();
+  /** Per-call artificial latency, keyed like `responses` (`'uiautomator dump …'`). */
+  slow: Map<string, number> = new Map();
 
   setResponse(key: string, value: string): void {
     this.responses.set(key, value);
   }
 
-  async shell(command: string[]): Promise<string> {
-    this.calls.push({ args: command });
+  /** Make the call answering `key` take `ms` — it still answers, just late. */
+  setSlow(key: string, ms: number): void {
+    this.slow.set(key, ms);
+  }
+
+  async shell(command: string[], deadline?: number): Promise<string> {
+    this.calls.push({ args: command, deadline });
     const key = command.join(' ');
+    const slow = this.slow.get(key);
+    if (slow !== undefined) {
+      await new Promise((resolve) => setTimeout(resolve, slow));
+    }
     if (this.responses.has(key)) return this.responses.get(key) ?? '';
     if (command[0] === 'rm') return '';
     // The real success line (AOSP typo included) — dumps assert it, so the default must carry it.
@@ -459,5 +470,41 @@ describe('AdbUiAutomator', () => {
     const adb = new FakeAdb();
     adb.setResponse('uiautomator dump /sdcard/window_dump.xml', '');
     await expect(new AdbUiAutomator(adb).dump()).rejects.toThrow(AdapterError);
+  });
+});
+
+describe('AdbUiAutomator deadlines', () => {
+  test('all three adb calls of one dump carry the remaining budget', async () => {
+    // A dump is three round-trips (rm → dump → cat); each one has its own 30s
+    // transport cap, so without the deadline the slowest decides how long the
+    // enclosing wait takes.
+    const adb = new FakeAdb();
+    const deadline = Date.now() + 5000;
+    await new AdbUiAutomator(adb).dump(deadline);
+    expect(adb.calls).toHaveLength(3);
+    expect(adb.calls.every((c) => c.deadline === deadline)).toBe(true);
+  });
+
+  test('an expired deadline fails loud before any call is spent', async () => {
+    const adb = new FakeAdb();
+    const err = await new AdbUiAutomator(adb).dump(Date.now() - 10).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as AdapterError).message).toContain('no time left');
+    expect(adb.calls).toHaveLength(0);
+  });
+
+  test('a dump that resolves after the deadline rejects instead of returning a tree', async () => {
+    // The `cat` answers after the deadline — a late hierarchy is not the live screen.
+    const adb = new FakeAdb();
+    adb.setSlow('cat /sdcard/window_dump.xml', 80);
+    const err = await new AdbUiAutomator(adb).dump(Date.now() + 20).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as AdapterError).message).toContain('no time left');
+  });
+
+  test('a dump that resolves before the deadline still returns the tree', async () => {
+    const adb = new FakeAdb();
+    const nodes = await new AdbUiAutomator(adb).dump(Date.now() + 5000);
+    expect(nodes).toHaveLength(3);
   });
 });

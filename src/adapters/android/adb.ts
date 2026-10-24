@@ -20,11 +20,18 @@
  * the emulator a managed run started (never the ambiguous `-e`). Fails loud — a non-zero
  * exit, a timeout or a missing binary rejects as an {@link AdbError}, never a silent
  * fallback; {@link pendingStateOrThrow} is the one narrow exception a boot poll may retry.
+ *
+ * **Deadlines.** Every call may carry an absolute deadline (epoch ms) — the wall-clock
+ * instant the enclosing budget runs out. It bounds the subprocess itself (the per-call
+ * cap becomes the time left until the deadline, never more) AND the result: a call that
+ * *resolves* after the deadline is a failure, not a late success. Without that second
+ * check a slow `adb` would report success minutes past the caller's deadline.
  */
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { AdbError } from '../../errors.js';
+import { capWait } from '../budget.js';
 
 const pExecFile = promisify(execFile);
 
@@ -101,14 +108,20 @@ export interface AdbCliOptions {
   exec?: AdbExec;
 }
 
-/** The ADB transport the adapter depends on — implemented by {@link AdbCli}, faked in tests. */
+/**
+ * The ADB transport the adapter depends on — implemented by {@link AdbCli}, faked in tests.
+ *
+ * `deadline` is an ABSOLUTE wall-clock instant (epoch ms) the call must not outlive —
+ * the same shape as `AtspiReadOptions.deadline`. Omit it for the transport's own
+ * per-call cap.
+ */
 export interface Adb {
   /** `adb <target> shell <command…>` → stdout text. */
-  shell(command: string[]): Promise<string>;
+  shell(command: string[], deadline?: number): Promise<string>;
   /** `adb <target> exec-out <command…>` → raw stdout bytes (binary-safe, e.g. `screencap -p`). */
-  execOut(command: string[]): Promise<Uint8Array>;
+  execOut(command: string[], deadline?: number): Promise<Uint8Array>;
   /** `adb <target> <args…>` → stdout text (top-level: `wait-for-device`, `emu kill`, …). */
-  adb(args: string[]): Promise<string>;
+  adb(args: string[], deadline?: number): Promise<string>;
 }
 
 /**
@@ -128,28 +141,60 @@ export class AdbCli implements Adb {
     this.#exec = options.exec ?? execFileBytes;
   }
 
-  shell(command: string[]): Promise<string> {
-    return this.#text(['shell', ...command]);
+  shell(command: string[], deadline?: number): Promise<string> {
+    return this.#text(['shell', ...command], deadline);
   }
 
-  adb(args: string[]): Promise<string> {
-    return this.#text(args);
+  adb(args: string[], deadline?: number): Promise<string> {
+    return this.#text(args, deadline);
   }
 
-  execOut(command: string[]): Promise<Uint8Array> {
-    return this.#bytes(['exec-out', ...command]);
+  execOut(command: string[], deadline?: number): Promise<Uint8Array> {
+    return this.#bytes(['exec-out', ...command], deadline);
   }
 
   /** UTF-8 view of the byte read — `adb`'s text channels (`am`, `getprop`, `logcat`) are UTF-8. */
-  async #text(args: string[]): Promise<string> {
-    return DECODER.decode(await this.#bytes(args));
+  async #text(args: string[], deadline?: number): Promise<string> {
+    return DECODER.decode(await this.#bytes(args, deadline));
   }
 
-  async #bytes(args: string[]): Promise<Uint8Array> {
+  async #bytes(args: string[], deadline?: number): Promise<Uint8Array> {
+    const timeoutMs = this.#timeoutFor(deadline);
+    let bytes: Uint8Array;
     try {
-      return await this.#exec(this.#bin, [...this.#flags, ...args], this.#timeoutMs);
+      bytes = await this.#exec(this.#bin, [...this.#flags, ...args], timeoutMs);
     } catch (error) {
-      throw this.#wrap(args, error);
+      throw this.#wrap(args, error, timeoutMs);
+    }
+    // The subprocess cap bounds the CHILD, not the answer: a child that exits just
+    // after the deadline still resolves here. Reporting that as success would let a
+    // wedged adb answer minutes past the caller's budget — reject instead. Keep this
+    // outside the subprocess catch: a late answer is not a subprocess failure and
+    // must not be re-wrapped as one.
+    this.#assertBeforeDeadline(args, deadline);
+    return bytes;
+  }
+
+  /**
+   * The effective per-call cap: the transport's own default, shortened to the time
+   * left until `deadline` when one is given. `capWait` floors a spent budget at 1ms
+   * (never 0 — a 0ms timeout would mean "no timeout" to some runners) and rejects a
+   * non-finite/negative budget, so the clamp stays in one place.
+   */
+  #timeoutFor(deadline?: number): number {
+    if (deadline === undefined) return this.#timeoutMs;
+    return capWait(this.#timeoutMs, Math.max(0, deadline - Date.now()));
+  }
+
+  /** Fail loud when a call resolved after its deadline — a late answer is not an answer. */
+  #assertBeforeDeadline(args: string[], deadline?: number): void {
+    if (deadline === undefined) return;
+    const now = Date.now();
+    if (now > deadline) {
+      throw new AdbError(
+        `adb ${args[0] ?? ''} resolved ${now - deadline}ms after its deadline ` +
+          `(deadline ${deadline}ms — the enclosing budget had already run out)`,
+      );
     }
   }
 
@@ -157,7 +202,7 @@ export class AdbCli implements Adb {
    * Wrap any subprocess failure as a loud {@link AdbError}: ENOENT → a clear install
    * hint, expiry (the child was killed by our `timeout`) → a wedge report naming the cap.
    */
-  #wrap(args: string[], error: unknown): AdbError {
+  #wrap(args: string[], error: unknown, timeoutMs: number): AdbError {
     if (error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
       return new AdbError('android: `adb` not found on PATH (install Android platform-tools)');
     }
@@ -167,7 +212,7 @@ export class AdbCli implements Adb {
       (error as NodeJS.ErrnoException).code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
     ) {
       return new AdbError(
-        `adb ${args[0] ?? ''} timed out after ${this.#timeoutMs}ms (${KILL_SIGNAL}ed — adb or the emulator is wedged)`,
+        `adb ${args[0] ?? ''} timed out after ${timeoutMs}ms (${KILL_SIGNAL}ed — adb or the emulator is wedged)`,
       );
     }
     const message = error instanceof Error ? error.message : String(error);

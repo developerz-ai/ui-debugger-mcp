@@ -18,6 +18,7 @@ import {
   stateFlags,
   toNode,
 } from './atspi.js';
+import type { ExecOptions } from './proc.js';
 
 // --- mapRole ----------------------------------------------------------------
 
@@ -336,6 +337,48 @@ test('BusctlAtspi.readTree walks normally while the deadline is in the future', 
     deadline: Date.now() + 60_000,
   });
   expect(nodes.map((n) => n.name)).toEqual(['My App', 'OK']);
+});
+
+test('BusctlAtspi.readTree rejects when a busctl call lands after the deadline', async () => {
+  // A wedged bus must not hold the walk (and the `waitFor` behind it) past its
+  // deadline: the spawn is capped by the time left until then, and a reply that
+  // arrives after it is a failure — not a partial tree to read as the answer.
+  const bus = fakeBus();
+  const exec = async (args: string[]): Promise<string> => {
+    // The first spawn (GetAddress) answers only after the deadline has passed.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    return bus.exec(args);
+  };
+  await expect(new BusctlAtspi({ exec }).readTree({ deadline: Date.now() + 20 })).rejects.toThrow(
+    ExecTimeoutError,
+  );
+});
+
+test('BusctlAtspi.readTree passes the walk deadline down to every busctl spawn', async () => {
+  // The per-call cap must be the time left until the deadline, not the fixed 10s
+  // default — otherwise one wedged spawn outlives the enclosing budget.
+  const bus = fakeBus();
+  const deadlines: (number | undefined)[] = [];
+  const exec = async (args: string[], opts?: ExecOptions): Promise<string> => {
+    deadlines.push(opts?.deadline);
+    return bus.exec(args);
+  };
+  const deadline = Date.now() + 60_000;
+  await new BusctlAtspi({ exec }).readTree({ deadline });
+  expect(deadlines.length).toBeGreaterThan(0);
+  for (const seen of deadlines) expect(seen).toBe(deadline);
+});
+
+test('BusctlAtspi.readTree does not report a reply that arrived after expiry as a read', async () => {
+  // The reply lands after the deadline: the walk must reject rather than hand back
+  // a tree the caller would take as the answer.
+  const bus = fakeBus();
+  const exec = async (args: string[]): Promise<string> => {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    return bus.exec(args);
+  };
+  const promise = new BusctlAtspi({ exec }).readTree({ deadline: Date.now() + 10 });
+  await expect(promise).rejects.toThrow(ExecTimeoutError);
 });
 
 test('BusctlAtspi.readTree fails loud when GetExtents blows its per-call cap', async () => {
