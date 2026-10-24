@@ -144,15 +144,32 @@ test('FileStatePort.clear stays best-effort (the run is already down)', async ()
   const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
   const port = new FileStatePort(ws, { pid: 99 });
   // Nothing recorded, nothing writable — clearing must not throw into teardown.
-  await port.clear();
+  await port.clear('s');
 });
 
 test('FileStatePort.clear marks the run ended', async () => {
   const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
   const port = new FileStatePort(ws, { pid: 99, now: () => new Date('2026-06-29T02:00:00.000Z') });
   await port.record({ sessionId: 's', target: 'web', goal: 'g' });
-  await port.clear();
+  await port.clear('s');
   expect((await readState(ws.stateJson))?.status).toBe('ended');
+});
+
+test('FileStatePort.clear is scoped to the ending run — a successor breadcrumb is never ended', async () => {
+  const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
+  const port = new FileStatePort(ws, { pid: 99, now: () => new Date('2026-06-29T02:00:00.000Z') });
+  await port.record({ sessionId: 'old', target: 'web', goal: 'done' });
+  // A successor started while the old run's teardown was still in flight.
+  await port.record({ sessionId: 'new', target: 'web', goal: 'next' });
+
+  await port.clear('old'); // the late teardown clear
+
+  // The successor the CLI `stop` reads stays live: status, id and goal untouched.
+  expect(await readState(ws.stateJson)).toMatchObject({
+    status: 'running',
+    sessionId: 'new',
+    goal: 'next',
+  });
 });
 
 // --- foreignRun: the cross-process one-run gate -----------------------------

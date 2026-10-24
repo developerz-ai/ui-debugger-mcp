@@ -8,12 +8,24 @@ class FakeSession implements ManagedSession {
   constructor(
     readonly id: string,
     private readonly closeError?: Error,
+    private readonly closeGate?: Promise<void>,
   ) {}
 
   async close(): Promise<void> {
     this.closeCalls += 1;
+    // A close held open until `release()` fires — the delayed teardown.
+    if (this.closeGate) await this.closeGate;
     if (this.closeError) throw this.closeError;
   }
+}
+
+/** A promise plus the handle that resolves it — the gate a test holds shut. */
+function deferredClose(): { gate: Promise<void>; release: () => void } {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { gate, release };
 }
 
 const CWD = '/projects/app-a';
@@ -91,5 +103,38 @@ test('end frees the lock even when close() throws, and surfaces the error', asyn
   await expect(manager.end(CWD)).rejects.toThrow('chrome would not close');
   // Lock released despite the failed teardown — the project is not wedged.
   expect(manager.has(CWD)).toBe(false);
+  expect(() => manager.start(CWD, new FakeSession('s2'))).not.toThrow();
+});
+
+// --- closing gate (delayed teardown) -----------------------------------------
+
+test('start is refused while the previous session is still closing', async () => {
+  const manager = new SessionManager();
+  const { gate, release } = deferredClose();
+  manager.start(CWD, new FakeSession('s1', undefined, gate));
+
+  const ending = manager.end(CWD); // unawaited: the teardown is in flight
+  // Slot-free ≠ project-free: the slot is gone, but the close has not settled.
+  expect(manager.has(CWD)).toBe(false);
+  expect(manager.closingId(CWD)).toBe('s1');
+
+  expect(() => manager.start(CWD, new FakeSession('s2'))).toThrow(SessionBusyError);
+  expect(() => manager.start(CWD, new FakeSession('s2'))).toThrow(/'s1'/);
+  expect(() => manager.start(CWD, new FakeSession('s2'))).toThrow(CWD);
+
+  release();
+  await ending;
+  expect(manager.closingId(CWD)).toBeUndefined(); // the gate reopens on settle
+  expect(() => manager.start(CWD, new FakeSession('s2'))).not.toThrow();
+});
+
+test('a failed close also reopens the gate', async () => {
+  const manager = new SessionManager();
+  manager.start(CWD, new FakeSession('s1', new Error('chrome would not close')));
+
+  await expect(manager.end(CWD)).rejects.toThrow('chrome would not close');
+  // The error reached the caller AND the gate lifted: a failed teardown never
+  // wedges the project shut.
+  expect(manager.closingId(CWD)).toBeUndefined();
   expect(() => manager.start(CWD, new FakeSession('s2'))).not.toThrow();
 });

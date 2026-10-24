@@ -278,20 +278,26 @@ test('an explicitly ended run is forgotten immediately (end_session is the forge
 
 // --- state.json breadcrumb --------------------------------------------------
 
-/** A `StatePort` spy: counts `clear()`, optionally fails `record()` / reports a foreign run. */
+/**
+ * A `StatePort` spy: counts + records `clear(sessionId)`, optionally fails
+ * `record()` / reports a foreign run.
+ */
 function spyState(opts: { recordFails?: boolean; foreign?: () => ForeignRun | null } = {}): {
   state: StatePort;
   clears: () => number;
+  clearedIds: () => string[];
   foreignReads: () => number;
 } {
   let clears = 0;
   let foreignReads = 0;
+  const clearedIds: string[] = [];
   const state: StatePort = {
     async record() {
       if (opts.recordFails) throw new AdapterError('disk full');
     },
-    async clear() {
+    async clear(sessionId) {
       clears += 1;
+      clearedIds.push(sessionId);
     },
     async foreignFindings() {
       return null;
@@ -301,7 +307,12 @@ function spyState(opts: { recordFails?: boolean; foreign?: () => ForeignRun | nu
       return opts.foreign?.() ?? null;
     },
   };
-  return { state, clears: () => clears, foreignReads: () => foreignReads };
+  return {
+    state,
+    clears: () => clears,
+    clearedIds: () => clearedIds,
+    foreignReads: () => foreignReads,
+  };
 }
 
 test('a failing state.json write fails the start loud, before anything is launched', async () => {
@@ -352,8 +363,10 @@ test('the breadcrumb is written BEFORE the launch (a starting run is visible + s
 
 test('a launch that fails clears the breadcrumb it wrote (no phantom running run)', async () => {
   const { build } = fakeBuilder();
-  const { state, clears } = spyState();
+  const { state, clears, clearedIds } = spyState();
+  let launchedId = '';
   const failingOpen: SessionBuilder = async (params) => {
+    launchedId = params.id;
     const built = await build(params);
     return {
       ...built,
@@ -366,6 +379,7 @@ test('a launch that fails clears the breadcrumb it wrote (no phantom running run
 
   await expect(svc.start({ target: 'web', goal: 'x' })).rejects.toThrow(AdapterError);
   expect(clears()).toBe(1); // the early `running` breadcrumb is not left behind
+  expect(clearedIds()).toEqual([launchedId]); // scoped to THIS attempt's run
   expect(manager.has(CWD)).toBe(false);
 });
 
@@ -438,23 +452,72 @@ test('a cancelled start leaves no breadcrumb and does not wedge the next start',
 
 test('end clears state.json even when the session close throws (error still propagates)', async () => {
   const { build } = fakeBuilder({ closeFails: true });
-  const { state, clears } = spyState();
+  const { state, clears, clearedIds } = spyState();
   const svc = makeService(build, { state });
   const { session_id } = await svc.start({ target: 'web', goal: 'x' });
 
   await expect(svc.end({ session_id })).rejects.toThrow(AdapterError);
   expect(clears()).toBe(1); // no stale `running` breadcrumb for the CLI to SIGTERM
+  expect(clearedIds()).toEqual([session_id]); // the ENDING run's id, never another's
   expect(manager.has(CWD)).toBe(false);
 });
 
 test('endActive clears state.json even when the session close throws', async () => {
   const { build } = fakeBuilder({ closeFails: true });
-  const { state, clears } = spyState();
+  const { state, clears, clearedIds } = spyState();
   const svc = makeService(build, { state });
   await svc.start({ target: 'web', goal: 'x' });
+  const endingId = manager.get(CWD).id;
 
   await expect(svc.endActive()).rejects.toThrow(AdapterError);
   expect(clears()).toBe(1);
+  expect(clearedIds()).toEqual([endingId]); // the auto-ended run's own breadcrumb
+});
+
+// --- delayed teardown: slot-free ≠ project-free ------------------------------
+
+test('a start during a delayed teardown is refused, then allowed once the close finishes', async () => {
+  const { build, log } = fakeBuilder();
+  let releaseClose: () => void = () => undefined;
+  const closeGate = new Promise<void>((resolve) => {
+    releaseClose = resolve;
+  });
+  // Ignores the abort signal entirely: only the gate settles this run's close —
+  // the slow profile/adapter release whose race this gate closes.
+  const stuckRun: LoopRunner = () => closeGate;
+  let first = true;
+  const builder: SessionBuilder = async (params) => {
+    const built = await build(params);
+    if (first) {
+      first = false;
+      return { ...built, run: stuckRun };
+    }
+    return built; // later builds are ordinary, so the retry can actually succeed
+  };
+  const { state, clearedIds } = spyState();
+  const svc = makeService(builder, { state });
+  const firstRun = await svc.start({ target: 'web', goal: 'x' });
+
+  // The ending teardown, unawaited: the slot is already free, the close in flight.
+  const ending = svc.end({ session_id: firstRun.session_id });
+  expect(manager.has(CWD)).toBe(false);
+  expect(manager.closingId(CWD)).toBe(firstRun.session_id);
+
+  // …so a start lands on a project still being released — refused before any build,
+  // naming the session whose teardown it must wait out.
+  const refused = await svc.start({ target: 'web', goal: 'y' }).catch((e: unknown) => e);
+  expect(refused).toBeInstanceOf(SessionBusyError);
+  expect((refused as SessionBusyError).message).toContain(firstRun.session_id);
+  expect((refused as SessionBusyError).message).toContain(CWD);
+  expect(log.builds).toBe(1);
+
+  releaseClose();
+  await ending;
+  expect(manager.closingId(CWD)).toBeUndefined(); // the gate lifted with the close
+  expect(clearedIds()).toEqual([firstRun.session_id]); // the ending run's own breadcrumb
+
+  const second = await svc.start({ target: 'web', goal: 'y' }); // now it goes through
+  expect(manager.get(CWD).id).toBe(second.session_id);
 });
 
 // --- cross-process one-run gate ---------------------------------------------
@@ -506,8 +569,8 @@ test('a takeover leaves the NEW run in the breadcrumb (its own clear cannot outr
     async record(run) {
       events.push(`record:${run.sessionId}`);
     },
-    async clear() {
-      events.push('clear');
+    async clear(sessionId) {
+      events.push(`clear:${sessionId}`);
     },
     async foreignRun() {
       return null;
@@ -521,7 +584,11 @@ test('a takeover leaves the NEW run in the breadcrumb (its own clear cannot outr
   const first = await svc.start({ target: 'web', goal: 'x' });
   const second = await svc.start({ target: 'web', goal: 'y', replace: true });
 
-  expect(events).toEqual([`record:${first.session_id}`, 'clear', `record:${second.session_id}`]);
+  expect(events).toEqual([
+    `record:${first.session_id}`,
+    `clear:${first.session_id}`,
+    `record:${second.session_id}`,
+  ]);
 });
 
 test('describe still names a run that auto-ended, so its findings stay reachable by id', async () => {

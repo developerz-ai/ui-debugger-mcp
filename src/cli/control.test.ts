@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { Findings } from '../findings/schema.js';
 import { captureIdentity } from '../session/process-identity.js';
 import type { StateFile } from '../session/state-file.js';
-import { readState, writeState } from '../session/state-file.js';
+import { FileStatePort, readState, writeState } from '../session/state-file.js';
 import { workspacePaths } from '../session/workspace.js';
 import { runStatus, runStop } from './control.js';
 
@@ -136,6 +136,24 @@ test('stop with a stale PID marks run stopped without signaling', async () => {
 function liveOwner(): Partial<StateFile> {
   return { pid: process.pid, identity: captureIdentity(process.pid) };
 }
+
+test('a successor breadcrumb survives the ending run\u2019s late scoped clear — stop still signals it', async () => {
+  // The race this pins: a run's teardown settles AFTER the next run recorded
+  // itself (delayed close + an immediate successor start). Its clear is scoped
+  // to its own id, so the live successor's breadcrumb must be untouched —
+  // otherwise `stop` would see a terminal status and skip the live server.
+  const stateJson = await seedState({ sessionId: 'successor-1', ...liveOwner() });
+  await new FileStatePort(workspacePaths(cwd)).clear('old-run');
+
+  const survived = await readState(stateJson);
+  expect(survived).toMatchObject({ status: 'running', sessionId: 'successor-1' });
+
+  const kills: number[] = [];
+  await runStop(cwd, (pid) => kills.push(pid));
+
+  expect(kills).toEqual([process.pid]); // the live successor was signaled, not skipped
+  expect((await readState(stateJson))?.status).toBe('stopped');
+});
 
 test('stop records `stopped` before the signal reaches the server', async () => {
   const stateJson = await seedState(liveOwner());

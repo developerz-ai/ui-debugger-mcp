@@ -11,8 +11,8 @@
  *
  * `record()` fails LOUD: a run nobody can see is a run nobody can stop — the
  * profile would stay locked with no way to reach the owner short of killing the
- * server by hand — so the service tears the start down instead. `clear()` stays
- * best-effort: the run is already down, and the stale breadcrumb it leaves names
+ * server by hand — so the service tears the start down instead. `clear(sessionId)`
+ * stays best-effort: the run is already down, and the stale breadcrumb it leaves names
  * a pid whose liveness the CLI checks anyway.
  *
  * The {@link StatePort} seam keeps {@link DebugService} fs-free in unit tests — a
@@ -94,8 +94,13 @@ export interface ForeignRun {
 export interface StatePort {
   /** Record the run as `running`. Throws when the breadcrumb cannot be written. */
   record(run: RunState): Promise<void>;
-  /** Mark the active run `ended` (clean end). */
-  clear(): Promise<void>;
+  /**
+   * Mark `ended` — ONLY the run whose session id this is. If the breadcrumb names
+   * a different session (a successor recorded itself while this teardown was in
+   * flight), leave it untouched: ending a live successor's breadcrumb makes
+   * `ui-debugger-mcp stop` refuse the run that is actually going.
+   */
+  clear(sessionId: string): Promise<void>;
   /**
    * The run a *different, live* server holds on this workspace, if any — the
    * cross-process half of the one-run gate. `null` when nobody else owns it.
@@ -152,8 +157,12 @@ export class FileStatePort implements StatePort {
     });
   }
 
-  async clear(): Promise<void> {
-    await markStatus(this.#workspace.stateJson, 'ended', this.#now()).catch(() => undefined);
+  async clear(sessionId: string): Promise<void> {
+    // Best-effort stays: the run is already down, and a swallowed clear only
+    // leaves a breadcrumb naming a pid whose liveness the CLI checks anyway.
+    await markStatus(this.#workspace.stateJson, 'ended', this.#now(), sessionId).catch(
+      () => undefined,
+    );
   }
 
   /**
@@ -190,8 +199,15 @@ export class FileStatePort implements StatePort {
 /**
  * Flip the recorded status (`ended`/`stopped`) in place, if a state file exists.
  *
+ * Pass `onlySessionId` to scope the flip to ONE run: the ending teardown does.
+ * A teardown can settle after the next run already recorded itself (a takeover,
+ * a successor start racing the close) — without the id, that late write would
+ * mark a LIVE successor `ended` and `ui-debugger-mcp stop` would refuse it.
+ * When the file names a different session, nothing is written at all.
+ *
  * `stopped` is terminal and wins: a CLI `stop` records it *before* signaling, then
- * the server's SIGTERM path calls `clear()` → `markStatus(..., 'ended')`. Preserve
+ * the server's SIGTERM path calls `clear(sessionId)` →
+ * `markStatus(..., 'ended', sessionId)`. Preserve
  * the existing `stopped` here so `status` keeps reporting the true terminal state
  * after a stop.
  *
@@ -204,9 +220,12 @@ export async function markStatus(
   path: string,
   status: 'ended' | 'stopped',
   now: Date = new Date(),
+  onlySessionId?: string,
 ): Promise<void> {
   const prior = await readState(path);
   if (!prior) return;
+  // Not our run anymore (a successor owns the breadcrumb) — never write over it.
+  if (onlySessionId !== undefined && prior.sessionId !== onlySessionId) return;
   const nextStatus = prior.status === 'stopped' ? 'stopped' : status;
   await writeState(path, { ...prior, status: nextStatus, updatedAt: now.toISOString() });
 }
