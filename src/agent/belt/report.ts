@@ -15,6 +15,12 @@
  * sub-schemas (`StepSchema` · `BugSchema` · `VisualIssueSchema`) so the verdict
  * the driver emits is byte-for-byte the verdict the store persists.
  *
+ * The write MERGES, never replaces: the run's streamed evidence — act steps,
+ * console errors, look issues the belt recorded as they happened — is carried
+ * into the verdict even when the driver's own arrays omit it. Omission cannot
+ * erase evidence; only `dismissStreamed: true` (a deliberate ruling-out) drops
+ * unrestated streamed entries.
+ *
  * Store-only seam: it touches just `writeFindings` via the {@link FindingsWriter}
  * slice — adapter-blind like the rest of the belt. Fails loud: an invalid verdict
  * surfaces the store's `FindingsError`; we never write a half-formed findings file
@@ -23,11 +29,15 @@
 
 import { tool } from 'ai';
 import { z } from 'zod';
-import type { Findings, Step } from '../../findings/schema.js';
+import type { Bug, Findings, Step, VisualIssue } from '../../findings/schema.js';
 import { BugSchema, StepSchema, VisualIssueSchema } from '../../findings/schema.js';
+import { evidenceKey, type TrailEvidence } from './trail.js';
 
 /** Terminal verdicts `report` may emit — `running` is excluded (it isn't terminal). */
 const TERMINAL_STATUSES = ['passed', 'failed'] as const;
+
+/** The empty evidence set — what a run with no wired trail streams. */
+export const EMPTY_EVIDENCE: TrailEvidence = { steps: [], bugs: [], visual: [] };
 
 /**
  * `report` input — the findings shape with a terminal `status`. Reuses the
@@ -52,6 +62,12 @@ export const ReportInputSchema = z.object({
     .array(VisualIssueSchema)
     .default([])
     .describe('visual issues from look: { issue, where, severity, screenshot? }'),
+  dismissStreamed: z
+    .boolean()
+    .default(false)
+    .describe(
+      'findings you already surfaced (look issues, console errors) that you did not list above are carried into the verdict; set true ONLY to dismiss them deliberately',
+    ),
   summary: z
     .string()
     .optional()
@@ -70,6 +86,11 @@ export interface ReportResult {
   findings: string;
   /** Counts derived from the written {@link Findings}, so the verdict reads without re-opening the file. */
   counts: { steps: number; bugs: number; visual: number };
+  /**
+   * Streamed evidence the driver never restated but the verdict carries — `0`
+   * when `dismissStreamed` was set (then nothing unrestated was included).
+   */
+  carried: { bugs: number; visual: number };
   /** Terminal signal: the agent loop ends after this call. `report` is the full stop. */
   stop: true;
 }
@@ -81,21 +102,6 @@ export interface ReportResult {
 export interface FindingsWriter {
   /** Validate + write the final `findings.json` (overwrites); returns its path. */
   writeFindings(findings: Findings): Promise<string>;
-}
-
-/**
- * Build the canonical findings record from a validated report input. The base
- * verdict shape; {@link terminalFindings} merges the loop's recorded act-trail
- * into its `steps`, so both the persisted write and the returned counts agree.
- */
-export function reportFindings(input: ReportInput): Findings {
-  return {
-    status: input.status,
-    steps: input.steps,
-    bugs: input.bugs,
-    visual: input.visual,
-    ...(input.summary !== undefined && { summary: input.summary }),
-  };
 }
 
 /** Pairing key for a reported step and a recorded one — case- and whitespace-insensitive. */
@@ -158,29 +164,124 @@ export function mergeSteps(reported: readonly Step[], trail: readonly Step[]): S
 }
 
 /**
- * The authoritative terminal {@link Findings}: the report input with the loop's
- * recorded act-`trail` merged into its `steps` (see {@link mergeSteps}) — never a
- * wholesale replacement, which silently dropped every step the driver reported.
- * The single source of truth for the terminal write AND the counts, so they never
- * drift (a `0`-step result returned over a trail-filled file).
+ * Fuse one reported bug with the streamed console error it restates: the
+ * driver's wording wins, the streamed row fills the evidence location the
+ * driver never saw.
  */
-export function terminalFindings(input: ReportInput, trail: readonly Step[] = []): Findings {
-  const findings = reportFindings(input);
-  return { ...findings, steps: mergeSteps(input.steps, trail) };
+function fuseBug(streamed: Bug, reported: Bug): Bug {
+  const evidence = reported.evidence ?? streamed.evidence;
+  return {
+    kind: reported.kind,
+    detail: reported.detail,
+    ...(evidence !== undefined && { evidence }),
+  };
 }
 
 /**
- * Write the terminal verdict and report the stop. Both the persisted findings and
- * the returned counts derive from one {@link terminalFindings} object — the loop's
- * `trail` merged with the driver's reported steps. Pure over the
+ * Fuse one reported visual issue with the streamed look issue it restates: the
+ * driver's wording wins, the streamed entry fills the screenshot path the
+ * driver never has at hand.
+ */
+function fuseVisual(streamed: VisualIssue, reported: VisualIssue): VisualIssue {
+  const screenshot = reported.screenshot ?? streamed.screenshot;
+  return {
+    issue: reported.issue,
+    where: reported.where,
+    severity: reported.severity,
+    ...(screenshot !== undefined && { screenshot }),
+  };
+}
+
+/**
+ * Merge reported findings with the streamed ones, streamed order as the spine —
+ * the same discipline as {@link mergeSteps}, for the bugs/visual streams. A
+ * restatement (matched by normalized key) fuses in place, driver fields winning
+ * and streamed evidence filling the gaps; reported entries that restate nothing
+ * append in reported order. Unrestated streamed entries are carried (`keep:
+ * true`) or dropped (`keep: false` — a deliberate `dismissStreamed`); `carried`
+ * counts what was included, so it is always 0 under `keep: false`.
+ */
+function mergeStreamed<T>(
+  reported: readonly T[],
+  streamed: readonly T[],
+  keyOf: (item: T) => string,
+  fuse: (streamed: T, reported: T) => T,
+  keep: boolean,
+): { merged: T[]; carried: number } {
+  const pending = new Map<string, Array<{ index: number; item: T }>>();
+  reported.forEach((item, index) => {
+    const queue = pending.get(keyOf(item));
+    if (queue) queue.push({ index, item });
+    else pending.set(keyOf(item), [{ index, item }]);
+  });
+  const fused = new Set<number>();
+  const merged: T[] = [];
+  let carried = 0;
+  for (const entry of streamed) {
+    const hit = pending.get(keyOf(entry))?.shift();
+    if (hit) {
+      fused.add(hit.index);
+      merged.push(fuse(entry, hit.item));
+    } else if (keep) {
+      carried += 1;
+      merged.push(entry);
+    }
+  }
+  for (const [index, item] of reported.entries()) {
+    if (!fused.has(index)) merged.push(item);
+  }
+  return { merged, carried };
+}
+
+/**
+ * Everything the terminal write needs, derived in ONE pass: the merged evidence
+ * streams and the carried counts. The single source of truth for the persisted
+ * findings AND the returned counts, so they never drift.
+ */
+function mergeEvidence(input: ReportInput, evidence: TrailEvidence) {
+  const steps = mergeSteps(input.steps, evidence.steps);
+  const bugMerge = mergeStreamed(
+    input.bugs,
+    evidence.bugs,
+    (bug) => evidenceKey(bug.detail),
+    fuseBug,
+    !input.dismissStreamed,
+  );
+  const visualMerge = mergeStreamed(
+    input.visual,
+    evidence.visual,
+    (issue) => evidenceKey(issue.issue, issue.where),
+    fuseVisual,
+    !input.dismissStreamed,
+  );
+  return {
+    steps,
+    bugs: bugMerge.merged,
+    visual: visualMerge.merged,
+    // Already 0 across the board under `dismissStreamed` — nothing unrestated was kept.
+    carried: { bugs: bugMerge.carried, visual: visualMerge.carried },
+  };
+}
+
+/**
+ * Write the terminal verdict and report the stop. Both the persisted findings
+ * and the returned counts/carried derive from ONE {@link mergeEvidence} pass —
+ * the run's streamed evidence merged with the driver's verdict. Pure over the
  * {@link FindingsWriter} seam, so it unit-tests against a fake with no disk.
  */
 export async function runReport(
   writer: FindingsWriter,
   input: ReportInput,
-  trail: readonly Step[] = [],
+  evidence: TrailEvidence = EMPTY_EVIDENCE,
 ): Promise<ReportResult> {
-  const findings = terminalFindings(input, trail);
+  const { steps, bugs, visual, carried } = mergeEvidence(input, evidence);
+  const findings: Findings = {
+    status: input.status,
+    steps,
+    bugs,
+    visual,
+    ...(input.summary !== undefined && { summary: input.summary }),
+  };
   const path = await writer.writeFindings(findings);
   return {
     status: input.status,
@@ -190,29 +291,31 @@ export async function runReport(
       bugs: findings.bugs.length,
       visual: findings.visual.length,
     },
+    carried,
     stop: true,
   };
 }
 
 /**
  * Build the `report` tool bound to one findings store, for the debug agent's belt.
- * `getTrail` (when wired by the loop) supplies the recorded act-trail so the
- * written verdict and its counts both reflect the steps actually taken.
+ * `getTrail` (when wired by the loop) supplies the run's streamed evidence so the
+ * written verdict carries the console errors and look issues the belt recorded,
+ * not just what the driver chose to list.
  *
  * It may be async — and the wired one is. `report` executes CONCURRENTLY with the
- * other tool calls of its own step, so when the driver emits `act` + `report`
- * together the act is still running here; the wired read is the act trail's
+ * other tool calls of its own step, so when the driver emits `look` + `report`
+ * together the look is still running here; the wired read is the evidence trail's
  * `settled()`, which waits for it (see `belt/trail.ts`). Waiting is safe: the
- * step's own `Promise.all` already awaits that act.
+ * step's own `Promise.all` already awaits that call.
  */
 export function createReportTool(
   writer: FindingsWriter,
-  getTrail?: () => readonly Step[] | Promise<readonly Step[]>,
+  getTrail?: () => TrailEvidence | Promise<TrailEvidence>,
 ) {
   return tool({
     description:
-      'Emit the final structured findings and END the run. Call exactly once, when the goal is met or you hit the step limit. Validates and writes findings.json: status (passed|failed) plus steps/bugs/visual/summary. This is terminal — the loop stops after report, so do not act again. Make summary actionable for the smart agent: what broke, where, what to fix.',
+      'Emit the final structured findings and END the run. Call exactly once, when the goal is met or you hit the step limit. Validates and writes findings.json: status (passed|failed) plus steps/bugs/visual/summary. Console errors you surfaced earlier are carried in even if you forget to list them; look issues too when a separate vision model judges the looks. Dismissal is deliberate (dismissStreamed). This is terminal — the loop stops after report, so do not act again. Make summary actionable for the smart agent: what broke, where, what to fix.',
     inputSchema: ReportInputSchema,
-    execute: async (input) => runReport(writer, input, (await getTrail?.()) ?? []),
+    execute: async (input) => runReport(writer, input, (await getTrail?.()) ?? EMPTY_EVIDENCE),
   });
 }

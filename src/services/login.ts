@@ -206,8 +206,13 @@ export interface LoginOptions extends ResolvedAuth {
   loginUrl: string;
   /** The run's remaining wall-clock budget (ms); only ever shortens the login's waits. */
   timeoutMs?: number;
-  /** Breadcrumb sink (`logs/agent.log`). The caller's sink is already secret-redacting. */
-  log?: (line: string) => void;
+  /**
+   * Breadcrumb sink (`logs/agent.log`). The caller's sink is already secret-redacting.
+   * MAY return a promise (an awaited flush): both breadcrumbs are `await`ed, so when
+   * `performLogin` resolves — and with it the run's `open()` — the login's trail is
+   * already durable on disk, not still in flight behind a fire-and-forget write.
+   */
+  log?: (line: string) => unknown;
 }
 
 /** The active tab's URL, or `null` on a target with no tab concept (desktop/android). */
@@ -238,7 +243,7 @@ export async function performLogin(adapter: Adapter, options: LoginOptions): Pro
   /** Marks every step here as the pre-run login, not something the driver chose. */
   const note = `auth persona ${JSON.stringify(name)} — signed in before the run's first step`;
 
-  log(`auth: signing in as ${JSON.stringify(name)} at ${loginUrl}`);
+  await log(`auth: signing in as ${JSON.stringify(name)} at ${loginUrl}`);
   await adapter.open(loginUrl, budget);
   steps.push({ step: `open ${loginUrl}`, ok: true, note });
 
@@ -276,7 +281,7 @@ export async function performLogin(adapter: Adapter, options: LoginOptions): Pro
   // Where the login LANDED, not where the run was configured to start: submitting
   // usually redirects, so this is the page the driver's first step actually reads.
   const landed = await currentUrl(adapter);
-  log(`auth: signed in as ${JSON.stringify(name)}${landed ? ` → ${landed}` : ''}`);
+  await log(`auth: signed in as ${JSON.stringify(name)}${landed ? ` → ${landed}` : ''}`);
   steps.push({ step: `signed in as "${name}"${landed ? ` → ${landed}` : ''}`, ok: true, note });
   return steps;
 }

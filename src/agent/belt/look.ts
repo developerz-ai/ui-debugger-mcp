@@ -24,6 +24,7 @@ import { generateText, tool } from 'ai';
 import { z } from 'zod';
 import type { Adapter } from '../../adapters/contract.js';
 import { AgentError, VisionUnavailableError } from '../../errors.js';
+import type { ActTrail } from './trail.js';
 
 /** `look` input — both optional: ask a `question`, and/or state the `expect`ed look. */
 export const LookInputSchema = z.object({
@@ -381,11 +382,18 @@ export function createSelfLookTool(adapter: Adapter, recorder: EvidenceRecorder)
   });
 }
 
-/** Build the `look` tool bound to one adapter + vision model + recorder, for the belt. */
+/**
+ * Build the `look` tool bound to one adapter + vision model + recorder, for the belt.
+ * `trail` (when wired by the loop) is the run's evidence trail: every issue the
+ * vision guy flags is recorded there — with the frame it was judged on — BEFORE
+ * the gate releases, so a `report` racing in the SAME step carries it even when
+ * the driver's own `visual` array omits it. The trail dedupes repeats.
+ */
 export function createLookTool(
   adapter: Adapter,
   vision: LanguageModel,
   recorder: EvidenceRecorder,
+  trail?: ActTrail,
 ) {
   const modelId = typeof vision === 'string' ? vision : vision.modelId;
   // Forward the abort signal into the vision call: on end_session / wall-clock
@@ -408,6 +416,29 @@ export function createLookTool(
     description:
       'Ask the vision model to look at the current screen. Captures a screenshot and sends it with your question/expect to the multimodal "eyes", which judges how it looks (layout, alignment, colour, overlap, cut-off text). Returns { description, matches?, issues[] } with the screenshot saved as evidence. Use only when structure (observe) cannot answer — vision is slow and costly.',
     inputSchema: LookInputSchema,
-    execute: (input, options) => execute(input, options.abortSignal),
+    execute: async (input, options) => {
+      // Enter the trail's gate BEFORE the first await, so a same-step terminal read
+      // sees this look in flight rather than an idle gate (same discipline as `act`).
+      const settle = trail?.begin();
+      try {
+        const result = await execute(input, options.abortSignal);
+        // Record AFTER the result exists, BEFORE releasing: a look that succeeded
+        // has surfaced real issues, and releasing first would let a racing `report`
+        // read a trail missing exactly the frame it is about to wait for.
+        for (const issue of result.issues) {
+          trail?.recordVisual({
+            issue: issue.what,
+            where: issue.where,
+            severity: issue.severity,
+            screenshot: result.screenshot,
+          });
+        }
+        return result;
+      } finally {
+        // A FAILED look records nothing — the driver got the error, nothing was
+        // surfaced — but the gate must still release.
+        settle?.();
+      }
+    },
   });
 }

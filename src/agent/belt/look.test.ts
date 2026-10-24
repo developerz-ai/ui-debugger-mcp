@@ -14,6 +14,7 @@ import {
   type VisionRequest,
   visionUnavailableMessage,
 } from './look.js';
+import { type ActTrail, createActTrail } from './trail.js';
 
 /** A fake {@link Adapter} whose only meaningful method is `screenshot`. */
 function fakeAdapter(png: Uint8Array, order?: string[]): Adapter {
@@ -210,6 +211,29 @@ test('runLook forwards the abort signal into the vision seam', async () => {
   await runLook(adapter, generate, recorder, { question: 'q' }, controller.signal);
   expect(seen[0]?.abortSignal).toBe(controller.signal);
 });
+
+/** A mock vision model whose reply resolves after `ms` of real work. */
+function slowVision(text: string, ms: number) {
+  return new MockLanguageModelV3({
+    doGenerate: async () => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      return {
+        content: [{ type: 'text' as const, text }],
+        finishReason: { unified: 'stop' as const, raw: 'stop' },
+        usage: {
+          inputTokens: {
+            total: 1,
+            noCache: 1 as number | undefined,
+            cacheRead: undefined,
+            cacheWrite: undefined,
+          },
+          outputTokens: { total: 1, text: 1 as number | undefined, reasoning: undefined },
+        },
+        warnings: [] as [],
+      };
+    },
+  });
+}
 
 test('createLookTool threads the tool abort signal into the vision generateText call', async () => {
   const seenSignals: Array<AbortSignal | undefined> = [];
@@ -410,4 +434,91 @@ test('createSelfLookTool returns the frame itself and maps it to multimodal tool
   const media = value[1] as unknown as { data: string; mediaType: string };
   expect(media.mediaType).toBe('image/png');
   expect(media.data).toBe(output.frame);
+});
+
+// --- the evidence trail: createLookTool records what the vision guy surfaced --
+
+/** Run one look through the wired tool and return its result. */
+async function callLook(
+  look: ReturnType<typeof createLookTool>,
+  input: { question?: string } = { question: 'q' },
+): Promise<unknown> {
+  return look.execute?.(input, { toolCallId: 't1', messages: [] });
+}
+
+test('a look whose vision reply flags issues records each as a VisualIssue with the saved screenshot', async () => {
+  const trail = createActTrail();
+  const look = createLookTool(
+    fakeAdapter(PNG),
+    slowVision(cleanReply, 0),
+    fakeRecorder().recorder,
+    trail,
+  );
+  await callLook(look);
+  expect(trail.visual).toEqual([
+    {
+      issue: 'low contrast label',
+      where: 'primary button',
+      severity: 'low',
+      screenshot: 'screenshots/001-q.png',
+    },
+  ]);
+});
+
+test('a concurrent trail.settled() started BEFORE the look finishes still sees the issues', async () => {
+  // The same-step look + report race: the terminal read begins while the look is
+  // still in flight and must wait for it — the issues are recorded BEFORE the
+  // gate releases, so the settled read cannot miss them.
+  const trail = createActTrail();
+  const look = createLookTool(
+    fakeAdapter(PNG),
+    slowVision(cleanReply, 5),
+    fakeRecorder().recorder,
+    trail,
+  );
+  const read = trail.settled();
+  await callLook(look);
+  const evidence = await read;
+  expect(evidence.visual).toEqual([
+    {
+      issue: 'low contrast label',
+      where: 'primary button',
+      severity: 'low',
+      screenshot: 'screenshots/001-q.png',
+    },
+  ]);
+});
+
+test('a look with zero issues records nothing', async () => {
+  const trail = createActTrail();
+  const look = createLookTool(
+    fakeAdapter(PNG),
+    slowVision(JSON.stringify({ description: 'all good', issues: [] }), 0),
+    fakeRecorder().recorder,
+    trail,
+  );
+  await callLook(look);
+  expect(trail.visual).toEqual([]);
+  expect(trail.bugs).toEqual([]);
+});
+
+test('a look that throws records nothing but still releases the gate', async () => {
+  const trail: ActTrail = createActTrail();
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      throw new Error('rate limit exceeded');
+    },
+  });
+  const look = createLookTool(fakeAdapter(PNG), model, fakeRecorder().recorder, trail);
+  await expect(callLook(look)).rejects.toThrow('rate limit exceeded');
+  // The failed look surfaced nothing — and the gate is open again for later reads.
+  const evidence = await trail.settled();
+  expect(evidence.visual).toEqual([]);
+});
+
+test('no trail wired — the look behaves exactly as before', async () => {
+  const look = createLookTool(fakeAdapter(PNG), slowVision(cleanReply, 0), fakeRecorder().recorder);
+  const result = (await callLook(look)) as { description: string; screenshot: string };
+  expect(result.description).toBe('A blue button, centred.');
+  expect(result.screenshot).toBe('screenshots/001-q.png');
 });

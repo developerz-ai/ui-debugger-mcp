@@ -285,9 +285,9 @@ test('the trail read settles only after the act it announced has recorded', asyn
   // What a same-step `act` + `report` looks like: the terminal read starts while
   // the act is still in flight and must still see it.
   const acting = runAct(adapter, recorder, { action: 'click', target: '#x' }, trail);
-  const settled = await trail.settled();
+  const evidence = await trail.settled();
   await acting;
-  expect(settled.map((s) => s.step)).toEqual(['click button "Save"']);
+  expect(evidence.steps.map((s) => s.step)).toEqual(['click button "Save"']);
 });
 
 test('an act that throws is recorded as ok:false with the error, then rethrown', async () => {
@@ -588,7 +588,7 @@ test('the reloaded step carries the load on the trail, still ok', async () => {
   const { adapter } = loadingAdapter(['http://x/?email=a%40b.com']);
   const trail = createActTrail();
   await runAct(adapter, fakeRecorder().recorder, { action: 'click', target: 'Subscribe' }, trail);
-  const [step] = await trail.settled();
+  const [step] = (await trail.settled()).steps;
   expect(step?.ok).toBe(true);
   expect(step?.note).toContain('http://x/?email=a%40b.com');
   expect(step?.note).toMatch(/state was lost/i);

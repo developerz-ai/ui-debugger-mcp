@@ -10,6 +10,7 @@ import type {
 import { AdapterError, AgentError } from '../../errors.js';
 import type { EvidenceRecorder } from './look.js';
 import { coerceWithin, createObserveTool, ObserveInputSchema, runObserve } from './observe.js';
+import { type ActTrail, createActTrail } from './trail.js';
 
 /** A fake {@link EvidenceRecorder} recording every saved frame. */
 function fakeEvidenceRecorder(): {
@@ -527,4 +528,185 @@ test('observe kind:"tabs" fails loud on a target with no tab concept', async () 
   const { adapter } = fakeAdapter({}, false);
   // Desktop/android expose no `tabs` — say so rather than inventing one.
   await expect(runObserve(adapter, recorder(), { kind: 'tabs' })).rejects.toThrow(AgentError);
+});
+
+// --- the evidence trail: createObserveTool records error-level console rows ---
+
+/** The wired observe tool over a fake adapter returning `console` rows. */
+function wiredObserve(console: ConsoleEntry[], trail = createActTrail()) {
+  const { adapter } = fakeAdapter({ console });
+  const observe = createObserveTool(adapter, recorder(), trail);
+  return {
+    trail,
+    read: (input: Parameters<typeof runObserve>[2]) =>
+      observe.execute?.(input, { toolCallId: 't1', messages: [] }),
+  };
+}
+
+const ERROR_ROWS: ConsoleEntry[] = [
+  { level: 'error', text: 'TypeError: cart is undefined', location: 'app.js:12:3', timestamp: 1 },
+  { level: 'warn', text: 'deprecated api', timestamp: 2 },
+  { level: 'error', text: 'failed to fetch', timestamp: 3 },
+  { level: 'log', text: 'checkout mounted', timestamp: 4 },
+  { level: 'info', text: 'hydration done', timestamp: 5 },
+];
+
+test('a console read records error-level rows as bugs, keeping the location as evidence', async () => {
+  const { trail, read } = wiredObserve(ERROR_ROWS);
+  await read({ kind: 'console' });
+  expect(trail.bugs).toEqual([
+    { kind: 'console', detail: 'TypeError: cart is undefined', evidence: 'app.js:12:3' },
+    { kind: 'console', detail: 'failed to fetch' },
+  ]);
+});
+
+test('warn/log/info rows record nothing — working noise is not a finding', async () => {
+  const { trail, read } = wiredObserve([
+    { level: 'warn', text: 'deprecated api', timestamp: 1 },
+    { level: 'log', text: 'checkout mounted', timestamp: 2 },
+    { level: 'info', text: 'hydration done', timestamp: 3 },
+  ]);
+  await read({ kind: 'console' });
+  expect(trail.bugs).toEqual([]);
+});
+
+test('a re-read of the same rows adds nothing — the trail dedupes', async () => {
+  // The console channel is a non-destructive ring buffer: every later read
+  // returns rows already recorded.
+  const { trail, read } = wiredObserve(ERROR_ROWS);
+  await read({ kind: 'console' });
+  await read({ kind: 'console' });
+  await read({ kind: 'console', limit: 50 });
+  expect(trail.bugs).toHaveLength(2);
+});
+
+test('tree/screenshot/network/tabs kinds record nothing', async () => {
+  const png = new Uint8Array([1, 2, 3, 4]);
+  const trail = createActTrail();
+  const { adapter } = fakeAdapter({ screenshot: png });
+  const withTabs: Adapter = {
+    ...adapter,
+    network: async () => [
+      { method: 'GET', url: 'http://x/api', status: 500, ok: false, timestamp: 1 },
+    ],
+    tabs: async () => [{ index: 0, url: 'http://x/', title: 'Home', active: true }],
+  };
+  const observe = createObserveTool(withTabs, recorder(), trail);
+  const call = (input: Parameters<typeof runObserve>[2]) =>
+    observe.execute?.(input, { toolCallId: 't1', messages: [] });
+  await call({ kind: 'tree' });
+  await call({ kind: 'screenshot' });
+  await call({ kind: 'network' });
+  await call({ kind: 'tabs' });
+  expect(trail.bugs).toEqual([]);
+  expect(trail.visual).toEqual([]);
+  expect(trail.steps).toEqual([]);
+});
+
+test('a throwing read records nothing and releases the gate', async () => {
+  const trail = createActTrail();
+  const { adapter } = fakeAdapter({});
+  adapter.console = async () => {
+    throw new AdapterError('console gone');
+  };
+  const observe = createObserveTool(adapter, recorder(), trail);
+  await expect(
+    observe.execute?.({ kind: 'console' }, { toolCallId: 't1', messages: [] }),
+  ).rejects.toThrow(AdapterError);
+  const evidence = await trail.settled();
+  expect(evidence.bugs).toEqual([]);
+});
+
+// --- gate discipline: a same-step terminal read must wait out an in-flight read --
+
+/**
+ * A one-shot latch: the fake adapter's console read stays in flight until
+ * `open()` — the shape of a real read racing the terminal one, with no
+ * wall-clock timing.
+ */
+function latch(): { wait: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const wait = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { wait, open };
+}
+
+/**
+ * The evidence arrays as they stood the moment `settled()` resolved — what a
+ * same-step `report` merges. The trail hands back live arrays, so only a copy
+ * taken at resolve time can tell a settled() that waited out the gate from one
+ * that resolved early over an in-flight read.
+ */
+function snapshotAtDrain(settling: ReturnType<ActTrail['settled']>) {
+  return settling.then((evidence) => ({
+    steps: [...evidence.steps],
+    bugs: [...evidence.bugs],
+    visual: [...evidence.visual],
+  }));
+}
+
+/** A held-open console read: `open()` releases it, ERROR_ROWS come back. */
+function heldObserve(trail: ActTrail) {
+  const { wait, open } = latch();
+  const { adapter } = fakeAdapter({});
+  adapter.console = async () => {
+    await wait;
+    return ERROR_ROWS;
+  };
+  return { open, observe: createObserveTool(adapter, recorder(), trail) };
+}
+
+test('a trail.settled() opened while the console read is in flight waits out the gate', async () => {
+  // The same-step observe → report race: the terminal read starts while the
+  // console read is still running and must not resolve until the gate releases —
+  // which is only after the read has recorded its error rows.
+  const trail = createActTrail();
+  const { open, observe } = heldObserve(trail);
+  const executing = observe.execute?.({ kind: 'console' }, { toolCallId: 't1', messages: [] });
+  const drained = snapshotAtDrain(trail.settled());
+  // Give settled() the one turn its own yield takes — every chance a missing
+  // gate would need to resolve it early, while the read is provably in flight.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  open();
+  await executing;
+  expect(await drained).toEqual({
+    steps: [],
+    bugs: [
+      { kind: 'console', detail: 'TypeError: cart is undefined', evidence: 'app.js:12:3' },
+      { kind: 'console', detail: 'failed to fetch' },
+    ],
+    visual: [],
+  });
+});
+
+test('a concurrent trail.settled() started BEFORE the read finishes still sees the rows', async () => {
+  // Mirror of the look race (look.test.ts 'a concurrent trail.settled() started
+  // BEFORE the look finishes still sees the issues'): the terminal read is
+  // created first. While it yields its turn, the observe enters the gate —
+  // before its first await — and reads, so the settled read finds the gate
+  // held, waits it out, and carries the rows. Without the gate it resolves over
+  // the in-flight read and the snapshot below comes up empty.
+  const trail = createActTrail();
+  const { open, observe } = heldObserve(trail);
+  const drained = snapshotAtDrain(trail.settled());
+  const executing = observe.execute?.({ kind: 'console' }, { toolCallId: 't1', messages: [] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  open();
+  await executing;
+  expect((await drained).bugs).toEqual([
+    { kind: 'console', detail: 'TypeError: cart is undefined', evidence: 'app.js:12:3' },
+    { kind: 'console', detail: 'failed to fetch' },
+  ]);
+});
+
+test('no trail wired — observe behaves exactly as before', async () => {
+  const { adapter } = fakeAdapter({ console: ERROR_ROWS });
+  const observe = createObserveTool(adapter, recorder());
+  const res = (await observe.execute?.(
+    { kind: 'console' },
+    { toolCallId: 't1', messages: [] },
+  )) as { kind: string; count: number };
+  expect(res.kind).toBe('console');
+  expect(res.count).toBe(5);
 });

@@ -24,6 +24,8 @@ interface LookMode {
   cost: string;
   /** Extra loop rule, newline-prefixed; empty when the mode has no such rule. */
   extraRule: string;
+  /** Carried-evidence paragraph of the terminal `report` section — what this mode's `look` does and does not stream. */
+  carried: string;
 }
 
 /** Blind driver + separate vision guy: `look` is a second model call, and it can latch off. */
@@ -37,6 +39,12 @@ const VISION_MODE: LookMode = {
 - If \`look\` reports it is unavailable for this run, do not call it again — finish
   the structural checks and state in your report summary that visual checks could
   not be performed (unverified, not passed).`,
+  // `createLookTool` records every issue the vision guy flags on the trail, so
+  // `report` can carry them even when the driver forgets to list them.
+  carried: `Console errors and look issues you surfaced earlier are carried into the verdict
+EVEN if you forget to list them — omission cannot erase evidence, so still list
+what matters (your wording wins). Set "dismissStreamed": true ONLY to drop
+streamed findings you deliberately ruled out.`,
 };
 
 /** Multimodal driver: `look` hands the frame back to it — no vision guy, no latch. */
@@ -46,6 +54,13 @@ const SELF_LOOK_MODE: LookMode = {
   // `pruneStaleFrames` (agent/loop.ts) drops older frames from the re-sent history.
   cost: 'Only the newest frame stays in your context, so judge each one as it arrives.',
   extraRule: '',
+  // `createSelfLookTool` (look.ts) records NOTHING on the trail — it hands the
+  // frame back and the driver judges it. An unlisted look issue is simply lost.
+  carried: `Console errors you surfaced earlier are carried into the verdict EVEN if you
+forget to list them — omission cannot erase them. Look issues are NOT carried:
+YOU judged the frames, nothing recorded them, so every visual finding MUST be
+in your report or it is lost. Set "dismissStreamed": true ONLY to drop
+streamed findings you deliberately ruled out.`,
 };
 
 /**
@@ -187,9 +202,12 @@ Goal complete (or step limit hit) → call \`report\` exactly once:
   "steps": [ { "step": "...", "ok": true, "note": "...", "screenshot": "..." } ],
   "bugs":   [ { "kind": "console"|"network"|"flow", "detail": "...", "evidence": "..." } ],
   "visual": [ { "issue": "...", "where": "...", "severity": "low"|"medium"|"high", "screenshot": "..." } ],
+  "dismissStreamed": false,
   "summary": "One-paragraph verdict the smart agent can act on."
 }
 \`\`\`
+
+${mode.carried}
 
 NEVER stop before \`report\`. NEVER call it twice. The summary is for the smart
 agent — make it actionable: what broke, where, what to fix.
