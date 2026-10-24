@@ -327,15 +327,22 @@ export class FileStatePort implements StatePort {
       // Scoped to the run being ended: a successor that recorded itself while
       // this teardown was in flight keeps its own breadcrumb AND its claim.
       if (prior?.sessionId !== sessionId) return;
-      await markStatus(
-        this.#workspace.stateJson,
-        'ended',
-        this.#now(),
-        sessionId,
-        this.#io,
-        (state) => state.pid === this.#pid,
-      );
-      await this.#releaseClaim();
+      try {
+        await markStatus(
+          this.#workspace.stateJson,
+          'ended',
+          this.#now(),
+          sessionId,
+          this.#io,
+          (state) => state.pid === this.#pid,
+        );
+      } finally {
+        // The run is over either way: a breadcrumb write that THREW must not
+        // leave a live-process claim behind — an ended run still holding the
+        // claim wedges the workspace for every other server until this one
+        // exits, with nothing left to end.
+        await this.#releaseClaim();
+      }
     }).catch(() => undefined);
   }
 

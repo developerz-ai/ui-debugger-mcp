@@ -267,10 +267,13 @@ test('a record racing an in-flight clear queues behind it — the live successor
   // that clear is still mid-flight.
   const clearing = port.clear('old');
   const recording = port.record({ sessionId: 'new', target: 'web', goal: 'next' });
-  await new Promise<void>((r) => setTimeout(r, 0)); // both parked where they belong
-
-  // The record has NOT slipped past the parked clear: the breadcrumb is still
-  // exactly what the clear read, and only the clear's write is in flight.
+  // Wait for the clear's write to actually START: the queue ahead of it does
+  // real-fs reads (the ownership claim, the process identity) that do not
+  // reliably beat a single tick under load. The record must still be parked
+  // BEHIND that in-flight write.
+  for (let waited = 0; writes === 0 && waited < 2000; waited += 5) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
   expect(writes).toBe(1);
   expect(onDisk()).toMatchObject({ sessionId: 'old', status: 'running' });
 
@@ -499,6 +502,52 @@ test('a failed second record does not release the claim held by the first record
   expect(existsSync(ownerLockPath(ws))).toBe(true);
   const claim = JSON.parse(await readFile(ownerLockPath(ws), 'utf8'));
   expect(claim.pid).toBe(process.pid);
+});
+
+test('a failing breadcrumb write during teardown still releases the claim', async () => {
+  // markStatus throwing inside clear() used to be swallowed BEFORE the claim
+  // was released: an ended run kept a live-process claim, so every other
+  // server was refused the workspace until this one exited — with no run left
+  // to end. The release runs in a finally, once the ending session is
+  // confirmed ours.
+  const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
+  await mkdir(ws.root, { recursive: true });
+  await writeFile(
+    ownerLockPath(ws),
+    `${JSON.stringify(
+      {
+        pid: process.pid,
+        identity: captureIdentity(process.pid),
+        sessionId: 'owner-run',
+        acquiredAt: '2026-06-29T00:00:00.000Z',
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
+  const prior: StateFile = {
+    ...SAMPLE,
+    pid: process.pid,
+    identity: captureIdentity(process.pid),
+    sessionId: 'owner-run',
+    sessionDir: join(ws.sessions, 'owner-run'),
+  };
+  const io: StateIo = {
+    async read() {
+      return prior;
+    },
+    async write() {
+      throw new Error('breadcrumb write failed');
+    },
+  };
+  const port = new FileStatePort(ws, { pid: process.pid, io });
+
+  // Teardown stays best-effort — it must not throw into the close path…
+  await port.clear('owner-run');
+
+  // …and the claim must be given back even though the write threw.
+  expect(existsSync(ownerLockPath(ws))).toBe(false);
 });
 
 test('a breadcrumb written without a claim still publishes', async () => {

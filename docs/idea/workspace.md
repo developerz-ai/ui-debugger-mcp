@@ -18,6 +18,7 @@ for that app. Keyed by the current dir.
 │       ├── network.log        requests, responses, failures, timings
 │       └── agent.log          small agent's step-by-step trail
 ├── owner.lock                 exclusive ownership claim (one live owner)
+├── owner.lock.reclaim         serialization of dead-claim reclamation (transient)
 └── state.json                 session state, keyed by cwd
 ```
 
@@ -35,6 +36,7 @@ for that app. Keyed by the current dir.
 | `network.log`       | The 500s / hangs / bad payloads behind a broken UI. |
 | `agent.log`         | Why the small agent decided pass/fail. Auditable. |
 | `owner.lock`        | The **exclusive ownership claim** — the authoritative one-run gate. Taken atomically (`open(..., 'wx')`) by `FileStatePort.record` before any breadcrumb is published; names its holder by pid + process identity, so a live foreign owner refuses the start (`SessionBusyError`) and a dead or PID-recycled holder is reclaimed. Released only by the owner it names. |
+| `owner.lock.reclaim` | Serializes stale-claim reclamation across processes: judging a claim dead and unlinking it are two steps, and an unserialized unlink can land on a rival's *fresh* claim after the rival already won — two owners. A reclaimer takes this mutex atomically, re-verifies the claim still holds the exact bytes it judged stale, then unlinks; gone again the moment the reclaim settles. |
 | `state.json`        | Resume / inspect the cwd-keyed session. |
 
 ## PR replay video
