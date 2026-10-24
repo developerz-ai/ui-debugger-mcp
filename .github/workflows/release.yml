@@ -27,7 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Pin the checkout to the ref the event fired on, so the tree that is
+      # validated below is provably the tree `npm publish` publishes from
+      # (an unpinned checkout floats to whatever the runner resolves).
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -38,15 +43,35 @@ jobs:
       - name: upgrade npm
         run: npm install -g npm@latest
 
+      # Bun is pinned to the version CI validates at (.github/workflows/ci.yml)
+      # because the publication gate below depends on `bun test`'s path-filter
+      # and exit-code semantics. On `latest` a Bun release could break or
+      # silently alter that gate on a version the repo never tested.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: "1.4.3"
 
       - name: install
         run: bun install --frozen-lockfile
 
       - name: build
         run: bun run build
+
+      # MANDATORY PUBLICATION GATE. The version-consistency tests already exist
+      # (`src/index.test.ts` checks the source <-> package.json version and
+      # server.json's two version fields; `src/mcp/registry-server-json.test.ts`
+      # validates the registry metadata against its schema) but they only ran in
+      # CI — neither publication route below was gated by them, so a release
+      # could ship a drifted version to npm AND the MCP Registry.
+      #
+      # This step is deliberately unconditional and fatal: no `if:` (a skipped
+      # step is missing validation), no `continue-on-error` (a failed step must
+      # fail the job). It runs AFTER `build` and BEFORE both publish steps, so
+      # a drifted version never reaches npm or the registry.
+      - name: validate version consistency
+        run: |
+          echo "publishing revision: $(git rev-parse HEAD)"
+          bun test src/index.test.ts src/mcp/registry-server-json.test.ts
 
       # Skip if this version is already on npm, so the job stays re-runnable: a run
       # that published to npm but failed afterwards (or a workflow_dispatch to
