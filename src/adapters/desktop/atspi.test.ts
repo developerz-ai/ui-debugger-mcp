@@ -478,13 +478,15 @@ test('BusctlAtspi.readTree without a scope sees every application on the desktop
   expect(nodes.filter((n) => n.name === 'Save')).toHaveLength(2);
 });
 
-test('BusctlAtspi.readTree with a scope returns only the scoped application', async () => {
+test('BusctlAtspi.readTree with a scope returns only the subtree the scope names', async () => {
   const bus = twoAppBus();
   const nodes = await new BusctlAtspi({ exec: bus.exec }).readTree({
     scope: { title: 'Managed App' },
   });
-  expect(nodes.map((n) => n.name)).toEqual(['Managed App', 'Managed App — Doc', 'Save']);
-  // The foreign app's identically-labelled button is NOT in the result.
+  // The title matches the WINDOW 'Managed App — Doc' as well as the application
+  // 'Managed App'. Matching windows come first, so the walk is rooted at the
+  // window; the foreign app's identically-labelled button is NOT in the result.
+  expect(nodes.map((n) => n.name)).toEqual(['Managed App — Doc', 'Save']);
   expect(nodes.some((n) => n.name === 'Foreign App')).toBe(false);
 });
 
@@ -516,10 +518,91 @@ test('BusctlAtspi.readTree lets the class pick the application, the title the wi
   const nodes = await new BusctlAtspi({ exec: bus.exec }).readTree({
     scope: { title: 'Doc', class: 'myapp' },
   });
-  // 'myapp' holds the 'Doc' window; 'Doc Editor' is a different app that also
-  // carries the title in its NAME — the class must keep the read away from it.
+  // 'myapp' holds the 'Doc' window; 'Doc Editor' and 'Doc Viewer' are other
+  // apps that also carry the title in their NAME — the class must keep the
+  // read away from both (and their names must not read as an ambiguity).
   expect(nodes.map((n) => n.name)).toEqual(['Doc', 'Save']);
   expect(nodes.some((n) => n.name === 'Doc Editor')).toBe(false);
+  expect(nodes.some((n) => n.name === 'Doc Viewer')).toBe(false);
+});
+
+test('BusctlAtspi.readTree ignores title-carrying applications once the class names the application', async () => {
+  // Regression: with {class:'myapp', title:'Doc'}, two unrelated applications
+  // named 'Doc Editor' and 'Doc Viewer' tripped the application-title
+  // ambiguity error even though 'myapp' has exactly one matching window. The
+  // application-title checks apply only when no class-qualified application
+  // was found.
+  const bus = classAndTitleBus();
+  const nodes = await new BusctlAtspi({ exec: bus.exec }).readTree({
+    scope: { class: 'myapp', title: 'Doc' },
+  });
+  expect(nodes.map((n) => n.name)).toEqual(['Doc', 'Save']);
+});
+
+test('BusctlAtspi.readTree rejects a class-qualified scope whose title matches no window', async () => {
+  // Regression: when the class matched 'myapp' but the title matched no
+  // window in it, the WHOLE application was returned — find/click would then
+  // resolve labels in another window of that app. A supplied title that no
+  // window carries fails loud instead of degrading to the application.
+  const bus = classAndTitleBus();
+  await expect(
+    new BusctlAtspi({ exec: bus.exec }).readTree({ scope: { class: 'myapp', title: 'Balloon' } }),
+  ).rejects.toThrow(/matched the application but no window in it carries that title/);
+});
+
+/**
+ * A canned a11y bus where the title 'Doc' is carried by a WINDOW of one
+ * application ('myapp') and only by the NAME of another ('Doc Editor', whose
+ * window is 'Untitled 1').
+ *
+ * A scope naming just {title:'Doc'} must resolve the window, not the
+ * application whose name happens to carry the title.
+ */
+function docWindowVsNamedAppBus(): { exec: (args: string[]) => Promise<string> } {
+  const call = (data: unknown): string => JSON.stringify({ type: 'x', data });
+  const nodes: Record<string, { role: string; name: string; bounds: number[] }> = {
+    '/app1': { role: 'application', name: 'Doc Editor', bounds: [0, 0, 800, 600] },
+    '/app1/frame': { role: 'frame', name: 'Untitled 1', bounds: [0, 0, 800, 600] },
+    '/app1/btn': { role: 'push button', name: 'Save', bounds: [10, 20, 100, 40] },
+    '/app2': { role: 'application', name: 'myapp', bounds: [0, 0, 800, 600] },
+    '/app2/frame': { role: 'frame', name: 'Doc', bounds: [0, 0, 800, 600] },
+    '/app2/btn': { role: 'push button', name: 'Save', bounds: [400, 500, 100, 40] },
+  };
+  const children: Record<string, [string, string][]> = {
+    '/org/a11y/atspi/accessible/root': [
+      [':1.5', '/app1'],
+      [':1.6', '/app2'],
+    ],
+    '/app1': [[':1.5', '/app1/frame']],
+    '/app1/frame': [[':1.5', '/app1/btn']],
+    '/app2': [[':1.6', '/app2/frame']],
+    '/app2/frame': [[':1.6', '/app2/btn']],
+  };
+  const exec = async (args: string[]): Promise<string> => {
+    if (args.includes('GetAddress')) return call(['unix:path=/tmp/at-spi/bus']);
+    const path = args[4] ?? '';
+    if (args.includes('GetChildren')) return call([children[path] ?? []]);
+    const node = nodes[path];
+    if (!node) throw new Error(`unexpected busctl call: ${args.join(' ')}`);
+    if (args.includes('GetRoleName')) return call([node.role]);
+    if (args.includes('get-property')) return call(node.name);
+    if (args.includes('GetState')) return call([[STATE_ENABLED_VISIBLE, 0]]);
+    if (args.includes('GetExtents')) return call([node.bounds]);
+    throw new Error(`unexpected busctl call: ${args.join(' ')}`);
+  };
+  return { exec };
+}
+
+test('BusctlAtspi.readTree resolves a matching window before an application named by the title', async () => {
+  // Regression: with {title:'Doc'}, the application named 'Doc Editor' won
+  // immediately even though the only window actually titled 'Doc' belongs to
+  // 'myapp' — find/click would act in the wrong application. Matching windows
+  // are resolved BEFORE an application-name substring is taken as the scope.
+  const bus = docWindowVsNamedAppBus();
+  const nodes = await new BusctlAtspi({ exec: bus.exec }).readTree({ scope: { title: 'Doc' } });
+  expect(nodes.map((n) => n.name)).toEqual(['Doc', 'Save']);
+  expect(nodes.some((n) => n.name === 'Doc Editor')).toBe(false);
+  expect(nodes.some((n) => n.name === 'Untitled 1')).toBe(false);
 });
 
 test('BusctlAtspi.readTree scopes a top level that reports a frame, not an application', async () => {
@@ -558,14 +641,16 @@ test('BusctlAtspi.readTree rejects a scope whose class matches no application', 
  * must fail loud rather than read both subtrees and resolve the label against
  * whichever the bus listed first.
  */
-function ambiguousTitleBus(): { exec: (args: string[]) => Promise<string> } {
+function ambiguousTitleBus(frames: [string, string] = ['My App — Doc', 'My App Helper — Doc']): {
+  exec: (args: string[]) => Promise<string>;
+} {
   const call = (data: unknown): string => JSON.stringify({ type: 'x', data });
   const nodes: Record<string, { role: string; name: string; bounds: number[] }> = {
     '/app1': { role: 'application', name: 'My App', bounds: [0, 0, 800, 600] },
-    '/app1/frame': { role: 'frame', name: 'My App — Doc', bounds: [0, 0, 800, 600] },
+    '/app1/frame': { role: 'frame', name: frames[0], bounds: [0, 0, 800, 600] },
     '/app1/btn': { role: 'push button', name: 'Save', bounds: [10, 20, 100, 40] },
     '/app2': { role: 'application', name: 'My App Helper', bounds: [0, 0, 800, 600] },
-    '/app2/frame': { role: 'frame', name: 'My App Helper — Doc', bounds: [0, 0, 800, 600] },
+    '/app2/frame': { role: 'frame', name: frames[1], bounds: [0, 0, 800, 600] },
     '/app2/btn': { role: 'push button', name: 'Save', bounds: [400, 500, 100, 40] },
   };
   const children: Record<string, [string, string][]> = {
@@ -595,12 +680,13 @@ function ambiguousTitleBus(): { exec: (args: string[]) => Promise<string> } {
 
 /**
  * A canned a11y bus holding an application 'myapp' (the class) with a window
- * titled "Doc", plus a SECOND application 'Doc Editor' whose NAME carries the
- * same title.
+ * titled "Doc", plus TWO unrelated applications — 'Doc Editor' and 'Doc
+ * Viewer' — whose NAMES carry the same title.
  *
  * A scope naming both the class and the title must resolve to the 'Doc' window
  * inside 'myapp': the class is the application's own identity, so it decides
- * which application the read is bound to.
+ * which application the read is bound to, and the other applications' names
+ * must not trip an application-title ambiguity.
  */
 function classAndTitleBus(): { exec: (args: string[]) => Promise<string> } {
   const call = (data: unknown): string => JSON.stringify({ type: 'x', data });
@@ -611,16 +697,22 @@ function classAndTitleBus(): { exec: (args: string[]) => Promise<string> } {
     '/app2': { role: 'application', name: 'Doc Editor', bounds: [0, 0, 800, 600] },
     '/app2/frame': { role: 'frame', name: 'Doc Editor — Doc', bounds: [0, 0, 800, 600] },
     '/app2/btn': { role: 'push button', name: 'Save', bounds: [400, 500, 100, 40] },
+    '/app3': { role: 'application', name: 'Doc Viewer', bounds: [0, 0, 800, 600] },
+    '/app3/frame': { role: 'frame', name: 'Doc Viewer — Doc', bounds: [0, 0, 800, 600] },
+    '/app3/btn': { role: 'push button', name: 'Save', bounds: [700, 100, 100, 40] },
   };
   const children: Record<string, [string, string][]> = {
     '/org/a11y/atspi/accessible/root': [
       [':1.5', '/app1'],
       [':1.6', '/app2'],
+      [':1.7', '/app3'],
     ],
     '/app1': [[':1.5', '/app1/frame']],
     '/app1/frame': [[':1.5', '/app1/btn']],
     '/app2': [[':1.6', '/app2/frame']],
     '/app2/frame': [[':1.6', '/app2/btn']],
+    '/app3': [[':1.7', '/app3/frame']],
+    '/app3/frame': [[':1.7', '/app3/btn']],
   };
   const exec = async (args: string[]): Promise<string> => {
     if (args.includes('GetAddress')) return call(['unix:path=/tmp/at-spi/bus']);
@@ -637,16 +729,26 @@ function classAndTitleBus(): { exec: (args: string[]) => Promise<string> } {
   return { exec };
 }
 
-test('BusctlAtspi.readTree rejects a scope that names two applications', async () => {
-  // "My App" and "My App Helper" both carry the scoped title, so the scope
-  // names two applications. Reading both would put two subtrees in the result
-  // and the "Save" lookup would resolve against whichever the bus listed
-  // first — the duplicate-label hole this scope exists to close. So an
-  // ambiguous scope fails loud, naming the ambiguity.
+test('BusctlAtspi.readTree rejects a title that matches two windows across applications', async () => {
+  // "My App" and "My App Helper" both carry the scoped title, and so do both
+  // their windows: matching windows come first, and TWO of them is the same
+  // ambiguity one level down — the walk would start from both and the "Save"
+  // lookup would resolve against whichever the bus listed first.
   const bus = ambiguousTitleBus();
   await expect(
     new BusctlAtspi({ exec: bus.exec }).readTree({ scope: { title: 'My App' } }),
   ).rejects.toThrow(AdapterError);
+  await expect(
+    new BusctlAtspi({ exec: bus.exec }).readTree({ scope: { title: 'My App' } }),
+  ).rejects.toThrow(/ambiguous.*2 windows.*exactly one/);
+});
+
+test('BusctlAtspi.readTree rejects a title two applications carry when no window does', async () => {
+  // No window carries the title, so the fallback applies: the title is taken
+  // as an application name — and TWO applications carrying it is an
+  // ambiguity, not a choice. (With a class in the scope the class-qualified
+  // application decides and this check never runs.)
+  const bus = ambiguousTitleBus(['Untitled 1', 'Untitled 2']);
   await expect(
     new BusctlAtspi({ exec: bus.exec }).readTree({ scope: { title: 'My App' } }),
   ).rejects.toThrow(/ambiguous.*2 applications.*exactly one/);

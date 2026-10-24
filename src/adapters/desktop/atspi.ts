@@ -514,6 +514,13 @@ export class BusctlAtspi implements AtspiSource {
    * names two applications, or two windows, is ambiguous: it fails loud
    * instead of guessing which one was meant.
    *
+   * Resolution order: a `class` names the application outright — the title
+   * then only picks the window inside it, and other applications whose NAMES
+   * carry the title are irrelevant. Without a class, matching WINDOWS come
+   * first: a window actually titled "Doc" beats an application merely named
+   * "Doc Editor"; only when no window carries the title is an application
+   * carrying it taken as the scope.
+   *
    * The top level is matched as an application whatever role the toolkit
    * reports for it (real trees say `application`, some say `frame`), so the
    * match must not depend on that role string.
@@ -538,58 +545,58 @@ export class BusctlAtspi implements AtspiSource {
     // OWN identity, so it decides the application; the title names the WINDOW
     // inside it. An application matched by class is the one the scope is
     // bound to — the title then picks the window within it.
-    const title = scope.title?.toLowerCase() ?? '';
     const byTitle: AtspiRef[] = [];
     const byClass: AtspiRef[] = [];
     for (const ref of apps) {
       const { name } = await this.#roleAndName(ref, deadline);
-      const lower = name.toLowerCase();
       if (matchesScope({ role: 'application', name }, { class: scope.class })) {
         byClass.push(ref);
-      } else if (title !== '' && lower.includes(title)) {
+      } else if (matchesScope({ role: 'application', name }, { title: scope.title })) {
         byTitle.push(ref);
       }
     }
-    // The title names the WINDOW, so when it names the application outright the
-    // application is the scope — narrowing further to a window whose name
-    // merely CONTAINS the title would pick an arbitrary window of that app.
-    // Two applications carrying the title is not a choice but an ambiguity:
-    // reading both would resolve the label against whichever came first.
-    if (byTitle.length > 1) {
-      throw new AdapterError(
-        `AT-SPI: the scope (${describeScope(scope)}) is ambiguous — ${byTitle.length} applications ` +
-          'carry that title; the scope must name exactly one',
-      );
-    }
-    // The class named the application; the title still picks the window inside
-    // it. Without a class the title may name an application outright — then
-    // that application is the scope.
-    if (byClass.length === 0 && byTitle.length === 1) return byTitle;
-    // The class named the application; a title (if any) still picks the window
-    // inside it. A title that names no application may name a window of one.
-    const windows: ScopedWindow[] = [];
-    for (const app of byClass.length > 0 ? byClass : apps) {
-      windows.push(...(await this.#windowsIn(app, scope, deadline, maxDepth)));
-      // The walk gave up mid-search: the hits found so far are partial, and
-      // acting on them would read a window the scope never actually named.
-      if (deadline !== undefined && Date.now() >= deadline) {
+    // The class is the application's OWN identity: once it names an
+    // application, the scope is bound to THAT application and the title only
+    // picks the window inside it. Other applications whose NAMES carry the
+    // title are irrelevant — they must not trip an application-title
+    // ambiguity, and the read must never be handed to them.
+    if (byClass.length > 0) {
+      const window = oneWindow(await this.#windowsUnder(byClass, scope, deadline, maxDepth), scope);
+      if (window) return [window.ref];
+      if (byClass.length > 1) {
         throw new AdapterError(
-          'AT-SPI: the scoped walk ran out of time before it reached the scoped window',
+          `AT-SPI: the scope (${describeScope(scope)}) is ambiguous — ${byClass.length} applications ` +
+            'carry that class; the scope must name exactly one',
         );
       }
+      // The class matched exactly one application but the title matched no
+      // window in it. Returning the whole application would let find/click
+      // resolve labels in ANOTHER window of that app — the one thing a scoped
+      // read must never do. Fail loud instead.
+      if (scope.title) {
+        throw new AdapterError(
+          `AT-SPI: the scope (${describeScope(scope)}) matched the application but no window in it ` +
+            'carries that title; the scope must name a window that exists',
+        );
+      }
+      return byClass; // exactly one application, and no title to narrow it by
     }
-    // Two windows carrying the title is the same ambiguity one level down: the
-    // walk would start from both and the label would resolve against whichever
-    // the bus listed first.
-    const window = oneWindow(windows, scope);
-    if (window) return [window.ref];
-    if (byClass.length > 1) {
-      throw new AdapterError(
-        `AT-SPI: the scope (${describeScope(scope)}) is ambiguous — ${byClass.length} applications ` +
-          'carry that class; the scope must name exactly one',
-      );
+    // No class: matching WINDOWS come first. An application whose NAME merely
+    // carries the title must not win while the window actually titled so
+    // lives in another application — that hands find/click to the wrong app.
+    // Only when NO window carries the title is an application named by it
+    // taken as the scope, and two of those is an ambiguity, not a choice.
+    if (scope.title) {
+      const window = oneWindow(await this.#windowsUnder(apps, scope, deadline, maxDepth), scope);
+      if (window) return [window.ref];
+      if (byTitle.length > 1) {
+        throw new AdapterError(
+          `AT-SPI: the scope (${describeScope(scope)}) is ambiguous — ${byTitle.length} applications ` +
+            'carry that title; the scope must name exactly one',
+        );
+      }
+      if (byTitle.length === 1) return byTitle;
     }
-    if (byClass.length === 1) return byClass;
     // Nothing matched. A deadline that expired on the way here is a timeout,
     // not a miss: reporting it as "no match" would send the caller looking for
     // a window that is simply out of reach in the time it had.
@@ -601,6 +608,31 @@ export class BusctlAtspi implements AtspiSource {
     throw new AdapterError(
       `AT-SPI: no application or window matched the scope (${describeScope(scope)})`,
     );
+  }
+
+  /**
+   * The windows inside these applications whose name carries the scoped title.
+   *
+   * A walk that gave up mid-search (deadline spent) is a failure, not a
+   * partial answer: acting on the hits found so far would read a window the
+   * scope never actually named.
+   */
+  async #windowsUnder(
+    apps: AtspiRef[],
+    scope: AtspiScope,
+    deadline: number | undefined,
+    maxDepth: number,
+  ): Promise<ScopedWindow[]> {
+    const windows: ScopedWindow[] = [];
+    for (const app of apps) {
+      windows.push(...(await this.#windowsIn(app, scope, deadline, maxDepth)));
+      if (deadline !== undefined && Date.now() >= deadline) {
+        throw new AdapterError(
+          'AT-SPI: the scoped walk ran out of time before it reached the scoped window',
+        );
+      }
+    }
+    return windows;
   }
 
   /**
