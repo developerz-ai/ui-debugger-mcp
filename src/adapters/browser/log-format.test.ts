@@ -137,6 +137,12 @@ test('redactUrl keeps sensitive query VALUES out, and everything else intact', (
   expect(redactUrl('https://s3/o.png?X-Amz-Signature=deadbeef&X-Amz-Expires=60')).toBe(
     'https://s3/o.png?X-Amz-Signature=<redacted, 8 chars>&X-Amz-Expires=60',
   );
+  expect(redactUrl('https://app/reset?token=abc123def456&page=2')).toBe(
+    'https://app/reset?token=<redacted, 12 chars>&page=2',
+  );
+  expect(redactUrl('https://app/oauth?access_token=SECRET123&expires_in=3600')).toBe(
+    'https://app/oauth?access_token=<redacted, 9 chars>&expires_in=3600',
+  );
   // Nothing sensitive, nothing touched — the URL stays the driver's landmark.
   expect(redactUrl('https://app/users?page=2')).toBe('https://app/users?page=2');
   expect(redactUrl('https://app/users')).toBe('https://app/users');

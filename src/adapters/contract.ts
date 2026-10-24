@@ -217,7 +217,13 @@ export interface NetworkEntry {
 export interface TabInfo {
   /** Position in the target's tab list — what {@link Adapter.selectTab} takes. */
   index: number;
-  /** Current URL of the tab. */
+  /**
+   * Current URL of the tab. Credential-bearing query values (`?code=`,
+   * `?token=`, `?signature=`, …) are redacted to `<redacted, N chars>` before
+   * the URL is returned — the same posture as {@link NetworkEntry.url} and
+   * unrequested loads — so tab listings are safe to surface. Any future
+   * `tabs()` implementation must keep this guarantee.
+   */
   url: string;
   /** Document title, empty while a fresh tab is still loading. */
   title: string;

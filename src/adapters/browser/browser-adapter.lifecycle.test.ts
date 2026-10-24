@@ -462,6 +462,40 @@ test('open drops only its OWN load, keeping a pre-existing unrequested one', asy
   expect(await adapter.takeUnrequestedLoads()).toEqual(['http://localhost:5173/next']);
 });
 
+test('tabs() redacts credential query values, and flags the driven tab active', async () => {
+  // tabs() awaits page.title() — loadablePage has none, and a missing one rejects Promise.all.
+  const page = (url: string) => ({ ...loadablePage(url).page, title: async () => 'Tab' });
+  // One stable array: `create` adopts pages()[0] as the driven tab and tabs() re-reads
+  // pages() — fresh objects per call would fail the identity check `active` is built on.
+  const pages = [
+    page('https://app/callback?code=4/0AeSecretGrant&state=xyz'),
+    page('https://app/reset?token=abc123def456&page=2'),
+    page('https://app/oauth?access_token=SECRET123&expires_in=3600'),
+    page('https://app/users?page=2'),
+  ];
+  const chromium = fakeLauncher({
+    launchPersistentContext: async () => ({
+      pages: () => pages,
+      close: async () => undefined,
+    }),
+  });
+  const adapter = await BrowserAdapter.create({
+    config: webTarget(),
+    profileDir: '/tmp/unused-profile',
+    chromium,
+  });
+
+  const tabs = await adapter.tabs();
+  expect(tabs.map((t) => t.url)).toEqual([
+    'https://app/callback?code=<redacted, 16 chars>&state=xyz',
+    'https://app/reset?token=<redacted, 12 chars>&page=2',
+    'https://app/oauth?access_token=<redacted, 9 chars>&expires_in=3600',
+    'https://app/users?page=2', // nothing sensitive — untouched landmark
+  ]);
+  // Redaction changes nothing else: the driven tab (index 0) is still the active one.
+  expect(tabs.map((t) => t.active)).toEqual([true, false, false, false]);
+});
+
 test('selectTab moves the load watch, so a background tab’s reload is not the flow’s', async () => {
   const first = loadablePage('http://localhost:5173/one');
   const second = loadablePage('http://localhost:5173/two');
