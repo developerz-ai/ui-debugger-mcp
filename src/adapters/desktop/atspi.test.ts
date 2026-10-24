@@ -10,6 +10,7 @@ import {
   hasState,
   mapRole,
   matchesQuery,
+  matchesScope,
   parseChildren,
   parseExtents,
   parseRoleNameQuery,
@@ -190,6 +191,35 @@ test('shapeNodes rejects a bad limit instead of silently truncating', () => {
   const nodes = [node({ name: 'a' }), node({ name: 'b' })];
   expect(() => shapeNodes(nodes, { limit: -1 }, 200)).toThrow(AdapterError);
   expect(() => shapeNodes(nodes, { limit: Number.NaN }, 200)).toThrow(AdapterError);
+});
+
+// --- scope matching ---------------------------------------------------------
+
+test('matchesScope matches a window by its title', () => {
+  expect(matchesScope({ role: 'window', name: 'My App — Untitled' }, { title: 'My App' })).toBe(
+    true,
+  );
+});
+
+test('matchesScope matches an application by its title OR its class', () => {
+  // The class is the application's own identity (WM_CLASS); the title is the
+  // window's, so an application matches either.
+  expect(matchesScope({ role: 'application', name: 'myapp' }, { class: 'myapp' })).toBe(true);
+  expect(matchesScope({ role: 'application', name: 'My App' }, { title: 'My App' })).toBe(true);
+  expect(matchesScope({ role: 'application', name: 'My App' }, { title: 'Other' })).toBe(false);
+});
+
+test('matchesScope matches case-insensitively and on a literal substring', () => {
+  expect(matchesScope({ role: 'window', name: 'My App' }, { title: 'my app' })).toBe(true);
+  expect(matchesScope({ role: 'window', name: 'My App' }, { title: 'App' })).toBe(true);
+  // Literal, not a regex: the parens are characters, not a group.
+  expect(matchesScope({ role: 'window', name: 'My App (dev)' }, { title: 'App (dev)' })).toBe(true);
+  expect(matchesScope({ role: 'window', name: 'My App (dev)' }, { title: '^My' })).toBe(false);
+});
+
+test('matchesScope rejects a node that is neither the window nor its application', () => {
+  expect(matchesScope({ role: 'button', name: 'Save' }, { title: 'Save' })).toBe(false);
+  expect(matchesScope({ role: 'window', name: 'Other App' }, { title: 'My App' })).toBe(false);
 });
 
 // --- BusctlAtspi.readTree (injected fake bus) -------------------------------
@@ -392,4 +422,261 @@ test('BusctlAtspi.readTree fails loud when GetExtents blows its per-call cap', a
     return bus.exec(args);
   };
   await expect(new BusctlAtspi({ exec }).readTree()).rejects.toThrow(ExecTimeoutError);
+});
+
+// --- scoped walks -----------------------------------------------------------
+
+/**
+ * A canned a11y bus holding TWO applications whose buttons share the label
+ * "Save" — the shape that made the unscoped walk click the wrong app.
+ *
+ * The tree is registry root → application → frame → button, mirroring a real
+ * AT-SPI tree (the root's children are the applications; their frames are the
+ * windows). The FOREIGN application is listed FIRST, so an unscoped walk finds
+ * its button first.
+ */
+function twoAppBus(): { exec: (args: string[]) => Promise<string> } {
+  const call = (data: unknown): string => JSON.stringify({ type: 'x', data });
+  const nodes: Record<string, { role: string; name: string; bounds: number[] }> = {
+    '/app1': { role: 'application', name: 'Foreign App', bounds: [0, 0, 800, 600] },
+    '/app1/frame': { role: 'frame', name: 'Foreign App — Doc', bounds: [0, 0, 800, 600] },
+    '/app1/btn': { role: 'push button', name: 'Save', bounds: [10, 20, 100, 40] },
+    '/app2': { role: 'application', name: 'Managed App', bounds: [0, 0, 800, 600] },
+    '/app2/frame': { role: 'frame', name: 'Managed App — Doc', bounds: [0, 0, 800, 600] },
+    '/app2/btn': { role: 'push button', name: 'Save', bounds: [400, 500, 100, 40] },
+  };
+  const children: Record<string, [string, string][]> = {
+    '/org/a11y/atspi/accessible/root': [
+      [':1.5', '/app1'],
+      [':1.6', '/app2'],
+    ],
+    '/app1': [[':1.5', '/app1/frame']],
+    '/app1/frame': [[':1.5', '/app1/btn']],
+    '/app2': [[':1.6', '/app2/frame']],
+    '/app2/frame': [[':1.6', '/app2/btn']],
+  };
+  const exec = async (args: string[]): Promise<string> => {
+    if (args.includes('GetAddress')) return call(['unix:path=/tmp/at-spi/bus']);
+    const path = args[4] ?? '';
+    if (args.includes('GetChildren')) return call([children[path] ?? []]);
+    const node = nodes[path];
+    if (!node) throw new Error(`unexpected busctl call: ${args.join(' ')}`);
+    if (args.includes('GetRoleName')) return call([node.role]);
+    if (args.includes('get-property')) return call(node.name);
+    if (args.includes('GetState')) return call([[STATE_ENABLED_VISIBLE, 0]]);
+    if (args.includes('GetExtents')) return call([node.bounds]);
+    throw new Error(`unexpected busctl call: ${args.join(' ')}`);
+  };
+  return { exec };
+}
+
+test('BusctlAtspi.readTree without a scope sees every application on the desktop', async () => {
+  // The bug this scope fixes: the registry root's children are EVERY app, so an
+  // unscoped walk reaches the foreign app's "Save" before the managed one's.
+  const bus = twoAppBus();
+  const nodes = await new BusctlAtspi({ exec: bus.exec }).readTree();
+  expect(nodes.filter((n) => n.name === 'Save')).toHaveLength(2);
+});
+
+test('BusctlAtspi.readTree with a scope returns only the scoped application', async () => {
+  const bus = twoAppBus();
+  const nodes = await new BusctlAtspi({ exec: bus.exec }).readTree({
+    scope: { title: 'Managed App' },
+  });
+  expect(nodes.map((n) => n.name)).toEqual(['Managed App', 'Managed App — Doc', 'Save']);
+  // The foreign app's identically-labelled button is NOT in the result.
+  expect(nodes.some((n) => n.name === 'Foreign App')).toBe(false);
+});
+
+test('BusctlAtspi.readTree scopes by the application class', async () => {
+  const bus = twoAppBus();
+  const nodes = await new BusctlAtspi({ exec: bus.exec }).readTree({
+    scope: { class: 'Foreign App' },
+  });
+  expect(nodes.map((n) => n.name)).toEqual(['Foreign App', 'Foreign App — Doc', 'Save']);
+});
+
+test('BusctlAtspi.readTree scopes to the window inside the matching application', async () => {
+  // The title names the WINDOW, not the application: the scoped walk must
+  // resolve the frame inside the app, not the app's other windows.
+  const bus = twoAppBus();
+  const nodes = await new BusctlAtspi({ exec: bus.exec }).readTree({
+    scope: { title: 'Managed App — Doc' },
+  });
+  expect(nodes.map((n) => n.name)).toEqual(['Managed App — Doc', 'Save']);
+  expect(nodes.some((n) => n.name === 'Foreign App — Doc')).toBe(false);
+});
+
+test('BusctlAtspi.readTree lets the class pick the application, the title the window', async () => {
+  // The class is the application's OWN identity, so it decides WHICH
+  // application the read is bound to. The title names the WINDOW inside it —
+  // it must not hand the read to a DIFFERENT application whose name happens
+  // to carry the title.
+  const bus = classAndTitleBus();
+  const nodes = await new BusctlAtspi({ exec: bus.exec }).readTree({
+    scope: { title: 'Doc', class: 'myapp' },
+  });
+  // 'myapp' holds the 'Doc' window; 'Doc Editor' is a different app that also
+  // carries the title in its NAME — the class must keep the read away from it.
+  expect(nodes.map((n) => n.name)).toEqual(['Doc', 'Save']);
+  expect(nodes.some((n) => n.name === 'Doc Editor')).toBe(false);
+});
+
+test('BusctlAtspi.readTree scopes a top level that reports a frame, not an application', async () => {
+  // Toolkits differ: real trees report the registry's children as
+  // `application`, some as `frame` (→ the contract role `window`). The
+  // top-level match must not hinge on that role string, or the scope resolves
+  // to nothing on half the desktops.
+  const bus = fakeBus(); // '/app' is a `frame` named 'My App'
+  const nodes = await new BusctlAtspi({ exec: bus.exec }).readTree({
+    scope: { title: 'My App' },
+  });
+  expect(nodes.map((n) => n.name)).toEqual(['My App', 'OK']);
+});
+
+test('BusctlAtspi.readTree rejects a scope that matches nothing', async () => {
+  // Failing loud is the point: returning the whole desktop would resolve the
+  // lookup against some OTHER application's identically-labelled button.
+  const bus = twoAppBus();
+  await expect(
+    new BusctlAtspi({ exec: bus.exec }).readTree({ scope: { title: 'No Such App' } }),
+  ).rejects.toThrow(AdapterError);
+});
+
+test('BusctlAtspi.readTree rejects a scope whose class matches no application', async () => {
+  const bus = twoAppBus();
+  await expect(
+    new BusctlAtspi({ exec: bus.exec }).readTree({ scope: { class: 'nosuchapp' } }),
+  ).rejects.toThrow(/no application or window matched the scope/);
+});
+
+/**
+ * A canned a11y bus holding TWO applications whose NAMES both carry the scoped
+ * title — "My App" and "My App Helper" — each with its own "Save" button.
+ *
+ * The scope title matches both applications, so the walk cannot pick one: it
+ * must fail loud rather than read both subtrees and resolve the label against
+ * whichever the bus listed first.
+ */
+function ambiguousTitleBus(): { exec: (args: string[]) => Promise<string> } {
+  const call = (data: unknown): string => JSON.stringify({ type: 'x', data });
+  const nodes: Record<string, { role: string; name: string; bounds: number[] }> = {
+    '/app1': { role: 'application', name: 'My App', bounds: [0, 0, 800, 600] },
+    '/app1/frame': { role: 'frame', name: 'My App — Doc', bounds: [0, 0, 800, 600] },
+    '/app1/btn': { role: 'push button', name: 'Save', bounds: [10, 20, 100, 40] },
+    '/app2': { role: 'application', name: 'My App Helper', bounds: [0, 0, 800, 600] },
+    '/app2/frame': { role: 'frame', name: 'My App Helper — Doc', bounds: [0, 0, 800, 600] },
+    '/app2/btn': { role: 'push button', name: 'Save', bounds: [400, 500, 100, 40] },
+  };
+  const children: Record<string, [string, string][]> = {
+    '/org/a11y/atspi/accessible/root': [
+      [':1.5', '/app1'],
+      [':1.6', '/app2'],
+    ],
+    '/app1': [[':1.5', '/app1/frame']],
+    '/app1/frame': [[':1.5', '/app1/btn']],
+    '/app2': [[':1.6', '/app2/frame']],
+    '/app2/frame': [[':1.6', '/app2/btn']],
+  };
+  const exec = async (args: string[]): Promise<string> => {
+    if (args.includes('GetAddress')) return call(['unix:path=/tmp/at-spi/bus']);
+    const path = args[4] ?? '';
+    if (args.includes('GetChildren')) return call([children[path] ?? []]);
+    const node = nodes[path];
+    if (!node) throw new Error(`unexpected busctl call: ${args.join(' ')}`);
+    if (args.includes('GetRoleName')) return call([node.role]);
+    if (args.includes('get-property')) return call(node.name);
+    if (args.includes('GetState')) return call([[STATE_ENABLED_VISIBLE, 0]]);
+    if (args.includes('GetExtents')) return call([node.bounds]);
+    throw new Error(`unexpected busctl call: ${args.join(' ')}`);
+  };
+  return { exec };
+}
+
+/**
+ * A canned a11y bus holding an application 'myapp' (the class) with a window
+ * titled "Doc", plus a SECOND application 'Doc Editor' whose NAME carries the
+ * same title.
+ *
+ * A scope naming both the class and the title must resolve to the 'Doc' window
+ * inside 'myapp': the class is the application's own identity, so it decides
+ * which application the read is bound to.
+ */
+function classAndTitleBus(): { exec: (args: string[]) => Promise<string> } {
+  const call = (data: unknown): string => JSON.stringify({ type: 'x', data });
+  const nodes: Record<string, { role: string; name: string; bounds: number[] }> = {
+    '/app1': { role: 'application', name: 'myapp', bounds: [0, 0, 800, 600] },
+    '/app1/frame': { role: 'frame', name: 'Doc', bounds: [0, 0, 800, 600] },
+    '/app1/btn': { role: 'push button', name: 'Save', bounds: [10, 20, 100, 40] },
+    '/app2': { role: 'application', name: 'Doc Editor', bounds: [0, 0, 800, 600] },
+    '/app2/frame': { role: 'frame', name: 'Doc Editor — Doc', bounds: [0, 0, 800, 600] },
+    '/app2/btn': { role: 'push button', name: 'Save', bounds: [400, 500, 100, 40] },
+  };
+  const children: Record<string, [string, string][]> = {
+    '/org/a11y/atspi/accessible/root': [
+      [':1.5', '/app1'],
+      [':1.6', '/app2'],
+    ],
+    '/app1': [[':1.5', '/app1/frame']],
+    '/app1/frame': [[':1.5', '/app1/btn']],
+    '/app2': [[':1.6', '/app2/frame']],
+    '/app2/frame': [[':1.6', '/app2/btn']],
+  };
+  const exec = async (args: string[]): Promise<string> => {
+    if (args.includes('GetAddress')) return call(['unix:path=/tmp/at-spi/bus']);
+    const path = args[4] ?? '';
+    if (args.includes('GetChildren')) return call([children[path] ?? []]);
+    const node = nodes[path];
+    if (!node) throw new Error(`unexpected busctl call: ${args.join(' ')}`);
+    if (args.includes('GetRoleName')) return call([node.role]);
+    if (args.includes('get-property')) return call(node.name);
+    if (args.includes('GetState')) return call([[STATE_ENABLED_VISIBLE, 0]]);
+    if (args.includes('GetExtents')) return call([node.bounds]);
+    throw new Error(`unexpected busctl call: ${args.join(' ')}`);
+  };
+  return { exec };
+}
+
+test('BusctlAtspi.readTree rejects a scope that names two applications', async () => {
+  // "My App" and "My App Helper" both carry the scoped title, so the scope
+  // names two applications. Reading both would put two subtrees in the result
+  // and the "Save" lookup would resolve against whichever the bus listed
+  // first — the duplicate-label hole this scope exists to close. So an
+  // ambiguous scope fails loud, naming the ambiguity.
+  const bus = ambiguousTitleBus();
+  await expect(
+    new BusctlAtspi({ exec: bus.exec }).readTree({ scope: { title: 'My App' } }),
+  ).rejects.toThrow(AdapterError);
+  await expect(
+    new BusctlAtspi({ exec: bus.exec }).readTree({ scope: { title: 'My App' } }),
+  ).rejects.toThrow(/ambiguous.*2 applications.*exactly one/);
+});
+
+test('BusctlAtspi.readTree rejects a scope that names two windows', async () => {
+  // The same ambiguity one level down: two applications each hold a window
+  // titled "Doc", so the title does not pick one window either.
+  const bus = twoAppBus();
+  await expect(
+    new BusctlAtspi({ exec: bus.exec }).readTree({ scope: { title: 'Doc' } }),
+  ).rejects.toThrow(/ambiguous.*2 windows.*exactly one/);
+});
+
+test('BusctlAtspi.readTree fails loud when the scoped walk runs out of time', async () => {
+  // A deadline that is already spent is a TIMEOUT, not an empty tree: the walk
+  // never reached the scoped window, so it cannot say the window has no
+  // "Save" in it. Reporting an empty tree would send the caller looking for a
+  // bug that is really a budget that ran out.
+  const bus = twoAppBus();
+  let calls = 0;
+  const counting = async (args: string[]): Promise<string> => {
+    calls += 1;
+    return bus.exec(args);
+  };
+  await expect(
+    new BusctlAtspi({ exec: counting }).readTree({
+      scope: { title: 'Managed App' },
+      deadline: Date.now() - 1,
+    }),
+  ).rejects.toThrow(/ran out of time before it reached the scoped window/);
+  expect(calls).toBe(0); // no busctl spawn was spent on a walk that had no time
 });

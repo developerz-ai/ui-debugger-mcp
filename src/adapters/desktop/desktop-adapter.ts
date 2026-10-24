@@ -11,6 +11,12 @@
  * android `adbSerial`), so `open` launches the configured command and `close` stops
  * it. Reads/clicks key off AT-SPI screen extents; vision fallback is future work.
  *
+ * **Every read is scoped to one window.** The AT-SPI tree spans every application
+ * on the desktop, so an unscoped lookup for "Save" can resolve to another app's
+ * button and the click lands in the wrong window. The scope is the configured
+ * `window` when the target has one, else the window the last `open` selected;
+ * with neither, a read fails loud rather than reading the whole desktop.
+ *
  * Desktop apps expose no console/network channels — those methods throw loud
  * ({@link AdapterError}), never a silent empty list. Every backend failure surfaces
  * as an {@link AdapterError}; our own loud errors pass through un-rewrapped.
@@ -31,7 +37,13 @@ import type {
   ScrollOptions,
   WaitOptions,
 } from '../contract.js';
-import { type AtspiSource, BusctlAtspi, parseRoleNameQuery, shapeNodes } from './atspi.js';
+import {
+  type AtspiScope,
+  type AtspiSource,
+  BusctlAtspi,
+  parseRoleNameQuery,
+  shapeNodes,
+} from './atspi.js';
 import { type ScreenCapture, Screenshot } from './capture.js';
 import {
   centerOf,
@@ -101,6 +113,23 @@ export class DesktopAdapter implements Adapter {
   readonly #input: PointerInput;
   readonly #capture: ScreenCapture;
   #child: Launched | null = null;
+  /**
+   * The window identity the reads are scoped to — the app/window the AT-SPI
+   * walk is restricted to.
+   *
+   * The a11y tree spans EVERY application on the desktop, so an unscoped read
+   * returns whichever application happened to answer first: two apps with the
+   * same "Save" label and the click lands in the wrong one.
+   *
+   * The scope is the CONFIGURED `window` whenever the target configures one:
+   * that is the window xdotool activates, so it is the window the reads must
+   * name — and a later `open` of another window does NOT re-scope them (the
+   * configured window still wins the match, so the scope stays put). Only a
+   * target with NO configured window takes its scope from the window `open`
+   * last selected, and there a later `open` of another window DOES re-scope
+   * the reads.
+   */
+  #scope: AtspiScope | null = null;
 
   private constructor(handles: DesktopAdapterHandles) {
     this.#config = handles.config;
@@ -151,6 +180,10 @@ export class DesktopAdapter implements Adapter {
       // (bounded by the cap above) and its later rejection must not go unhandled.
       activated.catch(() => {});
       await Promise.race([activated, died]);
+      // The window that is now up is the one every later read is scoped to — the
+      // a11y tree holds every application on the desktop, so the scope is what
+      // keeps a lookup inside this one.
+      this.#scope = { title: match.title, class: match.class };
     });
   }
 
@@ -204,6 +237,7 @@ export class DesktopAdapter implements Adapter {
 
   async readState(opts: Query = {}): Promise<Node[]> {
     return this.#run('readState', async () => {
+      const scope = this.#readScope();
       const region = opts.within !== undefined ? await this.#regionBounds(opts.within) : undefined;
       // A bounded query (role/name) + maxNodes let the AT-SPI walk skip describing
       // (and stop once it has found) more than the caller could ever use — `find`
@@ -217,7 +251,7 @@ export class DesktopAdapter implements Adapter {
       const query = opts.query ? parseRoleNameQuery(opts.query) : undefined;
       const narrowed = region !== undefined || opts.filters !== undefined;
       const maxNodes = narrowed ? DEFAULT_LIMIT : (opts.limit ?? DEFAULT_LIMIT);
-      const nodes = await this.#atspi.readTree({ query, maxNodes });
+      const nodes = await this.#atspi.readTree({ query, maxNodes, scope });
       return shapeNodes(nodes, opts, DEFAULT_LIMIT, region);
     });
   }
@@ -297,10 +331,12 @@ export class DesktopAdapter implements Adapter {
    * checks the clock between polls — would overshoot its timeout by a whole walk.
    */
   async #present(query: string, deadline: number): Promise<boolean> {
+    const scope = this.#readScope();
     const nodes = await this.#atspi.readTree({
       query: parseRoleNameQuery(query),
       maxNodes: 1,
       deadline,
+      scope,
     });
     return shapeNodes(nodes, { query, limit: 1 }, DEFAULT_LIMIT).length > 0;
   }
@@ -346,7 +382,30 @@ export class DesktopAdapter implements Adapter {
   }
 
   /**
-   * Resolve a scope `within` (a {@link Node} or a selector) to an on-screen rectangle.
+   * The scope every read must carry — the window the target is bound to.
+   *
+   * The scope in force is the configured `window` when the target has one (a
+   * later `open` of another window does not change it — the configured window
+   * still wins the match), else the window the last `open` selected. With
+   * neither there is no window to read: an unscoped read walks EVERY
+   * application on the desktop, so a lookup for "Save" can resolve to another
+   * app's button and the click lands in the wrong window. That is the bug this
+   * scope exists to prevent, so the read fails loud instead of silently
+   * reading the whole desktop.
+   */
+  #readScope(): AtspiScope {
+    const scope = this.#scope ?? this.#config.window;
+    if (!scope || (!scope.title && !scope.class)) {
+      throw new AdapterError(
+        'desktop: no window selected — set `window.title` or `window.class` on the desktop ' +
+          'target, or open a window first; an unscoped read would match any application on ' +
+          'the desktop',
+      );
+    }
+    return scope;
+  }
+
+  /** Resolve a scope `within` (a {@link Node} or a selector) to an on-screen rectangle.
    *
    * A zero-size region is rejected, not scoped to: it would park the scroll cursor at
    * the screen origin and (via `centerWithin`) read as a region nothing sits in.
