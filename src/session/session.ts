@@ -292,16 +292,34 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
 
   /**
    * Record, as the summary, the fact that the run produced no verdict — naming
-   * what actually happened and what to do about it, with no invented cause.
+   * what actually happened and what to do about it, with no invented cause and
+   * never a model in the loop (deterministic counts and framing only). Two
+   * branches, one terminal framing: when the loop streamed evidence before the
+   * cap (the `progressForStep` running writes), the summary names those leads by
+   * count as partial and unconfirmed — the arrays below carry them — and never
+   * claims the run recorded nothing; a truly empty run keeps that claim. Both
+   * branches lead with the no-verdict fact and close with the same cut-short
+   * guidance, so an empty and a partial run read the same way.
    */
   async #writeUnreportedSummary(findings: Findings): Promise<void> {
     const steps = findings.steps ?? [];
+    const bugs = findings.bugs ?? [];
+    const visual = findings.visual ?? [];
     const failed = steps.filter((step) => step.ok === false).length;
+    const lead =
+      'Run ended WITHOUT a verdict: the driver used up its step budget without calling `report`';
+    const evidence =
+      bugs.length + visual.length > 0
+        ? `. ${plural(bugs.length, 'bug')} and ${plural(visual.length, 'visual issue')} streamed in ` +
+          'before the cap as partial, unconfirmed leads and are preserved below — none was ' +
+          'confirmed by a `report`. '
+        : ', so no findings were recorded. ';
     const summary =
-      'Run ended WITHOUT a verdict: the driver used up its step budget without calling `report`, ' +
-      `so no findings were recorded. ${steps.length} step(s) ran (${failed} failed) — read the step ` +
-      'trail and screenshots for what it actually did. This is NOT a clean pass and NOT evidence of ' +
-      'a crash: the run was simply cut short. Re-run with a narrower goal, or raise `timeout`.';
+      lead +
+      evidence +
+      `${steps.length} step(s) ran (${failed} failed) — read the step trail and screenshots for ` +
+      'what it actually did. This is NOT a clean pass and NOT evidence of a crash: the run was ' +
+      'simply cut short. Re-run with a narrower goal, or raise `timeout`.';
     await this.#findingsStore.writeFindings({ ...findings, status: this.#status, summary });
   }
 
@@ -456,4 +474,9 @@ function toAgentError(error: unknown): AgentError {
 /** True when `value` is a non-blank string (a real summary, not absent or whitespace). */
 function hasText(value: string | undefined): value is string {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+/** `plural(1, 'bug')` → '1 bug'; `plural(2, 'bug')` → '2 bugs' — the summary's deterministic counts. */
+function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? '' : 's'}`;
 }

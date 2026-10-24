@@ -26,6 +26,8 @@ interface LookMode {
   extraRule: string;
   /** Carried-evidence paragraph of the terminal `report` section — what this mode's `look` does and does not stream. */
   carried: string;
+  /** Streamed-evidence clause of the budget section — what a step-capped run keeps from this mode's `look`, and what it does not. */
+  streamed: string;
 }
 
 /** Blind driver + separate vision guy: `look` is a second model call, and it can latch off. */
@@ -45,6 +47,10 @@ const VISION_MODE: LookMode = {
 EVEN if you forget to list them — omission cannot erase evidence, so still list
 what matters (your wording wins). Set "dismissStreamed": true ONLY to drop
 streamed findings you deliberately ruled out.`,
+  // `createLookTool` records every look issue the vision guy flags on the trail,
+  // so a step-capped run keeps them like the act steps and console errors.
+  streamed: `(act steps, console errors, look issues) is kept on disk as partial,
+unconfirmed findings.`,
 };
 
 /** Multimodal driver: `look` hands the frame back to it — no vision guy, no latch. */
@@ -61,6 +67,12 @@ forget to list them — omission cannot erase them. Look issues are NOT carried:
 YOU judged the frames, nothing recorded them, so every visual finding MUST be
 in your report or it is lost. Set "dismissStreamed": true ONLY to drop
 streamed findings you deliberately ruled out.`,
+  // `createSelfLookTool` (look.ts) records NOTHING on the trail — the frame comes
+  // back and the driver judges it. A step-capped run keeps the streamed act steps
+  // and console errors; an unlisted look issue is gone, as `carried` below warns.
+  streamed: `(act steps, console errors) is kept on disk as partial, unconfirmed
+findings. Look judgments are NOT recorded — you saw the frames yourself, so a
+visual issue you never write down is lost with the run.`,
 };
 
 /**
@@ -115,11 +127,12 @@ Replace instead — pass \`clear: true\`:
 Use \`clear\` whenever the field may be non-empty — a retry, a second item through
 the same form, any field you have not just read as empty.
 
-## Budget — an unreported run produces NOTHING
+## Budget — spending it all still costs the verdict
 
-Steps are limited. Spend them all without calling \`report\` and the whole run is
-discarded: no findings, no verdict. Worse than a partial report, far worse than a
-failed verdict.
+Steps are limited. Spend them all without calling \`report\` and the run ends with
+NO verdict. What is lost is the conclusion, not the evidence: whatever you streamed
+along the way ${mode.streamed}
+Worse than a partial report, far worse than a failed verdict.
 
 - Load-bearing checks first. The goal will take longer than you think.
 - Warned the budget is nearly spent → STOP exploring, \`report\` what you have.

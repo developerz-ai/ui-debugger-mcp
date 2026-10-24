@@ -10,7 +10,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Findings } from '../findings/schema.js';
+import type { Bug, Findings, VisualIssue } from '../findings/schema.js';
 import { FindingsStore } from './findings-store.js';
 import { Session, type SessionAdapter } from './session.js';
 import { sessionPaths, workspacePaths } from './workspace.js';
@@ -404,6 +404,56 @@ test('a run that never reported gets the facts, never a model-invented cause', a
   const findings = await store.readFindings();
   expect(findings.status).toBe('failed');
   expect(findings.summary).toContain('WITHOUT a verdict');
+  expect(findings.summary).toContain('no findings were recorded'); // true here: the run is truly empty
   expect(findings.summary).toContain('1 step(s) ran');
   expect(findings.summary).not.toContain('crashed');
+});
+
+test('a step-capped run with streamed evidence keeps its partial leads, counted not condensed', async () => {
+  const store = makeStore();
+  let summarizerCalled = false;
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    summarize: async () => {
+      summarizerCalled = true;
+      return 'the streamed console error means the cart is broken'; // what a model invents here
+    },
+  });
+
+  // The shape `progressForStep` leaves at the step cap: the trail still `running`,
+  // already carrying a streamed bug AND a visual issue, no `report` ever landed.
+  const streamedBugs: Bug[] = [{ kind: 'console', detail: 'TypeError: cart is undefined' }];
+  const streamedVisual: VisualIssue[] = [
+    { issue: 'checkout button overflows viewport', where: '/checkout', severity: 'high' },
+  ];
+  await session.start(async (ctx) => {
+    await ctx.progress.writeFindings({
+      status: 'running',
+      steps: [
+        { step: 'click Add', ok: true },
+        { step: 'click Checkout', ok: false },
+      ],
+      bugs: streamedBugs,
+      visual: streamedVisual,
+    });
+  });
+
+  expect(session.status).toBe('failed');
+  // Partial leads are counted and preserved — never routed through the model,
+  // which would invent a cause for evidence no verdict ever confirmed.
+  expect(summarizerCalled).toBe(false);
+  const findings = await store.readFindings();
+  expect(findings.status).toBe('failed');
+  const summary = findings.summary ?? '';
+  expect(summary).toContain('WITHOUT a verdict');
+  expect(summary).toContain('1 bug');
+  expect(summary).toContain('1 visual');
+  expect(summary).not.toContain('no findings were recorded'); // the claim is only true when empty
+  expect(summary).toContain('NOT a clean pass');
+  // The streamed evidence survives the summary's write-back untouched.
+  expect(findings.bugs).toEqual(streamedBugs);
+  expect(findings.visual).toEqual(streamedVisual);
 });
