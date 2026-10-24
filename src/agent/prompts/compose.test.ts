@@ -288,3 +288,41 @@ test('composeSystemPrompt: both eye modes share the rest of the prompt', () => {
     expect(self).toContain(shared);
   }
 });
+
+// --- the budget section — what an unreported run actually costs ---------------
+
+// A step-capped run keeps the evidence the driver streamed along the way
+// (progressForStep persists it as partial findings), so the old "the whole run
+// is discarded: no findings, no verdict" framing lied about the cost. The truth:
+// the verdict is lost, the evidence survives. The section is shared by both eye
+// modes EXCEPT the kept-on-disk list: vision-guy `look` streams its issues to the
+// trail, self-look `look` records nothing — so the list is per mode, and pinning
+// both is what keeps the shared sentences from re-absorbing a false claim.
+test('debugAgentPrompt: the budget section describes an unreported run truthfully', () => {
+  for (const selfLook of [false, true] as const) {
+    const section = debugAgentPrompt(selfLook).split('## Budget')[1]?.split('\n## ')[0] ?? '';
+    expect(section).not.toBe('');
+    // The cost is the missing verdict — not the evidence.
+    expect(section).toContain('NO verdict');
+    // Streamed progress survives on disk as partial, unconfirmed findings.
+    expect(section).toMatch(/kept on disk|preserved/);
+    // The old overstatement — the run throwing everything away — stays gone.
+    expect(section).not.toMatch(/produces NOTHING|discarded|no findings/);
+    // The pressure to report is the point of the section; keep it.
+    expect(section).toContain('Worse than a partial report, far worse than a failed verdict.');
+  }
+
+  // Vision mode: `createLookTool` records every look issue the vision guy flags,
+  // so the kept-on-disk list names it.
+  const vision = debugAgentPrompt(false).split('## Budget')[1]?.split('\n## ')[0] ?? '';
+  expect(vision).toContain('(act steps, console errors, look issues)');
+
+  // Self-look mode: `createSelfLookTool` records NOTHING — claiming look issues
+  // are kept would tell the driver an unlisted visual finding survives the cap,
+  // the exact loss SELF_LOOK_MODE.carried warns about.
+  const self = debugAgentPrompt(true).split('## Budget')[1]?.split('\n## ')[0] ?? '';
+  expect(self).toContain('(act steps, console errors)');
+  expect(self).toMatch(/Look judgments are NOT recorded/);
+  // So it must not name look issues among the kept evidence at all.
+  expect(self).not.toContain('look issues');
+});
