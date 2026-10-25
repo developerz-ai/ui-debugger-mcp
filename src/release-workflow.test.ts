@@ -11,8 +11,10 @@
  *
  * The workflow is parsed into steps (name / uses / run / if / continue-on-error)
  * so the assertions are about the STEP GRAPH, not about prose: a comment that
- * merely mentions `bun test` must not be able to satisfy a presence assertion,
- * and a validation step moved AFTER a publish step must fail the ordering
+ * merely mentions `bun test` must not be able to satisfy a presence assertion
+ * — shell comment lines are dropped from `run:` bodies during the parse, and
+ * the validation lookup demands the test command on an EXECUTABLE line — and
+ * a validation step moved AFTER a publish step must fail the ordering
  * assertion even though the command itself is unchanged.
  */
 
@@ -46,7 +48,9 @@ type StepKey = 'name' | 'uses' | 'run' | 'if' | 'continue-on-error';
 /** Assign one recognised step key to the step being parsed. */
 function assignStepKey(current: Step, key: StepKey, value: string): void {
   if (key === 'run') {
-    current.run = value === '|' || value === '>' ? '' : value;
+    // A block scalar opens below; an inline `# …` value is a shell comment,
+    // not a command — neither may satisfy a presence assertion.
+    current.run = value === '|' || value === '>' || value.startsWith('#') ? '' : value;
     return;
   }
   if (key === 'continue-on-error') {
@@ -121,9 +125,12 @@ function parseSteps(text: string): Step[] {
     }
 
     // A deeper line belongs to the current `run:` block (or to a nested
-    // mapping under a key we already consumed).
+    // mapping under a key we already consumed). Shell comment lines are
+    // dropped: a commented-out `# bun test …` line is not a command and must
+    // never satisfy a presence assertion (pinned by the mutation test below).
     if (currentKey === 'run' && /^\s{10,}\S/.test(raw)) {
-      current.run += `\n${raw.trim()}`;
+      const text = raw.trim();
+      if (!text.startsWith('#')) current.run += `\n${text}`;
     }
   }
   flush();
@@ -133,13 +140,36 @@ function parseSteps(text: string): Step[] {
 
 const steps = parseSteps(workflowText);
 
-/** The step that runs the version-consistency tests, or undefined. */
-function validationStep(): Step | undefined {
-  return steps.find(
-    (step) =>
-      step.run.includes('src/index.test.ts') &&
-      step.run.includes('src/mcp/registry-server-json.test.ts'),
+/** A `run:` body's executable lines — blanks and shell comments are not commands. */
+function executableLines(run: string): string[] {
+  return run
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((text) => text.length > 0 && !text.startsWith('#'));
+}
+
+/** The exact command the publication gate must execute, verbatim. */
+const VALIDATION_COMMAND = 'bun test src/index.test.ts src/mcp/registry-server-json.test.ts';
+
+/**
+ * The step that runs the version-consistency tests, or undefined.
+ *
+ * The command must sit on an EXECUTABLE line of the step's `run:` body: a
+ * commented-out `# bun test …` line finds nothing here, so a workflow whose
+ * validation was commented out cannot pass the presence assertions. (Pinned
+ * by the mutation test below — without both this check and the parser's
+ * comment-stripping, the commented line used to satisfy every substring
+ * assertion and publication ran without validation.)
+ */
+function findValidationStep(parsed: Step[]): Step | undefined {
+  return parsed.find((step) =>
+    executableLines(step.run).some((line) => line.includes(VALIDATION_COMMAND)),
   );
+}
+
+/** The validation step of the real workflow, or undefined. */
+function validationStep(): Step | undefined {
+  return findValidationStep(steps);
 }
 
 /** The step that publishes to npm, or undefined. */
@@ -172,6 +202,19 @@ test('the publish job has a validation step running the version-consistency test
   expect(validation.run).toContain('bun test');
   expect(validation.run).toContain('src/index.test.ts');
   expect(validation.run).toContain('src/mcp/registry-server-json.test.ts');
+});
+
+test('commenting out the test command fails the guard (mutation)', () => {
+  // The mutation this guard exists against: the `bun test` line commented out,
+  // so publication would proceed without any validation. The commented line
+  // must satisfy nothing — the parser drops comment lines from `run:` bodies,
+  // and the lookup demands the command on an executable line — so the guard
+  // must find NO validation step in the mutated workflow.
+  expect(workflowText).toContain(VALIDATION_COMMAND);
+  const mutated = workflowText.replace(VALIDATION_COMMAND, `# ${VALIDATION_COMMAND}`);
+  expect(mutated).not.toBe(workflowText);
+
+  expect(findValidationStep(parseSteps(mutated))).toBeUndefined();
 });
 
 test('the validation step runs after the build and before every publish step', () => {
@@ -210,10 +253,9 @@ test('the validation step does not swallow its own failure', () => {
   const validation = mustFind('the validation step', validationStep);
 
   // A `|| true` (or `&&` chain) on the test command would turn a failed test
-  // into a green step while every other assertion still passed.
-  for (const line of validation.run.split('\n')) {
-    const text = line.trim();
-    if (text.length === 0) continue;
+  // into a green step while every other assertion still passed. Executable
+  // lines only — a comment mentioning `||` neither runs nor swallows anything.
+  for (const text of executableLines(validation.run)) {
     expect(text).not.toContain('||');
     expect(text).not.toContain('&&');
   }
