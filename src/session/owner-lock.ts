@@ -228,13 +228,30 @@ export async function acquireOwnerLock(
  * does) — another owner's lock is never touched. The notice board is emptied,
  * never unlinked: a stale claim file must never be mistaken for a held lock,
  * and unlinking the path would put a fresh inode where the owner's lock lives.
+ *
+ * The lock ALWAYS comes home: unlock + close run in a `finally`, so a failed
+ * board write (a read-only remount, say) fails loud but cannot leave this
+ * process holding the kernel lock with no registry entry to reach it by —
+ * that would wedge every rival until the process exits (PR #104 review).
+ *
+ * @param emptyBoard the notice-board teardown, injectable for tests (defaults
+ *   to truncating the file to nothing) — the same seam doctrine as `makeExec`'s
+ *   `now`: a failure injected through the parameter never leaks into other
+ *   test files the way a module mock does.
  */
-export async function releaseOwnerLock(lockPath: string, owner: OwnerLock): Promise<boolean> {
+export async function releaseOwnerLock(
+  lockPath: string,
+  owner: OwnerLock,
+  emptyBoard: (fd: number) => void = (fd) => ftruncateSync(fd, 0),
+): Promise<boolean> {
   const held = holds.get(lockPath);
   if (held === undefined || !sameOwner(held.owner, owner)) return false;
-  holds.delete(lockPath);
-  ftruncateSync(held.fd, 0); // the board names no owner once we are out
-  loadFlock()(held.fd, LOCK_UN);
-  closeSync(held.fd);
+  holds.delete(lockPath); // teardown has begun — the registry names no hold from here
+  try {
+    emptyBoard(held.fd); // the board names no owner once we are out
+  } finally {
+    loadFlock()(held.fd, LOCK_UN);
+    closeSync(held.fd); // closing alone releases the flock, even after a failed write
+  }
   return true;
 }

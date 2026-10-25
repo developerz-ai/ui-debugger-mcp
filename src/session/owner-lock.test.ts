@@ -197,6 +197,34 @@ test('release empties the board and frees the lock for the next owner', async ()
   expect(JSON.parse(await readFile(lockPath, 'utf8'))).toEqual(next);
 });
 
+test('a failed notice-board teardown still frees the kernel lock', async () => {
+  // The PR #104 review interleaving: emptying the board fails (a read-only
+  // remount, say) AFTER the registry entry is gone. The fd must still be
+  // unlocked and closed — otherwise this process keeps the kernel lock but has
+  // no registry entry to reach it by, so no later release can help and every
+  // rival is wedged until the process exits. The failure is injected through
+  // releaseOwnerLock's `emptyBoard` seam — never a module mock, which would
+  // leak into every test file running alongside.
+  const holder = owner(process.pid, 'holder');
+  expect(await acquireOwnerLock(lockPath, holder)).toEqual({ acquired: true, created: true });
+
+  const failure = new Error('ftruncateSync failed: read-only file system');
+  await expect(
+    releaseOwnerLock(lockPath, holder, () => {
+      throw failure;
+    }),
+  ).rejects.toBe(failure); // fails loud — but only after the lock is home
+
+  // Nothing is held anymore: a repeat release is a plain "not held", and a
+  // rival identity — a fresh fd the kernel MUST refuse if the lock leaked —
+  // takes over immediately and publishes its own claim.
+  expect(await releaseOwnerLock(lockPath, holder)).toBe(false);
+  const rival = owner(process.pid, 'rival');
+  rival.identity = { startTicks: (holder.identity.startTicks ?? 0) + 1 };
+  expect(await acquireOwnerLock(lockPath, rival)).toEqual({ acquired: true, created: true });
+  expect(JSON.parse(await readFile(lockPath, 'utf8'))).toEqual(rival);
+});
+
 test('two real child processes contend: exactly one acquires and one is busy', async () => {
   const results = await contendViaChildren(lockPath, ['child-a', 'child-b']);
   expectExactlyOneAcquired(results);
