@@ -105,8 +105,14 @@ function existingWorkspace(cwd: string): string {
 /**
  * The `.gitignore` line for `workspaceDir`. The default workspace keeps the
  * historical broad `tmp/` line; a custom workspace gets its own relative,
- * trailing-slash line so it's actually ignored instead of missed. `null` when the
- * workspace resolves outside `cwd` — nothing to add, the caller must handle it.
+ * trailing-slash line so it's actually ignored instead of missed. The path is
+ * written as an escaped LITERAL per gitignore(5): backslash, `!`, `#`, `*`,
+ * `?`, `[` and space are backslash-prefixed (`/` and `]` need no escape), so a
+ * workspace named `#ws` or `my ws` matches itself instead of parsing as a
+ * comment, negation or glob. gitignore(5) rules are line-based, so a workspace
+ * path carrying a newline or CR cannot be expressed at all — `InitError`, never
+ * a silently corrupt pair of rules. `null` when the workspace resolves outside
+ * `cwd` — nothing to add, the caller must handle it.
  */
 function gitignoreLineFor(
   cwd: string,
@@ -116,7 +122,16 @@ function gitignoreLineFor(
   if (workspaceValue === DEFAULT_WORKSPACE) return DEFAULT_IGNORE_LINE;
   const rel = relative(cwd, workspaceDir);
   if (rel.startsWith('..')) return null;
-  return `${rel.split(sep).join('/')}/`;
+  const line = `${rel
+    .split(sep)
+    .join('/')
+    .replace(/[\\!#*?[ ]/g, '\\$&')}/`;
+  if (line.includes('\n') || line.includes('\r')) {
+    throw new InitError(
+      `workspace ${JSON.stringify(workspaceValue)} contains a line break — .gitignore rules are line-based and cannot ignore it; use a single-line workspace path`,
+    );
+  }
+  return line;
 }
 
 /**
