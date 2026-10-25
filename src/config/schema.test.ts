@@ -215,3 +215,19 @@ test('ConfigSchema: models and workspace optional, targets required', () => {
   expect(ConfigSchema.safeParse(minimal).success).toBe(true);
   expect(ConfigSchema.safeParse({ models: { driver: 'a', vision: 'b' } }).success).toBe(false);
 });
+
+test('ConfigSchema: a target needs a name — an empty key is unaddressable', () => {
+  // start_debug names targets, and the session builder resolves them via
+  // Object.hasOwn(config.targets, name) — a nameless target can never be
+  // addressed, so it must fail loud here, not sit in config as dead weight.
+  const rejected = ConfigSchema.safeParse({
+    targets: { '': { adapter: 'browser', url: 'http://x.test' } },
+  });
+  expect(rejected.success).toBe(false);
+  expect(rejected.error?.issues[0]?.path).toContain(''); // issue names the empty key
+  expect(
+    ConfigSchema.safeParse({
+      targets: { web: { adapter: 'browser', url: 'http://x.test' } },
+    }).success,
+  ).toBe(true); // nonempty names still parse
+});

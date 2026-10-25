@@ -166,7 +166,9 @@ export const TargetSchema = z.discriminatedUnion('adapter', [
 export const ConfigSchema = z.strictObject({
   models: ModelsSchema.partial().optional(),
   workspace: z.string().optional(),
-  targets: z.record(z.string(), TargetSchema),
+  // Key must be nonempty: start_debug names targets (a nameless one is unaddressable),
+  // so an empty key is dead config — reject it here rather than ship it.
+  targets: z.record(z.string().min(1), TargetSchema),
 });
 
 export type Models = z.infer<typeof ModelsSchema>;
