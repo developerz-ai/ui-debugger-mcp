@@ -9,6 +9,15 @@
  * `status` can read the authoritative verdict + counts). Written on start, marked
  * `ended` on a clean end.
  *
+ * The breadcrumb alone is ADVISORY: two servers can both read it before either
+ * writes, and the second write hides the first owner's live run from
+ * `status`/`stop`. The authority is the workspace's exclusive ownership lock
+ * (`owner.lock`, see {@link ownerLockPath}) — a kernel-held `flock` that
+ * {@link FileStatePort} takes BEFORE it publishes a breadcrumb, so exactly one
+ * live server may own a workspace. A refused claim is a {@link SessionBusyError}
+ * naming the owner; a crashed server's lock dies with its process, so a dead
+ * run never wedges the project — there is nothing to reclaim.
+ *
  * `record()` fails LOUD: a run nobody can see is a run nobody can stop — the
  * profile would stay locked with no way to reach the owner short of killing the
  * server by hand — so the service tears the start down instead. `clear(sessionId)`
@@ -22,7 +31,15 @@
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
+import { SessionBusyError } from '../errors.js';
 import { writeFileAtomic } from './atomic-write.js';
+import {
+  acquireOwnerLock,
+  type OwnerLock,
+  OwnerLockSchema,
+  ownerLockPath,
+  releaseOwnerLock,
+} from './owner-lock.js';
 import { captureIdentity, ownerAlive, ProcessIdentitySchema } from './process-identity.js';
 import { sessionPaths, type WorkspacePaths } from './workspace.js';
 
@@ -114,13 +131,18 @@ export interface ForeignRun {
  * breadcrumb, leaving `ui-debugger-mcp stop` nothing live to signal.
  */
 export interface StatePort {
-  /** Record the run as `running`. Throws when the breadcrumb cannot be written. */
+  /**
+   * Record the run as `running`. Throws when the breadcrumb cannot be written —
+   * and when the workspace is already owned by another live server
+   * ({@link SessionBusyError}).
+   */
   record(run: RunState): Promise<void>;
   /**
-   * Mark `ended` — ONLY the run whose session id this is. If the breadcrumb names
-   * a different session (a successor recorded itself while this teardown was in
-   * flight), leave it untouched: ending a live successor's breadcrumb makes
-   * `ui-debugger-mcp stop` refuse the run that is actually going.
+   * Mark `ended` — ONLY the run whose session id this is, and ONLY by the
+   * workspace's owner. If the breadcrumb names a different session (a successor
+   * recorded itself while this teardown was in flight), leave it untouched:
+   * ending a live successor's breadcrumb makes `ui-debugger-mcp stop` refuse the
+   * run that is actually going.
    */
   clear(sessionId: string): Promise<void>;
   /**
@@ -195,27 +217,136 @@ export class FileStatePort implements StatePort {
 
   async record(run: RunState): Promise<void> {
     const iso = this.#now().toISOString();
-    await this.#serialize(() =>
-      this.#io.write(this.#workspace.stateJson, {
-        pid: this.#pid,
-        sessionId: run.sessionId,
-        target: run.target,
-        goal: run.goal,
-        status: 'running',
-        startedAt: iso,
-        updatedAt: iso,
-        sessionDir: sessionPaths(this.#workspace, run.sessionId).root,
-        identity: captureIdentity(this.#pid),
-      }),
+    await this.#serialize(async () => {
+      // The claim comes FIRST: it is the admission decision, and the breadcrumb
+      // must never be published by a server that does not own the workspace.
+      // A live foreign owner refuses here, before a single byte is written.
+      const createdClaim = await this.#acquireClaim(run.sessionId, iso);
+      try {
+        await this.#io.write(this.#workspace.stateJson, {
+          pid: this.#pid,
+          sessionId: run.sessionId,
+          target: run.target,
+          goal: run.goal,
+          status: 'running',
+          startedAt: iso,
+          updatedAt: iso,
+          sessionDir: sessionPaths(this.#workspace, run.sessionId).root,
+          identity: captureIdentity(this.#pid),
+        });
+      } catch (err) {
+        // The breadcrumb never landed. Give back ONLY a claim this call
+        // created: a re-entrant claim belongs to an earlier successful
+        // record, and releasing it would hand a live workspace away.
+        if (createdClaim) await this.#releaseClaim();
+        throw err;
+      }
+    });
+  }
+
+  /**
+   * Take the workspace's exclusive ownership lock, or fail loud.
+   *
+   * The lock is the AUTHORITATIVE one-run gate: the kernel grants it to one
+   * process at a time and holds it for the owner's lifetime, so two servers
+   * starting in the same window cannot both win, and no admission can be
+   * invalidated after the fact. A live foreign owner is named in the refusal
+   * (pid + session id) so the caller knows which server to stop; a crashed
+   * owner's lock died with its process — the workspace is simply free.
+   *
+   * Returns whether this call CREATED the claim. A re-entrant acquire did not
+   * create it, so a later failed breadcrumb write must not release the claim
+   * held by an earlier successful record.
+   */
+  async #acquireClaim(sessionId: string, acquiredAt: string): Promise<boolean> {
+    const lockPath = ownerLockPath(this.#workspace);
+    await mkdir(dirname(lockPath), { recursive: true });
+    const owner: OwnerLock = {
+      pid: this.#pid,
+      identity: captureIdentity(this.#pid),
+      sessionId,
+      acquiredAt,
+    };
+    const result = await acquireOwnerLock(lockPath, owner);
+    if (result.acquired) return result.created;
+    throw new SessionBusyError(
+      `Another ui-debugger-mcp server (pid ${result.holder.pid}) already owns the debug ` +
+        `session ('${result.holder.sessionId}') for this project. One run per project at a ` +
+        "time. To take the project over, run 'ui-debugger-mcp stop' in this directory, then " +
+        'start again.',
     );
+  }
+
+  /**
+   * Release the lock — but ONLY when it still names us.
+   *
+   * Only the process holding the kernel lock can release it; the claim file is
+   * a notice board, not the lock, and is never unlinked (unlinking the path
+   * would put a fresh inode where a live owner's lock lives). The holder is
+   * read back from disk rather than remembered, so a claim whose session id
+   * moved on (a re-entrant acquire keeps the first id) is still recognised as
+   * ours.
+   */
+  async #releaseClaim(): Promise<void> {
+    const lockPath = ownerLockPath(this.#workspace);
+    const holder = await this.#readClaim();
+    if (holder === null) return; // no claim to release
+    await releaseOwnerLock(lockPath, holder);
+  }
+
+  /** The claim currently on disk, or `null` when there is none (or it is malformed). */
+  async #readClaim(): Promise<OwnerLock | null> {
+    try {
+      const raw = await readFile(ownerLockPath(this.#workspace), 'utf8');
+      const parsed = OwnerLockSchema.safeParse(JSON.parse(raw));
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Does this claim name US — our pid, and our process (not a recycled one)?
+   *
+   * Identity is compared on the start ticks: a recycled pid has a different
+   * start time, so it never passes as us.
+   */
+  #isUs(holder: OwnerLock): boolean {
+    if (holder.pid !== this.#pid) return false;
+    const ours = captureIdentity(this.#pid);
+    return holder.identity.startTicks === ours.startTicks;
   }
 
   async clear(sessionId: string): Promise<void> {
     // Best-effort stays: the run is already down, and a swallowed clear only
     // leaves a breadcrumb naming a pid whose liveness the CLI checks anyway.
-    await this.#serialize(() =>
-      markStatus(this.#workspace.stateJson, 'ended', this.#now(), sessionId, this.#io),
-    ).catch(() => undefined);
+    await this.#serialize(async () => {
+      // Only the OWNER may end a run here. A stranger that knows (or guesses)
+      // the session id must never mark somebody else's live run ended — that
+      // would hide the live run from `ui-debugger-mcp stop`.
+      const holder = await this.#readClaim();
+      if (holder === null || !this.#isUs(holder)) return;
+      const prior = await this.#io.read(this.#workspace.stateJson);
+      // Scoped to the run being ended: a successor that recorded itself while
+      // this teardown was in flight keeps its own breadcrumb AND its claim.
+      if (prior?.sessionId !== sessionId) return;
+      try {
+        await markStatus(
+          this.#workspace.stateJson,
+          'ended',
+          this.#now(),
+          sessionId,
+          this.#io,
+          (state) => state.pid === this.#pid,
+        );
+      } finally {
+        // The run is over either way: a breadcrumb write that THREW must not
+        // leave a live-process claim behind — an ended run still holding the
+        // claim wedges the workspace for every other server until this one
+        // exits, with nothing left to end.
+        await this.#releaseClaim();
+      }
+    }).catch(() => undefined);
   }
 
   /**
@@ -224,10 +355,11 @@ export class FileStatePort implements StatePort {
    * ({@link ownerAlive} — a recycled or dead pid does not count) reports a
    * foreign run. Everything else is `null`: nobody to collide with.
    *
-   * Advisory, not a lock: the breadcrumb is written once a run is open, so two
-   * servers starting within the same launch window can still both get through.
-   * It closes the common case (a second MCP client on the same project) without
-   * a lock file, and Chrome's own profile lock still backstops managed web runs.
+   * Advisory, not the gate: the breadcrumb is written once a run is open, so two
+   * servers starting within the same launch window can both read "no foreign
+   * run". The AUTHORITATIVE admission is the workspace's ownership claim, taken
+   * atomically by {@link FileStatePort.record} — this read is the friendly
+   * early refusal that names the other server before any browser is launched.
    */
   async foreignRun(): Promise<ForeignRun | null> {
     const state = await readState(this.#workspace.stateJson);
@@ -272,6 +404,12 @@ export class FileStatePort implements StatePort {
  * In-process callers (the server's own `clear`) must not rely on that ordering:
  * a `clear` racing a successor's `record` is exactly the interleaving the port's
  * write queue closes, which is why `FileStatePort` routes this through its queue.
+ *
+ * `ownedBy` is an OPTIONAL trailing predicate: it receives the recorded run and
+ * decides whether THIS caller may flip it. It exists so ownership is enforced
+ * where the write happens — a caller that does not own the run must not end it,
+ * however well it knows its session id. Omitting it keeps the historical
+ * behaviour (the CLI's `stop` marks a run it does not own, on purpose).
  */
 export async function markStatus(
   path: string,
@@ -279,11 +417,14 @@ export async function markStatus(
   now: Date = new Date(),
   onlySessionId?: string,
   io: StateIo = fsStateIo,
+  ownedBy?: (prior: StateFile) => boolean,
 ): Promise<void> {
   const prior = await io.read(path);
   if (!prior) return;
   // Not our run anymore (a successor owns the breadcrumb) — never write over it.
   if (onlySessionId !== undefined && prior.sessionId !== onlySessionId) return;
+  // Not ours to end — never write over it.
+  if (ownedBy !== undefined && !ownedBy(prior)) return;
   const nextStatus = prior.status === 'stopped' ? 'stopped' : status;
   await io.write(path, { ...prior, status: nextStatus, updatedAt: now.toISOString() });
 }
