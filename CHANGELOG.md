@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Publication is gated on a successful version-consistency validation of the
+  checked-out revision.** The release job installed, built and published
+  without running a single test, so the version-consistency checks — the
+  exported `VERSION` against `package.json`, `server.json`'s `version` and
+  `packages[0].version` against `package.json`, and `server.json` against its
+  own `$schema` — existed but were reachable only from CI, never from the
+  publish path. A release could therefore publish an npm package and an MCP
+  Registry entry whose versions disagree. The release workflow now runs those
+  tests after the build and before any publication, on BOTH routes — the
+  `release: types: [published]` trigger and the manual `workflow_dispatch`
+  trigger, which share one `publish` job. The step is mandatory: it carries
+  neither `continue-on-error` nor an `if:` condition, so a failing or missing
+  validation fails the job before `npm publish` and before the MCP Registry
+  publish. The checkout is pinned to `ref: ${{ github.ref }}` and the run
+  echoes `git rev-parse HEAD`, so the validated commit is provably the commit
+  that gets published.
+
 ### Fixed
 
 - **The URL watch reads the active URL once more before reporting the budget
