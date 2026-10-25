@@ -18,16 +18,28 @@
  * makes observe → re-verify → unlink one serialized section, and the
  * re-verification under the mutex — byte-for-byte against what was judged
  * stale — turns a rival's fresh claim into a visible change the contender must
- * re-run against instead of unlinking. The final publish stays an atomic
- * `link(2)`, so even contenders that both slip past the mutex (possible only
- * when a reclaimer crashed while holding it and two rivals reclaim the dead
- * mutex at once) cannot both win: the loser's `link` hits `EEXIST`, re-reads a
- * LIVE holder, and refuses. The mutex itself is reclaimed only from a provably
- * dead holder — a reclaimer that crashed mid-reclaim — so a crashed reclaimer
- * cannot wedge the workspace either.
+ * re-run against instead of unlinking.
+ *
+ * The mutex can die with a crashed reclaimer, and ITS recovery is just as racy
+ * done blindly: two contenders can both read the same dead mutex, and the
+ * slower one's removal then lands on the winner's FRESH mutex — two processes
+ * in the critical section at once. Recovery therefore never blind-unlinks: the
+ * mutex is moved aside with an atomic `rename(2)` to a private quarantine name
+ * and the moved bytes are verified there, where nothing can substitute them —
+ * equality with the judged-dead bytes proves this process removed exactly what
+ * it judged; anything else is a rival's live mutex, restored untouched. And
+ * because a recovery can still dispossess a holder after its check (a restored
+ * mutex can lose a publish race into the freed slot), the holder re-verifies
+ * the mutex names it immediately before the destructive unlink: exclusion
+ * holds THROUGH the claim read/unlink, not just up to the read. The final
+ * publish stays an atomic `link(2)`, so a contender that slips past every
+ * check still cannot win a slot someone else filled: its `link` hits `EEXIST`,
+ * it re-reads a LIVE holder, and refuses. The mutex is reclaimed only from a
+ * provably dead holder — a reclaimer that crashed mid-reclaim — so a crashed
+ * reclaimer cannot wedge the workspace either.
  */
 
-import { link, readFile, unlink, writeFile } from 'node:fs/promises';
+import { link, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { SessionBusyError } from '../errors.js';
@@ -73,6 +85,21 @@ export interface AcquireHooks {
    * rival's fresh claim.
    */
   afterStaleObservation?: () => Promise<void> | void;
+  /**
+   * Runs once the reclaim mutex has been judged dead (a reclaimer that
+   * crashed mid-reclaim), just before it is recovered. Lets a regression
+   * test put a rival's fresh mutex in the dead one's place in that window —
+   * the interleaving in which a late, blind recovery destroyed the rival's
+   * live mutex and put two contenders into the critical section at once.
+   */
+  afterMutexJudgedDead?: () => Promise<void> | void;
+  /**
+   * Runs under the reclaim mutex, after the claim has been re-verified
+   * stale and immediately before it is unlinked. Lets a regression test
+   * dispossess the holder at the last instant — proving the holder refuses
+   * the destructive unlink once the mutex no longer names it.
+   */
+  beforeClaimUnlink?: () => Promise<void> | void;
 }
 
 /** Whether two owners identify the same live process. */
@@ -131,35 +158,93 @@ async function publishAtomically(path: string, serialized: string, tag: string):
  *
  * `false` means another LIVE process is mid-reclamation: the caller must not
  * touch the claim. A mutex naming a dead holder (a reclaimer that crashed
- * mid-reclaim) is reclaimed, so a crashed reclaimer cannot wedge the workspace
- * either; a malformed non-empty one cannot name a live holder and is removed.
+ * mid-reclaim) is recovered — verified, never blind-unlinked, see
+ * {@link recoverStaleMutex} — so a crashed reclaimer cannot wedge the
+ * workspace either; a malformed non-empty one cannot name a live holder and is
+ * recovered the same way. Three rounds: a recovery that finds the slot already
+ * emptied (`gone`) or already won (`clean`) still owes its publish a round.
  */
 async function takeReclaimMutex(
   reclaimPath: string,
   owner: OwnerLock,
   serialized: string,
+  hooks: AcquireHooks,
 ): Promise<boolean> {
-  for (let take = 0; take < 2; take += 1) {
+  for (let take = 0; take < 3; take += 1) {
     if (await publishAtomically(reclaimPath, serialized, `r${take}`)) return true;
     const observed = await readRaw(reclaimPath);
     if (observed === null) continue; // vanished between the failed link and the read: retry
-    const holder = parseHolder(observed);
-    if (holder === null) {
-      // Empty is the visible window of an in-progress publish — never reclaim
-      // it, or two processes could both believe they hold the mutex.
-      if (observed.trim() === '') {
-        throw new OwnerLockBusyError(
-          'owner lock reclaim mutex is empty; refusing to reclaim an in-progress reclamation',
-        );
-      }
-      await unlink(reclaimPath).catch(() => undefined);
-      continue;
+    // Empty is the visible window of an in-progress publish — never reclaim
+    // it, or two processes could both believe they hold the mutex.
+    if (observed.trim() === '') {
+      throw new OwnerLockBusyError(
+        'owner lock reclaim mutex is empty; refusing to reclaim an in-progress reclamation',
+      );
     }
-    if (sameOwner(holder, owner)) return true; // re-entrant
-    if (ownerAlive(holder.pid, holder.identity).alive) return false;
-    await unlink(reclaimPath).catch(() => undefined); // the reclaimer crashed mid-reclaim
+    const holder = parseHolder(observed);
+    if (holder !== null) {
+      if (sameOwner(holder, owner)) return true; // re-entrant
+      if (ownerAlive(holder.pid, holder.identity).alive) return false;
+    }
+    // Dead reclaimer — or malformed bytes, which cannot name a live holder.
+    await hooks.afterMutexJudgedDead?.();
+    const recovered = await recoverStaleMutex(reclaimPath, observed);
+    if (recovered === 'busy') return false; // a rival's live mutex — not ours to remove
   }
   return false;
+}
+
+/** What recovering a dead mutex found at its path. */
+type MutexRecovery =
+  /** Exactly the judged-dead mutex was removed — the caller may publish its own. */
+  | 'clean'
+  /** A rival's fresh mutex was in the way; it was restored and the caller refuses. */
+  | 'busy'
+  /** The path was already empty — another recovery got there first; retry. */
+  | 'gone';
+
+/** Counts a process's recoveries, keeping quarantine names unique within one. */
+let recoverySeq = 0;
+
+/**
+ * Remove a provably dead mutex WITHOUT a blind unlink.
+ *
+ * Judging the mutex dead and removing it are two steps, so a removal that
+ * executes late deletes whatever replaced the dead mutex in between — a
+ * rival's FRESH mutex — and puts two contenders into the critical section at
+ * once. Instead the file is moved aside atomically (`rename(2)`) to a
+ * quarantine name only this process knows, and the moved bytes are verified
+ * there, where nothing can substitute them: equality with the judged-dead
+ * bytes proves THIS process removed exactly the mutex it judged.
+ */
+async function recoverStaleMutex(reclaimPath: string, judgedDead: string): Promise<MutexRecovery> {
+  recoverySeq += 1;
+  const quarantine = `${reclaimPath}.recovered-${process.pid}-${recoverySeq}`;
+  try {
+    await rename(reclaimPath, quarantine);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'gone';
+    throw error;
+  }
+  const moved = await readRaw(quarantine);
+  if (moved !== null && moved === judgedDead) {
+    await unlink(quarantine).catch(() => undefined);
+    return 'clean';
+  }
+  // A rival republished between the judgment and the move — its live mutex is
+  // what we are holding. Put it back exactly as it was. `link` fails with
+  // EEXIST when another contender published into the freed slot meanwhile;
+  // the stranded copy is dropped, and that rival stays safe because no holder
+  // unlinks the claim without a fencing check on the mutex (see `reclaimStale`).
+  await link(quarantine, reclaimPath).catch(() => undefined);
+  await unlink(quarantine).catch(() => undefined);
+  return 'busy';
+}
+
+/** Does the reclaim mutex still name THIS owner? `false` when gone or foreign. */
+async function mutexIsOurs(reclaimPath: string, owner: OwnerLock): Promise<boolean> {
+  const holder = await readHolder(reclaimPath);
+  return holder !== null && sameOwner(holder, owner);
 }
 
 /**
@@ -171,6 +256,8 @@ async function takeReclaimMutex(
  * when it still holds exactly those stale bytes — anything else means the
  * workspace changed hands while this contender was deciding, so the claim is
  * left alone and the caller re-runs its publish against what is there now.
+ * The mutex itself is re-checked (fenced) immediately before the unlink: a
+ * dispossessed holder must not remove the claim it no longer guards.
  */
 async function reclaimStale(
   lockPath: string,
@@ -181,10 +268,17 @@ async function reclaimStale(
 ): Promise<void> {
   await hooks.afterStaleObservation?.();
   const reclaimPath = reclaimLockPath(lockPath);
-  if (!(await takeReclaimMutex(reclaimPath, owner, serialized))) return;
+  if (!(await takeReclaimMutex(reclaimPath, owner, serialized, hooks))) return;
   try {
     const current = await readRaw(lockPath);
     if (current !== staleRaw) return; // acquired (or changed) since it was judged stale
+    await hooks.beforeClaimUnlink?.();
+    // Exclusion must hold THROUGH the destructive step, not just up to the
+    // read: a rival's recovery can dispossess this holder after its check (a
+    // restored mutex losing the publish race into the freed slot). Re-verify
+    // the mutex names us immediately before the unlink — a holder whose mutex
+    // is gone or foreign refuses to touch the claim.
+    if (!(await mutexIsOurs(reclaimPath, owner))) return;
     await unlink(lockPath).catch(() => undefined);
   } finally {
     await releaseOwnerLock(reclaimPath, owner);

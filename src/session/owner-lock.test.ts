@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   type AcquireHooks,
   acquireOwnerLock,
@@ -43,9 +43,14 @@ function owner(pid = process.pid, sessionId = 'session-1'): OwnerLock {
   };
 }
 
+/** The exact bytes a publish writes for a claim — byte comparisons use this. */
+function serialize(claim: OwnerLock): string {
+  return `${JSON.stringify(claim, null, 2)}\n`;
+}
+
 /** Write a claim file directly, as a crashed server would have left it. */
 async function seedClaim(path: string, claim: OwnerLock): Promise<void> {
-  await writeFile(path, `${JSON.stringify(claim, null, 2)}\n`, 'utf8');
+  await writeFile(path, serialize(claim), 'utf8');
 }
 
 /** A stale-claim holder: a pid that is not alive. */
@@ -96,7 +101,16 @@ async function contendViaChildren(
       sessionId: process.env.CHILD_SESSION_ID,
       acquiredAt: new Date().toISOString(),
     };
-    const result = await acquireOwnerLock(process.env.OWNER_LOCK_PATH, owner);
+    const result = await acquireOwnerLock(process.env.OWNER_LOCK_PATH, owner).catch(
+      (err: unknown) => {
+        // A contender whose attempts run out while the winner is still
+        // mid-reclaim gets the loud busy error — that is a refusal too.
+        if (err instanceof Error && err.name === 'SessionBusyError') {
+          return { acquired: false, holder: null };
+        }
+        throw err;
+      },
+    );
     if (result.acquired) {
       // Stay alive until the rival has decided — its refusal needs our pid alive.
       await Bun.sleep(300);
@@ -211,6 +225,20 @@ test('two real child processes contend over a stale claim: exactly one reclaims 
   expect(await acquireOwnerLock(lockPath, current)).toEqual({ acquired: true, created: true });
 });
 
+test('two real child processes contend over a stale claim AND a dead reclaim mutex: exactly one acquires', async () => {
+  // Both children judge the same dead claim AND the same dead mutex; their
+  // recoveries of the mutex race (one removes it, one may find the rival's
+  // fresh mutex and restore it). The verified recovery must still yield
+  // exactly one owner.
+  await seedClaim(lockPath, staleOwner('crashed'));
+  await seedClaim(`${lockPath}.reclaim`, staleOwner('crashed-reclaimer'));
+  const results = await contendViaChildren(lockPath, ['child-a', 'child-b']);
+  expectExactlyOneAcquired(results);
+
+  const current = owner();
+  expect(await acquireOwnerLock(lockPath, current)).toEqual({ acquired: true, created: true });
+});
+
 test('a contender that observed a stale claim never unlinks a rival acquired after it', async () => {
   // The interleaving that used to double-acquire: B reads the dead holder; A
   // reclaims the same dead holder and publishes its live claim; B's blind
@@ -242,6 +270,82 @@ test('a contender that observed a stale claim never unlinks a rival acquired aft
   expect(JSON.parse(await readFile(lockPath, 'utf8'))).toEqual(rival);
   // And the serialization left nothing behind.
   expect(existsSync(`${lockPath}.reclaim`)).toBe(false);
+});
+
+test('a late mutex recovery restores a rival fresh mutex instead of destroying it', async () => {
+  // The interleaving that used to double-issue the mutex: B judges a dead
+  // reclaim mutex; A's recovery of the same dead mutex wins and publishes
+  // A's FRESH mutex; B's removal — executing late — used to blind-unlink
+  // A's live mutex and put B into the critical section too. Recovery now
+  // moves the mutex aside atomically and verifies it removed exactly the
+  // bytes it judged; a rival's live mutex is restored and B refuses.
+  const crashed = staleOwner('crashed');
+  await seedClaim(lockPath, crashed);
+  const deadReclaimer = staleOwner('crashed-reclaimer');
+  await seedClaim(`${lockPath}.reclaim`, deadReclaimer);
+
+  const rival = owner(process.pid, 'fresh-reclaimer'); // live: real identity
+  const contender = owner(process.pid, 'contender');
+  // A distinct (fabricated) identity: the contender must not read the
+  // rival's mutex as its own re-entrant take.
+  contender.identity = { startTicks: (captureIdentity(process.pid).startTicks ?? 0) + 1 };
+
+  const hooks: AcquireHooks = {
+    afterMutexJudgedDead: async () => {
+      // The rival wins the recovery race while B is parked between its
+      // judgment and its removal: the dead mutex is replaced by A's live one.
+      await seedClaim(`${lockPath}.reclaim`, rival);
+    },
+  };
+
+  const failure = await acquireOwnerLock(lockPath, contender, hooks).catch((err: unknown) => err);
+
+  // B fails loud, pointing at the live reclaimer, rather than dispossessing it.
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).name).toBe('SessionBusyError');
+  expect((failure as Error).message).toContain(`pid ${process.pid}`);
+  // The rival's mutex survived B's recovery, byte for byte.
+  expect(await readFile(`${lockPath}.reclaim`, 'utf8')).toBe(serialize(rival));
+  // B never reached the claim: the stale claim is untouched.
+  expect(await readFile(lockPath, 'utf8')).toBe(serialize(crashed));
+  // The verified recovery left no quarantine copy behind.
+  const leftovers = (await readdir(dirname(lockPath))).filter((name) =>
+    name.includes('.recovered-'),
+  );
+  expect(leftovers).toEqual([]);
+});
+
+test('a holder whose mutex was taken mid-reclaim refuses to unlink the claim', async () => {
+  // Mutual exclusion must hold THROUGH the claim read/unlink: a legitimate
+  // holder can be dispossessed after its re-verification (a rival recovery's
+  // restore losing the publish race into the freed slot). The holder
+  // re-checks the mutex names it immediately before the destructive unlink —
+  // without that check it unlinked a claim it no longer guarded.
+  const crashed = staleOwner('crashed');
+  await seedClaim(lockPath, crashed);
+
+  const contender = owner(process.pid, 'contender');
+  contender.identity = { startTicks: (captureIdentity(process.pid).startTicks ?? 0) + 1 };
+  const thief = owner(process.pid, 'thief'); // live: real identity
+
+  const hooks: AcquireHooks = {
+    beforeClaimUnlink: async () => {
+      // Dispossessed at the last instant: the mutex now names a live rival,
+      // exactly as a lost recovery restore would leave it.
+      await seedClaim(`${lockPath}.reclaim`, thief);
+    },
+  };
+
+  const failure = await acquireOwnerLock(lockPath, contender, hooks).catch((err: unknown) => err);
+
+  // The fencing check saw the foreign mutex and refused the unlink.
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).name).toBe('SessionBusyError');
+  expect((failure as Error).message).toContain(`pid ${process.pid}`);
+  // The claim was never unlinked.
+  expect(await readFile(lockPath, 'utf8')).toBe(serialize(crashed));
+  // The rival's mutex is intact — release never removed another owner's.
+  expect(await readFile(`${lockPath}.reclaim`, 'utf8')).toBe(serialize(thief));
 });
 
 test('a reclaim mutex left by a crashed reclaimer is reclaimed, not worshipped', async () => {
