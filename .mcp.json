@@ -3,16 +3,22 @@
     "codegraph": {
       "type": "stdio",
       "command": "codegraph",
-      "args": [
-        "serve",
-        "--mcp"
-      ]
+      "args": ["serve", "--mcp"]
     },
     "developerz": {
       "type": "http",
       "url": "https://mcp.developerz.ai/v1/mcp",
       "headers": {
         "Authorization": "Bearer ${DEVELOPERZ_API_KEY}"
+      }
+    },
+    "sentry-mcp": {
+      "type": "stdio",
+      "command": "bunx",
+      "args": ["@sentry/mcp-server"],
+      "env": {
+        "SENTRY_ACCESS_TOKEN": "${SENTRY_ACCESS_TOKEN}",
+        "SENTRY_HOST": "${SENTRY_HOST}"
       }
     }
   }
