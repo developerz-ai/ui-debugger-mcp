@@ -1,57 +1,63 @@
 /**
- * Exclusive workspace ownership claim.
+ * Exclusive workspace ownership — a kernel-held lock.
  *
- * The `state.json` breadcrumb is advisory: two servers can both read it before
- * either writes. This lock closes that window by publishing the complete claim
- * and linking it into place atomically, so only one process can win.
+ * Exclusion is `flock(2)` (`LOCK_EX | LOCK_NB`) on `<workspace>/owner.lock`,
+ * held on an open fd for as long as this process owns the workspace. A live
+ * owner's exclusion is NON-REVOCABLE: no contender, and no recovery logic, can
+ * take it or remove it — the kernel refuses every other `flock` on the file —
+ * and the kernel releases it when the owner dies. Both halves replace the
+ * previous claim-file protocol, which published a link(2)'d claim and reclaimed
+ * a stale one with a verified rename-aside into a `.reclaiming-*` quarantine.
+ * That protocol's recovery could restore one live owner's claim over another
+ * (two stranded quarantines, resolved in readdir order, left the wrong holder
+ * at the path and admitted a second owner — PR #104). With the kernel as the
+ * referee there is no judgment about a previous holder's liveness, no reclaim,
+ * no hole, no quarantine, and nothing to recover: a dead holder is simply a
+ * lock nobody holds.
  *
- * The claim identifies its holder by PID and process identity, not session id.
- * Session ids are only unique within one process and two processes can mint
- * the same id in the same second. A dead or PID-recycled holder is reclaimed
- * so a crashed server cannot wedge the workspace.
+ * `owner.lock` is a NOTICE BOARD, not the lock: the owner writes its claim
+ * (pid + process identity + session) under the lock, and a refused contender
+ * reads it to name the holder in its error. Two invariants keep the flock
+ * sound, and both are absolute:
  *
- * Cross-process exclusion rests on two atomic primitives alone. `link(2)`
- * publishes: a contender that slips past every judgment still cannot win a
- * slot someone else filled — its `link` hits `EEXIST`, it re-reads a live
- * holder, and refuses. `rename(2)` removes — but a rename moves WHATEVER is
- * at the claim path, so the destructive step carries its own authorization
- * instead of trusting the check that precedes it: the moved bytes are
- * verified at the private quarantine name, and anything other than the
- * judged-stale claim — a rival's fresh claim that raced in — is restored
- * byte for byte with a second rename, and the contender refuses.
+ * 1. The file is NEVER unlinked. `flock` binds to the inode; unlinking the
+ *    path and letting a rival create a fresh file hands that rival a lock on a
+ *    different inode while the old one is still held — two owners. Release
+ *    empties the file and unlocks; the empty file itself is litter.
+ * 2. Only the process holding the lock ever writes or unlocks. A refused
+ *    contender only ever reads.
  *
- * The residual danger of that rename-aside is the hole it opens in the claim
- * path: a third contender could publish into it while a displaced live claim
- * sits in the quarantine. Two rules close it.
+ * Re-entrancy is per process identity (pid + start ticks): `flock` treats each
+ * open file description as an independent contender — even two fds in ONE
+ * process contend — so the acquiring fd is kept in a registry keyed by lock
+ * path and reused. A second claim from this process with a DIFFERENT identity
+ * is refused like a foreign process: it opens its own fd and the kernel
+ * refuses it.
  *
- * 1. The hole and the quarantine are born in the SAME atomic rename, so an
- *    absent claim path always has a visible `.reclaiming-*` sibling — and an
- *    admission is not final while one is visible: the contender re-runs and
- *    the restore supersedes it. What the restore displaces is therefore only
- *    ever an orphan nobody was admitted on, never a live owner.
- * 2. The restore is itself a `rename`, so it lands byte for byte over such an
- *    orphan. A `link` restore would fail `EEXIST` against the orphan and DROP
- *    the live owner's claim — the exact bug this protocol exists to prevent.
- *    The admission check reads in the same order (quarantine first, then the
- *    claim bytes): the restore is one atomic swap of (quarantine visible,
- *    orphan at the path) for (no quarantine, live claim at the path), so that
- *    order can never straddle it.
+ * Litter from the previous protocol (`.reclaiming-*` quarantines, a stray
+ * `owner.lock.reclaim` mutex, an empty or stale claim file) is inert: nothing
+ * reads or removes it. It cannot resurrect an owner — exclusion lives in the
+ * kernel, not in file contents.
  *
- * A reclaimer that crashes between the rename and its cleanup leaves the
- * quarantine behind. The next acquirer resolves it before publishing: a
- * quarantine whose claim's owner is still alive is restored to the claim
- * path; a dead or malformed one finishes being removed. No second mutex file
- * is involved: the previous design fenced the unlink with a reclaim mutex
- * (`owner.lock.reclaim`) plus crash recovery for that mutex, and the recovery
- * could still dispossess a live holder AFTER its fence — a check never covers
- * the act that follows it.
+ * `flock` comes from libc via `bun:ffi`. The server targets Linux (see
+ * CLAUDE.md); the glibc and musl sonames and the macOS libc are covered, and
+ * anything else fails loud at first use — a silent fallback here would be two
+ * processes both believing they own the workspace.
  */
 
-import { link, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { dlopen, FFIType } from 'bun:ffi';
+import {
+  closeSync,
+  constants as fsConstants,
+  ftruncateSync,
+  openSync,
+  readFileSync,
+  writeSync,
+} from 'node:fs';
+import { join } from 'node:path';
 import { z } from 'zod';
-import { SessionBusyError } from '../errors.js';
-import { ownerAlive, ProcessIdentitySchema } from './process-identity.js';
+import { SessionBusyError, WorkspaceError } from '../errors.js';
+import { ProcessIdentitySchema } from './process-identity.js';
 import type { WorkspacePaths } from './workspace.js';
 
 /** The owner recorded in `<workspace>/owner.lock`. */
@@ -68,7 +74,7 @@ export const OwnerLockSchema = z.object({
 
 export type OwnerLock = z.infer<typeof OwnerLockSchema>;
 
-/** A live owner holds the claim (or it is visibly still being published). */
+/** A live owner holds the lock. */
 export class OwnerLockBusyError extends SessionBusyError {}
 
 /** `<workspace.root>/owner.lock` */
@@ -76,263 +82,159 @@ export function ownerLockPath(workspace: WorkspacePaths): string {
   return join(workspace.root, 'owner.lock');
 }
 
-/**
- * Test seam for {@link acquireOwnerLock} — production callers run none of it.
- */
-export interface AcquireHooks {
-  /**
-   * Runs once the existing claim has been judged stale, immediately before it
-   * is reclaimed. Lets a regression test park one contender between its
-   * judgment and its destructive act while a rival completes a full acquire —
-   * the post-check interleaving in which an act authorized by an earlier
-   * observation would remove a rival's live claim.
-   */
-  afterStaleObservation?: () => Promise<void> | void;
-  /**
-   * Runs once the judged claim has been moved to its quarantine name and
-   * before its bytes are verified — the moment the claim path is an open
-   * hole (absent path, quarantine visible). Lets a regression test run a
-   * rival acquire — or seed an orphan claim — into exactly the window in
-   * which a displaced live claim could otherwise be lost.
-   */
-  afterQuarantineRename?: () => Promise<void> | void;
+/** flock(2) operations — the Linux/glibc values, identical on the BSDs and macOS. */
+const LOCK_EX = 2;
+const LOCK_NB = 4;
+const LOCK_UN = 8;
+
+/** libc sonames carrying `flock`, in probe order (glibc, musl, macOS). */
+const LIBC_CANDIDATES = [
+  'libc.so.6',
+  'libc.musl-x86_64.so.1',
+  'libc.musl-aarch64.so.1',
+  'libc.dylib',
+];
+
+type FlockFn = (fd: number, operation: number) => number;
+
+let flockFn: FlockFn | undefined;
+
+/** Resolve `flock(2)` from libc once; fail loud when the platform has none. */
+function loadFlock(): FlockFn {
+  if (flockFn !== undefined) return flockFn;
+  const misses: string[] = [];
+  for (const name of LIBC_CANDIDATES) {
+    try {
+      const lib = dlopen(name, {
+        flock: { args: [FFIType.int, FFIType.int], returns: FFIType.int },
+      });
+      flockFn = lib.symbols.flock as FlockFn;
+      return flockFn;
+    } catch (error) {
+      misses.push(`${name}: ${(error as Error).message}`);
+    }
+  }
+  throw new WorkspaceError(
+    `cannot load flock(2) for the workspace ownership lock on ${process.platform} ` +
+      `(tried ${LIBC_CANDIDATES.join(', ')}): ${misses.join('; ')}`,
+  );
 }
+
+/**
+ * The locks this process holds, keyed by lock path. The fd must live as long
+ * as the ownership: `flock` is released when the fd closes, and the kernel
+ * releases it when the process dies — a crashed server never wedges anything.
+ */
+const holds = new Map<string, { fd: number; owner: OwnerLock }>();
 
 /** Whether two owners identify the same live process. */
 function sameOwner(left: OwnerLock, right: OwnerLock): boolean {
   return left.pid === right.pid && left.identity.startTicks === right.identity.startTicks;
 }
 
-/** Read the file's bytes; `null` when absent or unreadable. */
-async function readRaw(path: string): Promise<string | null> {
-  try {
-    return await readFile(path, 'utf8');
-  } catch {
-    return null;
-  }
+/** The exact bytes an acquire writes for a claim. */
+function serialize(owner: OwnerLock): string {
+  return `${JSON.stringify(owner, null, 2)}\n`;
 }
 
-/** Parse a claim file's bytes; `null` when malformed. */
-function parseHolder(raw: string): OwnerLock | null {
+/** Read and validate the claim on the notice board; `null` when absent or unreadable. */
+function readHolder(lockPath: string): OwnerLock | null {
   try {
-    const parsed = OwnerLockSchema.safeParse(JSON.parse(raw));
+    const parsed = OwnerLockSchema.safeParse(JSON.parse(readFileSync(lockPath, 'utf8')));
     return parsed.success ? parsed.data : null;
   } catch {
     return null;
   }
 }
 
-/** Read and validate an existing claim. `null` means absent or malformed. */
-async function readHolder(path: string): Promise<OwnerLock | null> {
-  const raw = await readRaw(path);
-  return raw === null ? null : parseHolder(raw);
+/** Rewrite the notice board under the lock we hold. */
+function writeClaim(fd: number, owner: OwnerLock): void {
+  ftruncateSync(fd, 0);
+  writeSync(fd, serialize(owner), 0, 'utf8');
 }
 
-/** Swallow only "already gone" — a rival resolver won the race. Anything else is loud. */
-function ignoreMissing(error: unknown): void {
-  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-}
-
-/**
- * Publish `serialized` at `path`: write the COMPLETE content to a private
- * staging name, then link it into place. `link(2)` is atomic and fails when
- * the destination exists, so a rival never observes a reserved-but-empty
- * claim and cannot mistake it for a malformed one. `false` means the
- * destination exists.
- */
-async function publishAtomically(path: string, serialized: string, tag: string): Promise<boolean> {
-  const staging = `${path}.candidate-${process.pid}-${tag}`;
-  try {
-    await writeFile(staging, serialized, { encoding: 'utf8', flag: 'wx' });
-    await link(staging, path);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    return false;
-  } finally {
-    await unlink(staging).catch(() => undefined);
-  }
-}
-
-/** Counts a process's reclaims, keeping quarantine names unique within one. */
-let reclaimSeq = 0;
-
-/** Every quarantine sibling of the claim (`<claim path>.reclaiming-*`). */
-async function quarantines(lockPath: string): Promise<string[]> {
-  const dir = dirname(lockPath);
-  const prefix = `${basename(lockPath)}.reclaiming-`;
-  let names: string[];
-  try {
-    names = await readdir(dir);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-    throw error;
-  }
-  return names.filter((name) => name.startsWith(prefix)).map((name) => join(dir, name));
-}
-
-/**
- * Resolve orphaned reclaim quarantines — the recovery of a reclaimer that
- * died between its rename and its cleanup.
- *
- * A quarantine holding a LIVE owner's claim is that owner's claim, displaced
- * mid-reclaim: restore it to the claim path. A dead or malformed one is a
- * removal that was interrupted: finish it. Either way the slot ends up in a
- * state the ordinary acquire loop understands, and no claim is ever lost —
- * resolution races another resolver only on ENOENT, which is benign.
- */
-async function resolveOrphanedQuarantines(lockPath: string): Promise<void> {
-  for (const quarantine of await quarantines(lockPath)) {
-    const holder = parseHolder((await readRaw(quarantine)) ?? '');
-    if (holder !== null && ownerAlive(holder.pid, holder.identity).alive) {
-      // rename, not link: the slot may hold a void orphan (or nothing), and
-      // the restore must land either way, byte for byte.
-      await rename(quarantine, lockPath).catch(ignoreMissing);
-    } else {
-      await unlink(quarantine).catch(ignoreMissing);
-    }
-  }
-}
-
-/**
- * Whether an admission may be treated as FINAL: no reclaim quarantine is
- * visible (a visible one means a reclaim hole may be open — this claim may
- * sit inside it, void), and the claim at the path is still the one this
- * contender means to admit. Quarantine first, bytes second — see the module
- * doc for why that order can never straddle a restore.
- */
-async function admissionFinal(
-  lockPath: string,
-  ours: (raw: string | null) => boolean,
-): Promise<boolean> {
-  if ((await quarantines(lockPath)).length > 0) return false;
-  return ours(await readRaw(lockPath));
-}
-
-/**
- * Remove `judgedRaw` from `path` — or remove nothing.
- *
- * The move and the judgment travel together: `rename(2)` is atomic, so this
- * process either moves WHATEVER is at `path` — and then verifies, at the
- * private quarantine name where no rival can substitute bytes, that it moved
- * exactly what it judged stale — or moves nothing (`ENOENT`: a rival
- * reclaimer won the race). A mismatch means a rival's claim was legitimately
- * published after this contender's judgment: its live claim is what we are
- * holding, so it is restored byte for byte with a second rename and the
- * contender refuses. The restore must be a `rename`, not a `link`: while the
- * hole this rename opened was visible, any contender publishing into it voids
- * its own admission — so the slot may hold such a void orphan, and a `link`
- * restore would fail `EEXIST` against it and DROP the live owner's claim.
- * `true` means the judged claim was removed; `false` means the caller must
- * re-run its publish against whatever is there now.
- */
-async function removeExactly(
-  path: string,
-  judgedRaw: string,
-  hooks: AcquireHooks,
-): Promise<boolean> {
-  reclaimSeq += 1;
-  const quarantine = `${path}.reclaiming-${process.pid}-${reclaimSeq}`;
-  try {
-    await rename(path, quarantine);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw error;
-  }
-  await hooks.afterQuarantineRename?.();
-  const moved = await readRaw(quarantine);
-  if (moved === judgedRaw) {
-    await unlink(quarantine).catch(ignoreMissing);
-    return true;
-  }
-  await rename(quarantine, path).catch(ignoreMissing);
-  return false;
-}
+/** How often a busy contender re-reads an unreadable claim before failing loud. */
+const BUSY_ATTEMPTS = 3;
+/** Pause between those reads — covers a release (truncate → unlock) racing the read. */
+const BUSY_RETRY_MS = 5;
 
 /**
  * Acquire the exclusive workspace claim.
  *
- * The publish is an atomic `link(2)`, so only one process can win. An existing
- * claim held by this same process is re-entrant. A live foreign claim is
- * refused. A dead, recycled or malformed claim is reclaimed once — the removal
- * itself carries the authorization (`removeExactly`) — and the publish retried.
+ * The publish is one non-blocking `flock(2)`: the kernel either grants this
+ * process the workspace or refuses it — there is no read-then-act window, so
+ * no rival can slip between a judgment and the act, and no admission can be
+ * invalidated after the fact. A refused contender reports the holder named on
+ * the notice board.
  *
- * No admission goes final while a reclaim quarantine is visible: a publish
- * that landed in a reclaim hole is an orphan the reclaimer's restore
- * supersedes, and the loop re-runs against whatever the restore put back.
+ * An existing claim held by this same process (same pid + start ticks) is
+ * re-entrant and reports `created: false`; any fresh take — an empty workspace
+ * or one whose previous holder died — reports `created: true`.
  */
 export async function acquireOwnerLock(
   lockPath: string,
   owner: OwnerLock,
-  hooks: AcquireHooks = {},
 ): Promise<{ acquired: true; created: boolean } | { acquired: false; holder: OwnerLock }> {
-  const serialized = `${JSON.stringify(owner, null, 2)}\n`;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    // A reclaimer that died mid-reclaim left its quarantine behind; resolve it
-    // before publishing, so the slot below is never wedged by that litter.
-    await resolveOrphanedQuarantines(lockPath);
+  const flock = loadFlock();
+  const held = holds.get(lockPath);
+  if (held !== undefined && sameOwner(held.owner, owner)) {
+    return { acquired: true, created: false }; // re-entrant: this process already owns it
+  }
 
-    if (await publishAtomically(lockPath, serialized, `a${attempt}`)) {
-      if (await admissionFinal(lockPath, (raw) => raw === serialized)) {
-        return { acquired: true, created: true };
+  for (let attempt = 0; attempt < BUSY_ATTEMPTS; attempt += 1) {
+    // O_RDWR | O_CREAT: create the notice board on the first take, never
+    // truncate it here — truncation is a write, and writes belong under the lock.
+    const fd = openSync(lockPath, fsConstants.O_RDWR | fsConstants.O_CREAT, 0o644);
+    let locked = false;
+    try {
+      locked = flock(fd, LOCK_EX | LOCK_NB) === 0;
+    } finally {
+      if (!locked) closeSync(fd);
+    }
+    if (locked) {
+      try {
+        writeClaim(fd, owner);
+      } catch (error) {
+        closeSync(fd); // closing releases the lock — a half-written claim owns nothing
+        throw error;
       }
-      continue; // published into a reclaim hole — void; the restore supersedes it
+      holds.set(lockPath, { fd, owner });
+      return { acquired: true, created: true };
     }
 
-    const observed = await readRaw(lockPath);
-    if (observed === null) continue; // vanished between the failed link and the read: retry
-
-    const holder = parseHolder(observed);
+    // The kernel refused: the holder is provably alive, whatever the file says.
+    // Name it from the notice board — unless it names US, which happens when a
+    // same-process acquire raced this one and won: that is re-entrance, not
+    // busy (pid + start ticks cannot belong to another process).
+    const holder = readHolder(lockPath);
     if (holder !== null) {
-      if (sameOwner(holder, owner)) {
-        const stillOurs = (raw: string | null): boolean => {
-          const parsed = raw === null ? null : parseHolder(raw);
-          return parsed !== null && sameOwner(parsed, owner);
-        };
-        if (await admissionFinal(lockPath, stillOurs)) {
-          return { acquired: true, created: false };
-        }
-        continue; // our own orphan in a reclaim hole — the restore supersedes it
-      }
-      if (ownerAlive(holder.pid, holder.identity).alive) {
-        return { acquired: false, holder };
-      }
-    } else if (observed.trim() === '') {
-      // An empty claim is the visible window of a create-then-fill publish.
-      // Never reclaim it: doing so lets two processes both believe they own
-      // the workspace.
-      throw new OwnerLockBusyError('owner lock is empty; refusing to reclaim an in-progress claim');
+      if (sameOwner(holder, owner)) return { acquired: true, created: false };
+      return { acquired: false, holder };
     }
-
-    // Dead, PID-recycled or malformed — reclaim it. The removal can only ever
-    // remove bytes that were genuinely judged stale, and while the removal's
-    // hole is open no rival admission can go final — so no rival, however it
-    // raced past this judgment, can lose its claim here.
-    await hooks.afterStaleObservation?.();
-    await removeExactly(lockPath, observed, hooks);
+    // A release (truncate → unlock) racing this read can leave the file
+    // momentarily empty — retry the flock itself before concluding anything.
+    await new Promise<void>((resolve) => setTimeout(resolve, BUSY_RETRY_MS));
   }
 
-  const holder = await readHolder(lockPath);
-  if (holder !== null && ownerAlive(holder.pid, holder.identity).alive) {
-    return { acquired: false, holder };
-  }
-  throw new OwnerLockBusyError('owner lock changed while it was being reclaimed');
+  throw new OwnerLockBusyError(
+    'owner lock is held by another process, but its claim file could not be read',
+  );
 }
 
 /**
- * Release the claim only when it still names this owner.
+ * Release the claim only when this process still holds it.
  *
- * Returns `false` when the claim belongs to another process or is already
- * gone; another owner's claim is never unlinked.
+ * Returns `false` when this process holds nothing here (or a different owner
+ * does) — another owner's lock is never touched. The notice board is emptied,
+ * never unlinked: a stale claim file must never be mistaken for a held lock,
+ * and unlinking the path would put a fresh inode where the owner's lock lives.
  */
 export async function releaseOwnerLock(lockPath: string, owner: OwnerLock): Promise<boolean> {
-  const holder = await readHolder(lockPath);
-  if (holder === null || !sameOwner(holder, owner)) return false;
-  try {
-    await unlink(lockPath);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw error;
-  }
+  const held = holds.get(lockPath);
+  if (held === undefined || !sameOwner(held.owner, owner)) return false;
+  holds.delete(lockPath);
+  ftruncateSync(held.fd, 0); // the board names no owner once we are out
+  loadFlock()(held.fd, LOCK_UN);
+  closeSync(held.fd);
+  return true;
 }

@@ -474,8 +474,13 @@ test("the owner's own clear() ends the run and releases the claim", async () => 
   await owner.clear('owner-run');
 
   expect((await readState(ws.stateJson))?.status).toBe('ended');
-  // The claim is given back — the project is free for the next server.
-  expect(existsSync(ownerLockPath(ws))).toBe(false);
+  // The claim is given back: the file is never unlinked (unlinking would put a
+  // fresh inode where a live owner's lock lives), but it names nobody —
+  // and a second server can now take the workspace.
+  expect(await readFile(ownerLockPath(ws), 'utf8')).toBe('');
+  const successor = new FileStatePort(ws, { pid: spawnLivePid() });
+  await successor.record({ sessionId: 'next-run', target: 'web', goal: 'next' });
+  expect(await readState(ws.stateJson)).toMatchObject({ sessionId: 'next-run' });
 });
 
 test('a failed second record does not release the claim held by the first record', async () => {
@@ -511,43 +516,39 @@ test('a failing breadcrumb write during teardown still releases the claim', asyn
   // to end. The release runs in a finally, once the ending session is
   // confirmed ours.
   const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
-  await mkdir(ws.root, { recursive: true });
-  await writeFile(
-    ownerLockPath(ws),
-    `${JSON.stringify(
-      {
-        pid: process.pid,
-        identity: captureIdentity(process.pid),
-        sessionId: 'owner-run',
-        acquiredAt: '2026-06-29T00:00:00.000Z',
-      },
-      null,
-      2,
-    )}\n`,
-    'utf8',
-  );
   const prior: StateFile = {
     ...SAMPLE,
     pid: process.pid,
     identity: captureIdentity(process.pid),
     sessionId: 'owner-run',
+    status: 'running',
     sessionDir: join(ws.sessions, 'owner-run'),
   };
+  let writes = 0;
   const io: StateIo = {
     async read() {
       return prior;
     },
     async write() {
-      throw new Error('breadcrumb write failed');
+      writes += 1;
+      if (writes >= 2) throw new Error('breadcrumb write failed'); // teardown's markStatus
     },
   };
   const port = new FileStatePort(ws, { pid: process.pid, io });
 
+  // The owner really holds the claim: record() acquired it, write #1 succeeded.
+  await port.record({ sessionId: 'owner-run', target: 'web', goal: 'first' });
+  expect(existsSync(ownerLockPath(ws))).toBe(true);
+
   // Teardown stays best-effort — it must not throw into the close path…
   await port.clear('owner-run');
 
-  // …and the claim must be given back even though the write threw.
-  expect(existsSync(ownerLockPath(ws))).toBe(false);
+  // …and the claim must be given back even though the write threw: the board
+  // names nobody, and the next server is admitted.
+  expect(await readFile(ownerLockPath(ws), 'utf8')).toBe('');
+  const successor = new FileStatePort(ws, { pid: spawnLivePid() });
+  await successor.record({ sessionId: 'next-run', target: 'web', goal: 'next' });
+  expect(await readState(ws.stateJson)).toMatchObject({ sessionId: 'next-run' });
 });
 
 test('a breadcrumb written without a claim still publishes', async () => {

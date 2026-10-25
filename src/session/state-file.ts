@@ -11,12 +11,12 @@
  *
  * The breadcrumb alone is ADVISORY: two servers can both read it before either
  * writes, and the second write hides the first owner's live run from
- * `status`/`stop`. The authority is the workspace's exclusive ownership claim
- * (`owner.lock`, see {@link ownerLockPath}) — {@link FileStatePort} takes it
- * BEFORE it publishes a breadcrumb, so exactly one live server may own a
- * workspace. A refused claim is a {@link SessionBusyError} naming the owner;
- * a claim left by a dead (or PID-recycled) owner is reclaimed, so a crashed
- * server never wedges the project.
+ * `status`/`stop`. The authority is the workspace's exclusive ownership lock
+ * (`owner.lock`, see {@link ownerLockPath}) — a kernel-held `flock` that
+ * {@link FileStatePort} takes BEFORE it publishes a breadcrumb, so exactly one
+ * live server may own a workspace. A refused claim is a {@link SessionBusyError}
+ * naming the owner; a crashed server's lock dies with its process, so a dead
+ * run never wedges the project — there is nothing to reclaim.
  *
  * `record()` fails LOUD: a run nobody can see is a run nobody can stop — the
  * profile would stay locked with no way to reach the owner short of killing the
@@ -245,13 +245,14 @@ export class FileStatePort implements StatePort {
   }
 
   /**
-   * Take the workspace's exclusive ownership claim, or fail loud.
+   * Take the workspace's exclusive ownership lock, or fail loud.
    *
-   * The claim is the AUTHORITATIVE one-run gate: it is taken atomically, so two
-   * servers starting in the same window cannot both win. A live foreign owner
-   * is named in the refusal (pid + session id) so the caller knows which
-   * server to stop; a dead or PID-recycled holder is reclaimed by the claim
-   * itself — a crashed server must never wedge the project.
+   * The lock is the AUTHORITATIVE one-run gate: the kernel grants it to one
+   * process at a time and holds it for the owner's lifetime, so two servers
+   * starting in the same window cannot both win, and no admission can be
+   * invalidated after the fact. A live foreign owner is named in the refusal
+   * (pid + session id) so the caller knows which server to stop; a crashed
+   * owner's lock died with its process — the workspace is simply free.
    *
    * Returns whether this call CREATED the claim. A re-entrant acquire did not
    * create it, so a later failed breadcrumb write must not release the claim
@@ -277,12 +278,14 @@ export class FileStatePort implements StatePort {
   }
 
   /**
-   * Release the claim — but ONLY when it still names us.
+   * Release the lock — but ONLY when it still names us.
    *
-   * A non-owner's claim is never unlinked: the file names its holder, and only
-   * that holder may take it back. The holder is read back from disk rather
-   * than remembered, so a claim whose session id moved on (a re-entrant acquire
-   * keeps the first id) is still recognised as ours.
+   * Only the process holding the kernel lock can release it; the claim file is
+   * a notice board, not the lock, and is never unlinked (unlinking the path
+   * would put a fresh inode where a live owner's lock lives). The holder is
+   * read back from disk rather than remembered, so a claim whose session id
+   * moved on (a re-entrant acquire keeps the first id) is still recognised as
+   * ours.
    */
   async #releaseClaim(): Promise<void> {
     const lockPath = ownerLockPath(this.#workspace);

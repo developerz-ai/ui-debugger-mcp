@@ -34,7 +34,7 @@ for that app. Keyed by the current dir.
 | `console.log`       | JS errors a code-only agent can't see. |
 | `network.log`       | The 500s / hangs / bad payloads behind a broken UI. |
 | `agent.log`         | Why the small agent decided pass/fail. Auditable. |
-| `owner.lock`        | The **exclusive ownership claim** — the authoritative one-run gate. Taken atomically (`link(2)`) by `FileStatePort.record` before any breadcrumb is published; names its holder by pid + process identity, so a live foreign owner refuses the start (`SessionBusyError`) and a dead or PID-recycled holder is reclaimed. Reclamation moves the judged claim aside with one atomic `rename(2)` and verifies the moved bytes at the private `.reclaiming-*` quarantine name; a rival's fresh claim is restored byte for byte with a second rename. The rename that opens a reclaim hole also creates that quarantine name, and no admission goes final while one is visible — so a contender that publishes into the hole voids itself, the restore can only ever displace such a void orphan, and a displaced live owner's claim always comes back (a `link` restore would fail `EEXIST` against the orphan and drop the live claim). A reclaimer that crashes leaves its quarantine to the next acquirer, which restores it if its owner lives and removes it if dead — no second mutex file, no wedged project. Released only by the owner it names. |
+| `owner.lock`        | The **exclusive ownership lock** — the authoritative one-run gate. A kernel-held `flock(2)` (`LOCK_EX \| LOCK_NB`) taken by `FileStatePort.record` before any breadcrumb is published: the kernel grants it to exactly one process and refuses every rival, so a live foreign owner's start fails with `SessionBusyError` (naming the holder from the claim written on the file), and a crashed owner's lock dies with its process — the workspace is simply free, with nothing to reclaim. The claim file is a notice board, not the lock: never unlinked (unlinking would swap the inode under a live lock), emptied on release, and litter from older protocols (`.reclaiming-*`, `owner.lock.reclaim`) is inert. Exclusion is non-revocable — no recovery logic can restore one owner over another, because there is no recovery. |
 | `state.json`        | Resume / inspect the cwd-keyed session. |
 
 ## PR replay video
@@ -112,10 +112,11 @@ reason. Pinned by `src/session/isolation.test.ts`.
 ## Rules
 
 - **One session at a time** per project — the gate is the workspace's exclusive
-  ownership claim (`owner.lock`), taken atomically before the run is recorded:
-  exactly one live owner per workspace, across processes, with no Chrome involved.
-  The persistent profile still locks itself, but it is not the gate. Parallel runs
-  *within one project* would need a cloned profile; out of scope.
+  ownership lock (`owner.lock`), a kernel-held `flock(2)` taken before the run
+  is recorded: exactly one live owner per workspace, across processes, with no
+  Chrome involved, and no reclaim/recovery step that could ever admit a second
+  owner. The persistent profile still locks itself, but it is not the gate.
+  Parallel runs *within one project* would need a cloned profile; out of scope.
   Different projects run in parallel freely (see above).
 - Lives under `./tmp/` so it never pollutes the repo (gitignore `tmp/`).
 - Findings reference evidence by path, so the smart agent can open a screenshot

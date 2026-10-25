@@ -1,14 +1,8 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, open, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import {
-  type AcquireHooks,
-  acquireOwnerLock,
-  type OwnerLock,
-  ownerLockPath,
-  releaseOwnerLock,
-} from './owner-lock.js';
+import { acquireOwnerLock, type OwnerLock, ownerLockPath, releaseOwnerLock } from './owner-lock.js';
 import { captureIdentity } from './process-identity.js';
 import { workspacePaths } from './workspace.js';
 
@@ -35,7 +29,7 @@ function owner(pid = process.pid, sessionId = 'session-1'): OwnerLock {
   };
 }
 
-/** The exact bytes a publish writes for a claim — byte comparisons use this. */
+/** The exact bytes an acquire writes for a claim — byte comparisons use this. */
 function serialize(claim: OwnerLock): string {
   return `${JSON.stringify(claim, null, 2)}\n`;
 }
@@ -57,14 +51,15 @@ interface ChildResult {
 }
 
 /**
- * Race two REAL child processes against `acquireOwnerLock` on the same path.
- * Ownership is decided by pid + identity, so cross-process contention can only
- * be exercised by actual second processes — an in-process rival would share
- * this process's pid and read as re-entrant.
+ * Race REAL child processes against `acquireOwnerLock` on the same path.
+ * Exclusion is a kernel lock, so cross-process contention can only be
+ * exercised by actual second processes — an in-process rival would share this
+ * process's pid and read as re-entrant (or be refused as a same-process
+ * foreign identity, which is not the same race).
  */
 async function contendViaChildren(
   path: string,
-  sessionIds: [string, string],
+  sessionIds: [string, ...string[]],
 ): Promise<ChildResult[]> {
   const script = `
     const { acquireOwnerLock } = await import(process.env.OWNER_LOCK_MODULE);
@@ -75,18 +70,9 @@ async function contendViaChildren(
       sessionId: process.env.CHILD_SESSION_ID,
       acquiredAt: new Date().toISOString(),
     };
-    const result = await acquireOwnerLock(process.env.OWNER_LOCK_PATH, owner).catch(
-      (err: unknown) => {
-        // A contender whose attempts run out while the winner is still
-        // mid-reclaim gets the loud busy error — that is a refusal too.
-        if (err instanceof Error && err.name === 'SessionBusyError') {
-          return { acquired: false, holder: null };
-        }
-        throw err;
-      },
-    );
+    const result = await acquireOwnerLock(process.env.OWNER_LOCK_PATH, owner);
     if (result.acquired) {
-      // Stay alive until the rival has decided — its refusal needs our pid alive.
+      // Stay alive until the rival has decided — its refusal needs our lock held.
       await Bun.sleep(300);
     }
     console.log(result.acquired ? 'ACQUIRED' : 'BUSY');
@@ -123,7 +109,7 @@ function expectExactlyOneAcquired(results: ChildResult[]): void {
   }
   const outcomes = results.map((result) => result.stdout.trim());
   expect(outcomes.filter((outcome) => outcome === 'ACQUIRED')).toHaveLength(1);
-  expect(outcomes.filter((outcome) => outcome === 'BUSY')).toHaveLength(1);
+  expect(outcomes.filter((outcome) => outcome === 'BUSY')).toHaveLength(outcomes.length - 1);
 }
 
 test('a second acquire against a live foreign holder is refused and returns the holder', async () => {
@@ -134,6 +120,8 @@ test('a second acquire against a live foreign holder is refused and returns the 
   foreign.identity = { startTicks: (first.identity.startTicks ?? 0) + 1 };
   const result = await acquireOwnerLock(lockPath, foreign);
 
+  // The kernel refused the second fd — the refusal is not a judgment this
+  // process made about a file, so no rival observation can invalidate it.
   expect(result.acquired).toBe(false);
   if (!result.acquired) expect(result.holder).toEqual(first);
 });
@@ -144,7 +132,22 @@ test('acquire is re-entrant for the same pid and process identity', async () => 
   expect(await acquireOwnerLock(lockPath, first)).toEqual({ acquired: true, created: false });
 });
 
-test('a claim left by a dead pid is reclaimed', async () => {
+test('two concurrent acquires by one owner in one process: both admitted, exactly one fresh', async () => {
+  // The registry cannot see a same-process rival that races between the
+  // registry miss and the flock; the loser's refusal reads the winner's claim
+  // and must recognise its own identity — re-entrant, never busy.
+  const first = owner();
+  const results = await Promise.all([
+    acquireOwnerLock(lockPath, first),
+    acquireOwnerLock(lockPath, first),
+  ]);
+  for (const result of results) expect(result.acquired).toBe(true);
+  expect(results.filter((result) => result.acquired && result.created)).toHaveLength(1);
+});
+
+test('a claim left by a dead pid is taken over', async () => {
+  // No process holds the lock (the holder died), so the takeover is a plain
+  // acquire — there is nothing to judge and nothing to reclaim.
   await seedClaim(lockPath, staleOwner('crashed'));
 
   const current = owner(process.pid, 'successor');
@@ -152,7 +155,9 @@ test('a claim left by a dead pid is reclaimed', async () => {
   expect(JSON.parse(await readFile(lockPath, 'utf8'))).toEqual(current);
 });
 
-test('a claim whose pid was recycled is reclaimed', async () => {
+test('a claim whose pid was recycled is taken over', async () => {
+  // Irrelevant under the kernel lock — identity matching exists for the CLI's
+  // `stop` signal, never as a liveness judgment guarding exclusion.
   const recycled = owner(process.pid, 'recycled');
   recycled.identity = { startTicks: (captureIdentity(process.pid).startTicks ?? 0) + 1 };
   await seedClaim(lockPath, recycled);
@@ -162,36 +167,48 @@ test('a claim whose pid was recycled is reclaimed', async () => {
   expect(JSON.parse(await readFile(lockPath, 'utf8'))).toEqual(current);
 });
 
-test('release refuses to remove another owner claim and leaves it intact', async () => {
+test('release refuses a claim this process does not hold and leaves the file intact', async () => {
+  // A claim file without a held lock is not ours to release — exclusion lives
+  // in the kernel, so only the process holding the lock can give it back.
   const holder = owner(process.pid, 'holder');
   await seedClaim(lockPath, holder);
 
   const foreign = owner(process.pid, 'foreign');
   foreign.identity = { startTicks: (holder.identity.startTicks ?? 0) + 1 };
   expect(await releaseOwnerLock(lockPath, foreign)).toBe(false);
-  expect(JSON.parse(await readFile(lockPath, 'utf8'))).toEqual(holder);
+  // Even the exact holder named on the board cannot release without the lock.
+  expect(await releaseOwnerLock(lockPath, holder)).toBe(false);
+  expect(await readFile(lockPath, 'utf8')).toBe(serialize(holder));
 });
 
-test('release removes our own claim', async () => {
-  const holder = owner();
+test('release empties the board and frees the lock for the next owner', async () => {
+  const holder = owner(process.pid, 'holder');
   expect(await acquireOwnerLock(lockPath, holder)).toEqual({ acquired: true, created: true });
   expect(await releaseOwnerLock(lockPath, holder)).toBe(true);
   expect(await releaseOwnerLock(lockPath, holder)).toBe(false);
+
+  // The file stays (never unlinked — unlinking would swap the inode under a
+  // live lock), but it names nobody and excludes nobody.
+  expect(await readFile(lockPath, 'utf8')).toBe('');
+
+  const next = owner(process.pid, 'next');
+  next.identity = { startTicks: (holder.identity.startTicks ?? 0) + 1 };
+  expect(await acquireOwnerLock(lockPath, next)).toEqual({ acquired: true, created: true });
+  expect(JSON.parse(await readFile(lockPath, 'utf8'))).toEqual(next);
 });
 
 test('two real child processes contend: exactly one acquires and one is busy', async () => {
   const results = await contendViaChildren(lockPath, ['child-a', 'child-b']);
   expectExactlyOneAcquired(results);
 
-  // The winner exited, so its claim is stale for us: a fresh acquire reclaims.
+  // The winner exited, and its lock died with it: a fresh acquire takes over.
   const current = owner();
   expect(await acquireOwnerLock(lockPath, current)).toEqual({ acquired: true, created: true });
 });
 
-test('two real child processes contend over a stale claim: exactly one reclaims it', async () => {
-  // Both children read the same dead holder; each reclamation is a verified
-  // rename, and only the first finds anything to move — the other gets ENOENT
-  // and re-runs its publish against the winner's live claim. Exactly one owner.
+test('two real child processes contend over a stale claim: exactly one acquires it', async () => {
+  // A claim file from a crashed server excludes nobody: both children race one
+  // kernel lock, and the kernel — not a reclaim protocol — picks the owner.
   await seedClaim(lockPath, staleOwner('crashed'));
   const results = await contendViaChildren(lockPath, ['child-a', 'child-b']);
   expectExactlyOneAcquired(results);
@@ -201,9 +218,9 @@ test('two real child processes contend over a stale claim: exactly one reclaims 
 });
 
 test('two real child processes contend over a stale claim and a stray pre-version mutex file: exactly one acquires', async () => {
-  // `owner.lock.reclaim` was the old design's serialization mutex. It no
-  // longer exists in the protocol; a leftover from a previous version is
-  // litter — neither read nor removed by acquisition.
+  // `owner.lock.reclaim` was the old design's serialization mutex. It no longer
+  // exists in the protocol; a leftover from a previous version is litter —
+  // neither read nor removed by acquisition.
   await seedClaim(lockPath, staleOwner('crashed'));
   const litter = staleOwner('crashed-reclaimer');
   await seedClaim(`${lockPath}.reclaim`, litter);
@@ -215,222 +232,83 @@ test('two real child processes contend over a stale claim and a stray pre-versio
   expect(await acquireOwnerLock(lockPath, current)).toEqual({ acquired: true, created: true });
 });
 
-test('a contender that observed a stale claim never unlinks a rival acquired after it', async () => {
-  // The interleaving that used to double-acquire: B reads the dead holder; A
-  // reclaims the same dead holder and publishes its live claim; B's blind
-  // unlink then removed A's claim and B published into the hole — two owners,
-  // and B's breadcrumb hid A's run from `status`/`stop`. The reclamation is
-  // now a verified rename: B moves whatever is at the claim path and finds a
-  // rival's live claim, not the bytes it judged — so it restores them and
-  // refuses. The destructive act carries its own authorization; nothing that
-  // happened after B's observation can make it remove the wrong bytes.
+test('double-quarantine litter can never resurrect a second owner over a live holder', async () => {
+  // THE PR #104 interleaving, pinned at the state it used to end in. A is the
+  // admitted owner. The old protocol could strand TWO live quarantines: B
+  // renamed A's claim aside (`.reclaiming-1`) and died; a contender published
+  // a void claim into the hole; a delayed reclaimer quarantined that too
+  // (`.reclaiming-2`) and died. Resolving both in readdir order restored the
+  // SECOND one over the first — C over A — and C's retry admitted a second
+  // owner while A was dispossessed. Under the kernel lock none of that
+  // machinery exists: the litter is inert bytes, the holder keeps the
+  // workspace, and no acquire can be admitted while A lives.
+  const a = owner(process.pid, 'admitted');
+  expect(await acquireOwnerLock(lockPath, a)).toEqual({ acquired: true, created: true });
+
+  const c = owner(process.pid, 'void-claim');
+  c.identity = { startTicks: (captureIdentity(process.pid).startTicks ?? 0) + 1 };
+  await seedClaim(`${lockPath}.reclaiming-1`, a);
+  await seedClaim(`${lockPath}.reclaiming-2`, c);
+
+  // C's retry: refused. A's claim survives verbatim; the litter is untouched.
+  const result = await acquireOwnerLock(lockPath, c);
+  expect(result.acquired).toBe(false);
+  if (!result.acquired) expect(result.holder).toEqual(a);
+  expect(await readFile(lockPath, 'utf8')).toBe(serialize(a));
+  expect(await readFile(`${lockPath}.reclaiming-1`, 'utf8')).toBe(serialize(a));
+  expect(await readFile(`${lockPath}.reclaiming-2`, 'utf8')).toBe(serialize(c));
+
+  // A is still the one and only owner.
+  expect(await acquireOwnerLock(lockPath, a)).toEqual({ acquired: true, created: false });
+});
+
+test('a real second process is refused even with double-quarantine litter seeded', async () => {
+  // The same interleaving, cross-process: the litter cannot conjure a free
+  // slot — the kernel lock is the only admission decision.
+  const a = owner(process.pid, 'admitted');
+  expect(await acquireOwnerLock(lockPath, a)).toEqual({ acquired: true, created: true });
+  const c = owner(process.pid, 'void-claim');
+  c.identity = { startTicks: (captureIdentity(process.pid).startTicks ?? 0) + 1 };
+  await seedClaim(`${lockPath}.reclaiming-1`, a);
+  await seedClaim(`${lockPath}.reclaiming-2`, c);
+
+  const [child] = await contendViaChildren(lockPath, ['child-c']);
+  if (!child) throw new Error('child did not run');
+  expect(child.exitCode).toBe(0);
+  expect(child.stderr).toBe('');
+  expect(child.stdout.trim()).toBe('BUSY');
+
+  // And A's claim is exactly where it was.
+  expect(await readFile(lockPath, 'utf8')).toBe(serialize(a));
+});
+
+test('a stale claim plus quarantine litter never wedges the next owner', async () => {
+  // A crashed OLD-protocol reclaimer could leave all of this behind; a crashed
+  // NEW-protocol owner leaves only the stale claim. Either way the next
+  // acquirer takes over — recovery is the kernel releasing the lock, so there
+  // is no resolution pass to strand or mis-order.
   await seedClaim(lockPath, staleOwner('crashed'));
-  const rival = owner(process.pid, 'rival');
-  const parked = owner(process.pid, 'parked');
-  // A distinct (fabricated) identity: the parked contender must not read the
-  // rival's claim as its own re-entrant acquire.
-  parked.identity = { startTicks: (captureIdentity(process.pid).startTicks ?? 0) + 1 };
-
-  const hooks: AcquireHooks = {
-    afterStaleObservation: async () => {
-      // The rival completes a full acquire while B is parked between its
-      // observation of the dead holder and its reclamation.
-      expect(await acquireOwnerLock(lockPath, rival)).toEqual({ acquired: true, created: true });
-    },
-  };
-
-  const result = await acquireOwnerLock(lockPath, parked, hooks);
-
-  // B is refused — its rename landed on the rival's live claim.
-  expect(result.acquired).toBe(false);
-  if (!result.acquired) expect(result.holder).toEqual(rival);
-  // The rival's claim survived B's reclaim attempt, verbatim.
-  expect(JSON.parse(await readFile(lockPath, 'utf8'))).toEqual(rival);
-  // And the reclamation left nothing behind.
-  const leftovers = (await readdir(dirname(lockPath))).filter(
-    (name) => name.includes('.reclaiming-') || name.includes('.reclaim'),
-  );
-  expect(leftovers).toEqual([]);
-});
-
-test('a reclaimer whose rename lands on a rival fresh claim restores it byte for byte and refuses', async () => {
-  // The post-check interleaving forced directly: B judged the claim stale and
-  // is parked at its destructive act; the slot changes hands under it (here a
-  // live rival's claim is published into the path exactly as a rival that won
-  // the reclaim race would); B's rename then moves the RIVAL's claim. Moving
-  // is unconditional, but removal is not: the moved bytes are verified at the
-  // private quarantine name, the rival's claim is restored byte for byte, and
-  // B refuses instead of publishing into a hole it cut under a live owner.
-  const crashed = staleOwner('crashed');
-  await seedClaim(lockPath, crashed);
-
-  const rival = owner(process.pid, 'fresh-owner'); // live: real identity
-  const contender = owner(process.pid, 'contender');
-  // A distinct (fabricated) identity: the contender must not read the
-  // rival's claim as its own re-entrant acquire.
-  contender.identity = { startTicks: (captureIdentity(process.pid).startTicks ?? 0) + 1 };
-
-  const hooks: AcquireHooks = {
-    afterStaleObservation: async () => {
-      // The slot changed hands while B was parked between its judgment and
-      // its act: the path now holds a live rival's claim.
-      await seedClaim(lockPath, rival);
-    },
-  };
-
-  const result = await acquireOwnerLock(lockPath, contender, hooks);
-
-  expect(result.acquired).toBe(false);
-  if (!result.acquired) expect(result.holder).toEqual(rival);
-  // The rival's claim survived B's reclamation, byte for byte.
-  expect(await readFile(lockPath, 'utf8')).toBe(serialize(rival));
-  // The verified rename left no quarantine copy behind.
-  const leftovers = (await readdir(dirname(lockPath))).filter((name) =>
-    name.includes('.reclaiming-'),
-  );
-  expect(leftovers).toEqual([]);
-});
-
-test('a reclaimer that crashed after moving a dead claim has its quarantine resolved by the next acquirer', async () => {
-  // A reclaimer that died between the rename and the cleanup leaves an EMPTY
-  // claim slot plus its quarantine. While any quarantine is visible no
-  // admission may go final, so the litter is not ignorable — the next acquirer
-  // resolves it: the stranded claim's owner is dead, so its removal is simply
-  // finished, and the slot is published into normally.
-  const stranded = staleOwner('crashed');
-  const quarantine = `${lockPath}.reclaiming-999999-1`;
-  await writeFile(quarantine, serialize(stranded), 'utf8');
+  await seedClaim(`${lockPath}.reclaiming-1`, staleOwner('crashed-a'));
+  await seedClaim(`${lockPath}.reclaiming-2`, staleOwner('crashed-b'));
 
   const current = owner(process.pid, 'successor');
   expect(await acquireOwnerLock(lockPath, current)).toEqual({ acquired: true, created: true });
   expect(JSON.parse(await readFile(lockPath, 'utf8'))).toEqual(current);
+
   const leftovers = (await readdir(dirname(lockPath))).filter((name) =>
     name.includes('.reclaiming-'),
   );
-  expect(leftovers).toEqual([]);
+  expect(leftovers).toHaveLength(2); // inert litter is left alone
 });
 
-test('a quarantine holding a live displaced claim is restored by the next acquirer, which then refuses', async () => {
-  // The other half of resolution: a reclaimer that died right after renaming a
-  // LIVE owner's claim aside. Its claim must come back byte for byte, and the
-  // resolving contender must refuse while that owner lives — restoring must
-  // never become a quiet way to take the workspace.
-  const displaced = owner(process.pid, 'displaced');
-  const quarantine = `${lockPath}.reclaiming-999999-1`;
-  await writeFile(quarantine, serialize(displaced), 'utf8');
+test('an empty claim file is litter, not an in-progress publish', async () => {
+  // The old protocol wrote the claim file and filled it in two steps, so an
+  // empty file was a live publish mid-flight and had to be refused. The kernel
+  // lock is taken BEFORE any content is written, so an empty file can only be
+  // litter — there is no create-then-fill window to protect.
+  await writeFile(lockPath, '', 'utf8');
 
-  const contender = owner(process.pid, 'resolver');
-  contender.identity = { startTicks: (captureIdentity(process.pid).startTicks ?? 0) + 1 };
-  const result = await acquireOwnerLock(lockPath, contender);
-
-  expect(result.acquired).toBe(false);
-  if (!result.acquired) expect(result.holder).toEqual(displaced);
-  expect(await readFile(lockPath, 'utf8')).toBe(serialize(displaced));
-  const leftovers = (await readdir(dirname(lockPath))).filter((name) =>
-    name.includes('.reclaiming-'),
-  );
-  expect(leftovers).toEqual([]);
-});
-
-test('a contender arriving in a reclaim hole never dispossesses the displaced live owner', async () => {
-  // THE interleaving the quarantine rule exists for, forced end to end: B
-  // judged the dead claim stale; A completed a full acquire while B was parked;
-  // B's reclaim rename moved A's LIVE claim aside, leaving the claim path an
-  // open hole with B's quarantine beside it; C then arrived and tried to
-  // acquire into that hole. The hole and the quarantine are born in the same
-  // rename, so C sees the quarantine and its publish is void — it is refused
-  // — and B restores A's claim byte for byte with a second rename. Under the
-  // previous protocol C was ADMITTED into the hole and B's link-restore failed
-  // EEXIST and DROPPED A's claim: two live owners.
-  await seedClaim(lockPath, staleOwner('crashed'));
-  const rival = owner(process.pid, 'rival');
-  const parked = owner(process.pid, 'parked');
-  const third = owner(process.pid, 'third');
-  // Distinct fabricated identities: neither the parked contender nor the
-  // third may read the rival's claim as its own re-entrant acquire.
-  const ownTicks = captureIdentity(process.pid).startTicks ?? 0;
-  parked.identity = { startTicks: ownTicks + 1 };
-  third.identity = { startTicks: ownTicks + 2 };
-
-  const hooks: AcquireHooks = {
-    afterStaleObservation: async () => {
-      // A completes a full acquire while B is parked between its judgment and
-      // its destructive act.
-      expect(await acquireOwnerLock(lockPath, rival)).toEqual({ acquired: true, created: true });
-    },
-    afterQuarantineRename: async () => {
-      // B has just moved A's live claim aside — the path is an open hole and
-      // B's quarantine is visible. C acquires into exactly that window.
-      const result = await acquireOwnerLock(lockPath, third);
-      expect(result.acquired).toBe(false);
-      if (!result.acquired) expect(result.holder).toEqual(rival);
-    },
-  };
-
-  const result = await acquireOwnerLock(lockPath, parked, hooks);
-
-  // B is refused too — the bytes its rename moved were A's live claim.
-  expect(result.acquired).toBe(false);
-  if (!result.acquired) expect(result.holder).toEqual(rival);
-  // A is the one and only owner, its claim restored verbatim.
-  expect(await readFile(lockPath, 'utf8')).toBe(serialize(rival));
-  const leftovers = (await readdir(dirname(lockPath))).filter(
-    (name) => name.includes('.reclaiming-') || name.includes('.reclaim'),
-  );
-  expect(leftovers).toEqual([]);
-});
-
-test('a restore lands byte for byte over an orphan published into the reclaim hole', async () => {
-  // The restore must be a rename, not a link: while B's hole was visible, a
-  // contender published into it and voided itself (pinned here by seeding the
-  // orphan directly, as that contender's abandoned publish sits). The restore
-  // must displace the orphan and put A's live claim back EXACTLY — a link
-  // restore fails EEXIST against the orphan and drops A's claim, which is the
-  // dispossessing bug this protocol closes.
-  await seedClaim(lockPath, staleOwner('crashed'));
-  const rival = owner(process.pid, 'rival');
-  const parked = owner(process.pid, 'parked');
-  parked.identity = { startTicks: (captureIdentity(process.pid).startTicks ?? 0) + 1 };
-  const orphan = owner(process.pid, 'void-orphan');
-  orphan.identity = { startTicks: (captureIdentity(process.pid).startTicks ?? 0) + 2 };
-
-  const hooks: AcquireHooks = {
-    afterStaleObservation: async () => {
-      expect(await acquireOwnerLock(lockPath, rival)).toEqual({ acquired: true, created: true });
-    },
-    afterQuarantineRename: async () => {
-      // B's rename moved A's claim aside; an orphan from a void publish into
-      // the hole now occupies the slot B must restore into.
-      await writeFile(lockPath, serialize(orphan), 'utf8');
-    },
-  };
-
-  const result = await acquireOwnerLock(lockPath, parked, hooks);
-
-  expect(result.acquired).toBe(false);
-  if (!result.acquired) expect(result.holder).toEqual(rival);
-  expect(await readFile(lockPath, 'utf8')).toBe(serialize(rival));
-  const leftovers = (await readdir(dirname(lockPath))).filter((name) =>
-    name.includes('.reclaiming-'),
-  );
-  expect(leftovers).toEqual([]);
-});
-
-test('a half-written claim is refused, not reclaimed as malformed', async () => {
-  // A create-then-fill publish leaves an EMPTY claim visible to another
-  // acquirer. It must never be mistaken for a stale malformed claim: the
-  // first owner's claim stays intact and the second acquirer is refused.
-  const handle = await open(lockPath, 'wx');
-  await handle.writeFile('', 'utf8');
-  await handle.close();
-  const holder = owner(process.pid, 'first');
-
-  const foreign = owner(process.pid, 'foreign');
-  foreign.identity = { startTicks: (holder.identity.startTicks ?? 0) + 1 };
-  const result = await acquireOwnerLock(lockPath, foreign).catch((err: unknown) => err);
-
-  expect(result).toBeInstanceOf(Error);
-  expect((result as Error).message).toContain('empty');
-  expect((result as Error).name).toBe('SessionBusyError');
-  expect(await readFile(lockPath, 'utf8')).toBe('');
+  const current = owner(process.pid, 'first');
+  expect(await acquireOwnerLock(lockPath, current)).toEqual({ acquired: true, created: true });
+  expect(JSON.parse(await readFile(lockPath, 'utf8'))).toEqual(current);
 });

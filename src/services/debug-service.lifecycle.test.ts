@@ -7,7 +7,7 @@
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ResolvedConfig } from '../config/load.js';
@@ -21,7 +21,6 @@ import {
 import { FindingsStore } from '../session/findings-store.js';
 import { SessionManager } from '../session/manager.js';
 import { ownerLockPath } from '../session/owner-lock.js';
-import { captureIdentity } from '../session/process-identity.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
 import {
   FileStatePort,
@@ -732,6 +731,64 @@ function spawnLivePid(): number {
   return child.pid;
 }
 
+/**
+ * A real second process that ACQUIRES the workspace's ownership lock and holds
+ * it — the shape of a foreign owner the claim must refuse. Exclusion is a
+ * kernel lock, so a claim file without a lock behind it excludes nobody; a
+ * holder must be an actual live process.
+ */
+async function spawnLockHolder(workspacePath: string, sessionId: string): Promise<number> {
+  const child = Bun.spawn({
+    cmd: [
+      'bun',
+      '-e',
+      `
+        const { acquireOwnerLock } = await import(process.env.OWNER_LOCK_MODULE);
+        const { captureIdentity } = await import(process.env.PROCESS_IDENTITY_MODULE);
+        const result = await acquireOwnerLock(process.env.OWNER_LOCK_PATH, {
+          pid: process.pid,
+          identity: captureIdentity(process.pid),
+          sessionId: process.env.SESSION_ID,
+          acquiredAt: new Date().toISOString(),
+        });
+        if (!result.acquired) {
+          console.log('BUSY');
+          process.exit(0);
+        }
+        console.log('READY');
+        await Bun.sleep(30_000); // hold the lock until the test kills us
+      `,
+    ],
+    env: {
+      ...process.env,
+      OWNER_LOCK_MODULE: join(import.meta.dir, '../session/owner-lock.ts'),
+      PROCESS_IDENTITY_MODULE: join(import.meta.dir, '../session/process-identity.ts'),
+      OWNER_LOCK_PATH: workspacePath,
+      SESSION_ID: sessionId,
+    },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  liveChildren.push(child);
+  // Read only until READY: the child keeps stdout open while it holds the
+  // lock (it sleeps for its whole 30s lifetime), so the stream never ends
+  // until the test is done with it.
+  const decoder = new TextDecoder();
+  let stdout = '';
+  let acquired = false;
+  for await (const chunk of child.stdout) {
+    stdout += decoder.decode(chunk, { stream: true });
+    if (stdout.includes('READY')) {
+      acquired = true;
+      break;
+    }
+  }
+  if (acquired) return child.pid;
+  // Refused or crashed — either way the child has exited by now.
+  const stderr = await new Response(child.stderr).text();
+  throw new Error(`lock holder child did not acquire: ${stdout.trim() || stderr}`);
+}
+
 afterEach(async () => {
   for (const child of liveChildren) {
     child.kill();
@@ -807,7 +864,7 @@ test('the ownership claim refuses a start even when the breadcrumb pre-check see
   // The winner's breadcrumb here names a DEAD pid (its write has not landed
   // yet), while the claim it already took names a LIVE foreign process.
   const workspace = workspacePaths(CWD, tmpDir);
-  const claimPid = spawnLivePid();
+  await mkdir(workspace.root, { recursive: true }); // the lock file is created inside it
   const loserPid = spawnLivePid();
   const otherState = new FileStatePort(workspace, { pid: loserPid });
   const otherManager = new SessionManager<Session>();
@@ -821,23 +878,10 @@ test('the ownership claim refuses a start even when the breadcrumb pre-check see
     now: () => NOW,
   });
 
-  // The winner holds the claim; its breadcrumb names a dead pid, so the loser's
-  // pre-check reports "no foreign run" — exactly the race the claim closes.
-  await mkdir(workspace.root, { recursive: true });
-  await writeFile(
-    ownerLockPath(workspace),
-    `${JSON.stringify(
-      {
-        pid: claimPid,
-        identity: captureIdentity(claimPid),
-        sessionId: 'winner-run',
-        acquiredAt: '2026-06-29T00:00:00.000Z',
-      },
-      null,
-      2,
-    )}\n`,
-    'utf8',
-  );
+  // The winner holds the KERNEL lock (a real second process); its breadcrumb
+  // names a dead pid, so the loser's pre-check reports "no foreign run" —
+  // exactly the race the claim closes.
+  const claimPid = await spawnLockHolder(ownerLockPath(workspace), 'winner-run');
   await writeState(workspace.stateJson, {
     pid: 999_999_999, // dead — the pre-check sees nobody
     identity: { startTicks: 1 },

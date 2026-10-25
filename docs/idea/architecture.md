@@ -64,10 +64,11 @@ mobile via ADB + uiautomator. See [`adapters.md`](adapters.md).
 ## Concurrency
 
 One debug run per project at a time. The gate is the workspace's exclusive
-ownership claim (`owner.lock`), taken atomically — exactly one live owner per
-workspace, across processes, with no Chrome involved — and a single small agent
-keeps the loop simple. Parallel runs would need cloned profiles — out of scope
-for now.
+ownership lock (`owner.lock`) — a kernel-held `flock(2)`, non-revocable while
+the owner lives and released by the kernel when it dies — so exactly one live
+owner exists per workspace, across processes, with no Chrome involved — and a
+single small agent keeps the loop simple. Parallel runs would need cloned
+profiles — out of scope for now.
 
 ## Stack
 
