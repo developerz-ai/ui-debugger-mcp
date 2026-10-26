@@ -64,13 +64,24 @@ picks the binary via `executablePath`/`emulatorPath`.
 
 ## MCP tools (few, fat — not playwright-mcp)
 A **conversation**, not a remote control. Small agent owns the clicking loop.
-- `start_debug` — open a session with a goal `{ target, goal, criteria?, as?, replace?, timeout? }`
-  (`timeout` seconds; always capped — default 300s — so a run never hangs forever).
+- `start_debug` — open a session with a goal `{ target, goal, criteria?, url?, as?, replace?, timeout? }`
+  (`timeout` seconds; always capped — default 300s, max 2_147_483s (Node timer
+  ceiling) — so a run never hangs forever).
+  `url` (web targets only) overrides the target's configured url for this run;
+  required when the target has none.
   `as` names a configured auth persona; the run signs in before the first step.
   `replace:true` takes the project over from an already-open run (opt-in only).
 - `send_message` — talk to the small agent **mid-run** (add work, redirect, answer).
 - `get_findings` — poll status + structured findings (functional + visual) + evidence.
+  `wait` (int ms, 0..120_000) long-polls for a terminal verdict before reading;
+  omit/0 reads now. `fields` projects a subset of findings keys
+  (`status|steps|bugs|visual|summary|evidence`, min 1) and is never truncated.
+  A whole-object read caps top-level lists at 20 items, attaching
+  `truncated: { <field>: {returned,total} }` per capped field plus a steering
+  note pointing at `fields=[...]`.
 - `describe` — list targets/config for this project (lazy schema) + the run it holds.
+  `target` narrows the catalog to a single entry; an unknown name fails loud
+  (`TargetNotFoundError`).
 - `end_session` — close it.
 
 NEVER ship click/type/screenshot as separate tools — that floods context.
@@ -200,6 +211,14 @@ bun run dev            # boot server, watch
 bun test               # unit tests < 10s
 bun run lint:fix       # biome auto-fix
 ```
+
+`bin/setup` prepares a fresh checkout: `bun install` (root) + builds the
+dummy/web e2e fixture, downloads the pinned Chromium, then verifies the
+headless-shell binary's shared libraries all resolve (`bun src/cli/chromium-libs.ts`)
+— apt remediation only when libraries are actually missing and noninteractive
+elevation is available, otherwise a loud failure naming every missing one, then
+a real launch check. That library check runs inside `bin/setup` only; it is NOT
+a public CLI subcommand (`main.ts` dispatches only init/status/stop).
 
 ## Coding Rules
 ### Think before coding
