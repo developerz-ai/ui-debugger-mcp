@@ -28,6 +28,7 @@ import { type ActTrail, createActTrail } from './trail.js';
 /** A fake {@link Adapter} whose only meaningful method is `screenshot`. */
 function fakeAdapter(png: Uint8Array, order?: string[]): Adapter {
   return {
+    selectorDialect: 'web',
     open: async () => {},
     find: async () => null,
     click: async () => {},

@@ -75,6 +75,10 @@ test('createAdapter dispatches a `desktop` target to DesktopAdapter', async () =
   const adapter = await createAdapter('desktop', config, '/tmp/unused-profile');
 
   expect(adapter).toBeInstanceOf(DesktopAdapter);
+  // The dialect is DECLARED by the adapter, never inferred by the belt: a desktop
+  // target parses the AT-SPI grammar (`role "name"`), and the belt emits that
+  // grammar — a `role=button[name="Save" i]` selector matches nothing there.
+  expect(adapter.selectorDialect).toBe('native');
 });
 
 test('createAdapter dispatches an `android` target to AndroidAdapter', async () => {
@@ -84,4 +88,7 @@ test('createAdapter dispatches an `android` target to AndroidAdapter', async () 
   const adapter = await createAdapter('mobile', config, '/tmp/unused-profile');
 
   expect(adapter).toBeInstanceOf(AndroidAdapter);
+  // Same contract, other grammar: uiautomator takes `role "name"` or a bare
+  // `resource-id`, never a Playwright engine selector.
+  expect(adapter.selectorDialect).toBe('native');
 });

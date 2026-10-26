@@ -32,6 +32,7 @@ import type {
   Query,
   ScreenshotOptions,
   ScrollOptions,
+  SelectorDialect,
   TabInfo,
   WaitOptions,
 } from '../contract.js';
@@ -130,6 +131,12 @@ export interface BrowserAdapterInit {
  * {@link BrowserAdapter.create} (async launch/connect can't live in a constructor).
  */
 export class BrowserAdapter implements Adapter {
+  /**
+   * The web selector grammar — the Playwright engines this adapter's
+   * `find`/`click`/`type` parse (`data-testid="…"`, `role=button[name="…" i]`,
+   * `text=…`, `>> nth=N`).
+   */
+  readonly selectorDialect: SelectorDialect = 'web';
   readonly #config: WebTarget;
   readonly #context: BrowserContext;
   /** The tab currently driven — reassigned by {@link BrowserAdapter.selectTab}. */

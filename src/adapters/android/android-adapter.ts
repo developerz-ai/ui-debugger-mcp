@@ -34,6 +34,7 @@ import type {
   NodeRef,
   Query,
   ScrollOptions,
+  SelectorDialect,
   WaitOptions,
 } from '../contract.js';
 // Both managed adapters kill a detached group the same way — one implementation, in the
@@ -187,6 +188,13 @@ export interface AndroidAdapterInit {
  * Construct via {@link AndroidAdapter.create}.
  */
 export class AndroidAdapter implements Adapter {
+  /**
+   * The native selector grammar — the uiautomator parser this adapter's
+   * `find`/`click`/`type` accept: `role "name"` or a bare `resource-id`/name
+   * substring, and nothing else. Declared here, not derived from the absence of
+   * `tabs`: the dialect is the grammar, and the grammar is the adapter's own.
+   */
+  readonly selectorDialect: SelectorDialect = 'native';
   readonly #config: AndroidTarget;
   readonly #bind: ((serial: string) => Transport) | null;
   readonly #attach: boolean;

@@ -35,6 +35,20 @@ All read parameters are `Query` (SQL-like `query/fields/filters/limit/within`).
 Filters are whitelisted per adapter — reject unknown keys with `AdapterError`, never
 silently ignore them.
 
+**Declare your selector dialect.** Every adapter carries one required member:
+
+```ts
+readonly selectorDialect: SelectorDialect = 'web';   // 'web' | 'native'
+```
+
+It names the grammar your `find`/`click`/`type` parse — `'web'` (the Playwright
+engines: `data-testid="…"`, `role=button[name="…" i]`, `text=…`, `>> nth=N`) or
+`'native'` (`role "name"`, or a bare name / `resource-id` substring). The belt emits
+every tree node's `target` in that dialect, so the declaration must be EXPLICIT: it is
+never inferred from the optional `tabs` capability, which is a capability and not a
+dialect marker — a target may have tabs and still parse the native grammar. A missing
+or unknown declaration fails loud; it never falls back to `web`.
+
 **Fail loud.** Every backend error must throw `AdapterError` (or a more specific custom
 class from `src/errors.ts`). Never swallow, never return a silent fallback. Re-throw
 your own `UiDebuggerError` subclasses untouched; wrap foreign errors as `AdapterError`.
@@ -80,6 +94,7 @@ export interface MyAdapterInit {
 }
 
 export class MyAdapter implements Adapter {
+  readonly selectorDialect: SelectorDialect = 'web';   // declare YOUR grammar
   readonly #backend: MyBackend;
 
   private constructor(backend: MyBackend, config: MyTarget) { … }

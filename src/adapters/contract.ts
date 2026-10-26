@@ -232,10 +232,43 @@ export interface TabInfo {
 }
 
 /**
+ * Which selector grammar a target's `find({query})` parses — and therefore which
+ * grammar the belt must EMIT, since the driver copies a node's `target` verbatim
+ * into `act`.
+ *
+ *  - `web` — Playwright engines (`data-testid="…"`, `role=button[name="…" i]`,
+ *    `text=…`, `>> nth=N`), normalized by `adapters/browser/query.ts`.
+ *  - `native` — the desktop (AT-SPI) and android (uiautomator) parsers, which take
+ *    exactly two shapes and NOTHING else: `role "name"`, or a bare substring. The
+ *    substring matches the node's name on desktop, and the node's name OR its
+ *    `resource-id` on android — so a bare `resource-id` (android's `testid`)
+ *    resolves there too. An engine-prefixed web selector degrades to a literal
+ *    substring, matches nothing, and `act` throws `no element matched …`.
+ *
+ * DECLARED per adapter ({@link Adapter.selectorDialect}) — never inferred from
+ * the optional `tabs` capability, which says nothing about the grammar a target
+ * parses.
+ */
+export type SelectorDialect = 'web' | 'native';
+
+/**
  * One contract, three protocols. The agent loop calls only these methods; each
  * adapter wires them to its real backend (CDP / X11-Wayland / ADB).
  */
 export interface Adapter {
+  /**
+   * The selector grammar this adapter's `find`/`click`/`type` parse — DECLARED,
+   * never inferred.
+   *
+   * The belt emits every tree node's `target` in this dialect and the driver
+   * copies it verbatim, so a target in the wrong dialect makes every click and
+   * type fail. It used to be inferred from {@link Adapter.tabs}, which is a
+   * CAPABILITY, not a dialect marker: a target that grows a tab listing must not
+   * silently switch the grammar the belt hands the driver. A missing or unknown
+   * declaration now fails loud rather than falling back to `web`.
+   */
+  readonly selectorDialect: SelectorDialect;
+
   /**
    * Go to the app: navigate to a URL (web) · launch/focus the window (desktop) · start the activity (android).
    *
@@ -292,6 +325,9 @@ export interface Adapter {
    * List the target's open tabs, newest last. OPTIONAL — implemented by targets
    * that have a tab concept (web); absent elsewhere, and the belt says so rather
    * than pretending a single-window target has one tab.
+   *
+   * A CAPABILITY, not a dialect marker: it says nothing about
+   * {@link Adapter.selectorDialect}, which every adapter declares on its own.
    */
   tabs?(): Promise<TabInfo[]>;
 

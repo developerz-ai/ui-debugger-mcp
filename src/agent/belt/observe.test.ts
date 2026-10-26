@@ -7,6 +7,7 @@ import type {
   NetworkEntry,
   Node,
   Query,
+  SelectorDialect,
 } from '../../adapters/contract.js';
 import { AdapterError, AgentError } from '../../errors.js';
 import type { Findings } from '../../findings/schema.js';
@@ -53,13 +54,19 @@ interface FakeReturns {
 /**
  * A fake {@link Adapter} that records the opts it receives and returns canned data.
  *
- * `tabs` is what tells the belt which selector dialect the target speaks (the
- * contract marks `tabs`/`selectTab` web-only), so it is present by default —
- * pass `false` for a desktop/android-shaped adapter.
+ * The dialect is DECLARED (`selectorDialect`) — the belt reads the declaration,
+ * it never infers one. `withTabs` is a SEPARATE capability flag: a target may
+ * list tabs and still speak the native dialect, which is exactly the case the
+ * old `tabs`-based inference got wrong.
  */
-function fakeAdapter(returns: FakeReturns, web = true): { adapter: Adapter; rec: Recorder } {
+function fakeAdapter(
+  returns: FakeReturns,
+  dialect: SelectorDialect = 'web',
+  withTabs = false,
+): { adapter: Adapter; rec: Recorder } {
   const rec: Recorder = { screenshots: 0 };
   const adapter: Adapter = {
+    selectorDialect: dialect,
     open: async () => {},
     find: async () => null,
     click: async () => {},
@@ -85,7 +92,8 @@ function fakeAdapter(returns: FakeReturns, web = true): { adapter: Adapter; rec:
     },
     close: async () => {},
   };
-  if (web) adapter.tabs = async () => [{ index: 0, url: 'http://x/', title: 'Home', active: true }];
+  if (withTabs)
+    adapter.tabs = async () => [{ index: 0, url: 'http://x/', title: 'Home', active: true }];
   return { adapter, rec };
 }
 
@@ -469,20 +477,45 @@ async function targetsOf(adapter: Adapter, input: Parameters<typeof runObserve>[
   return res.nodes.map((node) => node.target);
 }
 
+test('the dialect is DECLARED — a native target that also has tabs stays native', async () => {
+  // The dialect used to be INFERRED from the optional `tabs` capability, so a
+  // native target that grew a tab listing silently flipped to the web dialect
+  // and got `role=button[name="Save" i]` — a selector its own parser cannot
+  // resolve, so every click and type on it died. The declaration wins; `tabs`
+  // says nothing about the grammar a target parses.
+  const { adapter } = fakeAdapter({ nodes: [sampleNode] }, 'native', true);
+  expect(await targetsOf(adapter, { kind: 'tree' })).toEqual(['button "Save"']);
+});
+
+test('a web target still emits the Playwright form, tabs or not', async () => {
+  const { adapter } = fakeAdapter({ nodes: [sampleNode] }, 'web', true);
+  expect(await targetsOf(adapter, { kind: 'tree' })).toEqual(['role=button[name="Save" i]']);
+});
+
+test('an adapter with no usable declared dialect fails loud, never a silent web fallback', async () => {
+  // A missing or misspelled declaration is a broken adapter, not a web target:
+  // falling back to `web` would hand the driver selectors nothing can resolve.
+  const { adapter } = fakeAdapter({ nodes: [sampleNode] });
+  const missing = { ...adapter, selectorDialect: undefined } as unknown as Adapter;
+  await expect(runObserve(missing, recorder(), { kind: 'tree' })).rejects.toThrow(AgentError);
+  const unknown = { ...adapter, selectorDialect: 'klingon' } as unknown as Adapter;
+  await expect(runObserve(unknown, recorder(), { kind: 'tree' })).rejects.toThrow(AgentError);
+});
+
 test('native tree → role "name", the only structured form desktop/android parse', async () => {
   // `role=button[name="Save" i]` fails their `^([a-zA-Z][\w-]*)\s+["'](.+)["']$`
   // parser, degrades to a literal name substring, matches nothing — and every
   // click and type on the target fails with `act: no element matched`.
-  const { adapter } = fakeAdapter({ nodes: [sampleNode] }, false);
+  const { adapter } = fakeAdapter({ nodes: [sampleNode] }, 'native');
   expect(await targetsOf(adapter, { kind: 'tree' })).toEqual(['button "Save"']);
 });
 
 test('native tree → an android resource-id target is the bare id, not data-testid=', async () => {
   const node: Node = { ...sampleNode, testid: 'com.example.app:id/submit' };
-  const { adapter } = fakeAdapter({ nodes: [node] }, false);
+  const { adapter } = fakeAdapter({ nodes: [node] }, 'native');
   expect(await targetsOf(adapter, { kind: 'tree' })).toEqual(['com.example.app:id/submit']);
   // …and a scoped read keeps it, exactly as web keeps its data-testid.
-  const { adapter: scoped } = fakeAdapter({ nodes: [node] }, false);
+  const { adapter: scoped } = fakeAdapter({ nodes: [node] }, 'native');
   expect(await targetsOf(scoped, { kind: 'tree', query: 'Submit' })).toEqual([
     'com.example.app:id/submit',
   ]);
@@ -490,18 +523,18 @@ test('native tree → an android resource-id target is the bare id, not data-tes
 
 test('native tree → no `>> nth=` (Playwright chaining): repeats past the first get no target', async () => {
   const dup: Node = { ...sampleNode, name: 'Add' };
-  const { adapter } = fakeAdapter({ nodes: [dup, dup] }, false);
+  const { adapter } = fakeAdapter({ nodes: [dup, dup] }, 'native');
   expect(await targetsOf(adapter, { kind: 'tree' })).toEqual(['button "Add"', undefined]);
 });
 
 test('native tree → an unquotable name falls back to the bare name substring', async () => {
   const odd: Node = { ...sampleNode, role: 'push button', name: 'Say "hi"' };
-  const { adapter } = fakeAdapter({ nodes: [odd] }, false);
+  const { adapter } = fakeAdapter({ nodes: [odd] }, 'native');
   expect(await targetsOf(adapter, { kind: 'tree' })).toEqual(['Say "hi"']);
 });
 
 test('native within → scopes by role "name" too, never a web engine selector', async () => {
-  const { adapter, rec } = fakeAdapter({ nodes: [sampleNode] }, false);
+  const { adapter, rec } = fakeAdapter({ nodes: [sampleNode] }, 'native');
   await runObserve(adapter, recorder(), {
     kind: 'tree',
     within: { role: 'navigation', name: 'Main' },
@@ -528,7 +561,7 @@ test('observe kind:"tabs" lists the target’s tabs', async () => {
 });
 
 test('observe kind:"tabs" fails loud on a target with no tab concept', async () => {
-  const { adapter } = fakeAdapter({}, false);
+  const { adapter } = fakeAdapter({}, 'native');
   // Desktop/android expose no `tabs` — say so rather than inventing one.
   await expect(runObserve(adapter, recorder(), { kind: 'tabs' })).rejects.toThrow(AgentError);
 });
