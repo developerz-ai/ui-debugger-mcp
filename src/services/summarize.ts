@@ -96,16 +96,23 @@ export function findingsDigest(findings: Findings): string {
 /**
  * Condense findings into one actionable paragraph. Pure over the
  * {@link SummaryGenerate} seam, so it unit-tests against a fake with no network.
+ *
+ * `redact` is the run's secret redactor (`createSecretRedactor`, bound per run to
+ * the auth persona's values); identity when omitted. The digest is persona text's
+ * last stop before a provider: bug details and evidence locations quote console
+ * rows, so the prompt is passed through the redactor even if an upstream source
+ * has already regressed.
  * @throws {AgentError} if the summary model returns a blank reply.
  */
 export async function summarize(
   generate: SummaryGenerate,
   findings: Findings,
   signal?: AbortSignal,
+  redact?: (line: string) => string,
 ): Promise<string> {
   const { text } = await generate({
     system: SUMMARY_SYSTEM_PROMPT,
-    prompt: findingsDigest(findings),
+    prompt: redact ? redact(findingsDigest(findings)) : findingsDigest(findings),
     abortSignal: signal,
   });
   const paragraph = text.trim();
@@ -118,14 +125,19 @@ export async function summarize(
 /**
  * Bind {@link summarize} to the summary model, yielding the {@link SummarizeStep} the
  * session calls after the verdict settles. The model is the only thing that varies
- * between deployments; everything else (prompt, digest) is owned in-repo.
+ * between deployments; everything else (prompt, digest) is owned in-repo. `redact`
+ * (the run's secret redactor, identity when omitted) is forwarded so the digest
+ * sent to the provider carries no raw persona value.
  */
-export function createSummarize(model: LanguageModel): SummarizeStep {
+export function createSummarize(
+  model: LanguageModel,
+  redact?: (line: string) => string,
+): SummarizeStep {
   // Forward the session's teardown signal so an aborted close cancels the in-flight
   // summary call instead of leaving a stalled model request dangling.
   const generate: SummaryGenerate = async ({ system, prompt, abortSignal }) => {
     const { text } = await generateText({ model, system, prompt, abortSignal });
     return { text };
   };
-  return (findings, signal) => summarize(generate, findings, signal);
+  return (findings, signal) => summarize(generate, findings, signal, redact);
 }

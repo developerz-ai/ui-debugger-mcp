@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { createSecretRedactor } from '../../adapters/browser/log-format.js';
 import type {
   Adapter,
   ConsoleEntry,
@@ -8,8 +9,10 @@ import type {
   Query,
 } from '../../adapters/contract.js';
 import { AdapterError, AgentError } from '../../errors.js';
+import type { Findings } from '../../findings/schema.js';
 import type { EvidenceRecorder } from './look.js';
 import { coerceWithin, createObserveTool, ObserveInputSchema, runObserve } from './observe.js';
+import { type FindingsWriter, runReport } from './report.js';
 import { type ActTrail, createActTrail } from './trail.js';
 
 /** A fake {@link EvidenceRecorder} recording every saved frame. */
@@ -615,6 +618,94 @@ test('a throwing read records nothing and releases the gate', async () => {
   ).rejects.toThrow(AdapterError);
   const evidence = await trail.settled();
   expect(evidence.bugs).toEqual([]);
+});
+
+// --- redaction: a persona value echoed back in console rows never survives -----
+
+/**
+ * `hunter2` is a SYNTHETIC persona value (7 chars → `<redacted, 7 chars>`),
+ * never a real credential — the same shape `createSecretRedactor` is bound to
+ * per run in `session-builder.ts`.
+ */
+const REDACT = createSecretRedactor(['hunter2']);
+
+test('a redacted console read scrubs persona values from text AND location', async () => {
+  const leaked: ConsoleEntry = {
+    level: 'error',
+    text: 'login failed for hunter2',
+    location: 'http://x/app.js?token=hunter2',
+    timestamp: 1,
+  };
+  const { adapter } = fakeAdapter({ console: [leaked] });
+  const res = await runObserve(adapter, recorder(), { kind: 'console' }, REDACT);
+  if (res.kind !== 'console') throw new Error('expected console result');
+  expect(res.entries[0]?.text).toBe('login failed for <redacted, 7 chars>');
+  expect(res.entries[0]?.location).toBe('http://x/app.js?token=<redacted, 7 chars>');
+  // The driver reads these entries — no raw persona value may ride along.
+  expect(JSON.stringify(res)).not.toContain('hunter2');
+});
+
+test('a wired redactor keeps persona values out of the trail: bug detail AND evidence location', async () => {
+  const leaked: ConsoleEntry[] = [
+    {
+      level: 'error',
+      text: 'auth failed for hunter2',
+      location: 'http://x/login.js?token=hunter2',
+      timestamp: 1,
+    },
+    { level: 'error', text: 'failed to fetch', timestamp: 2 },
+  ];
+  const { adapter } = fakeAdapter({ console: leaked });
+  const trail = createActTrail();
+  const observe = createObserveTool(adapter, recorder(), trail, REDACT);
+  await observe.execute?.({ kind: 'console' }, { toolCallId: 't1', messages: [] });
+  expect(trail.bugs).toEqual([
+    {
+      kind: 'console',
+      detail: 'auth failed for <redacted, 7 chars>',
+      evidence: 'http://x/login.js?token=<redacted, 7 chars>',
+    },
+    { kind: 'console', detail: 'failed to fetch' },
+  ]);
+});
+
+test('the persisted findings carry no raw persona value: runReport over the settled trail', async () => {
+  const leaked: ConsoleEntry[] = [
+    {
+      level: 'error',
+      text: 'TypeError: cannot read password hunter2',
+      location: 'http://x/auth.js:9:1',
+      timestamp: 1,
+    },
+  ];
+  const { adapter } = fakeAdapter({ console: leaked });
+  const trail = createActTrail();
+  const observe = createObserveTool(adapter, recorder(), trail, REDACT);
+  await observe.execute?.({ kind: 'console' }, { toolCallId: 't1', messages: [] });
+  const written: Findings[] = [];
+  const writer: FindingsWriter = {
+    writeFindings: async (findings) => {
+      written.push(findings);
+      return 'findings.json';
+    },
+  };
+  // The same-step report path: report merges trail.settled() into the verdict
+  // and persists it — so the recorded (redacted) bugs are what reaches disk.
+  const result = await runReport(
+    writer,
+    { status: 'failed', steps: [], bugs: [], visual: [], dismissStreamed: false },
+    await trail.settled(),
+  );
+  expect(result.carried.bugs).toBe(1);
+  expect(written).toHaveLength(1);
+  expect(written[0]?.bugs).toEqual([
+    {
+      kind: 'console',
+      detail: 'TypeError: cannot read password <redacted, 7 chars>',
+      evidence: 'http://x/auth.js:9:1',
+    },
+  ]);
+  expect(JSON.stringify(written)).not.toContain('hunter2');
 });
 
 // --- gate discipline: a same-step terminal read must wait out an in-flight read --
