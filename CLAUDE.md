@@ -191,6 +191,11 @@ one as a bug; a screen CONTRADICTING one still is a finding. Capped at
 truncated. The section rides every step; that is what the cap is for. `describe`
 returns it verbatim.
 
+**Both consumers.** The same preconditions reach the SEPARATE vision model too —
+the provider behind `look` — so a configured expected state (an empty table) is
+not filed as a visual defect; a screen CONTRADICTING one is still reported.
+Self-look (control == vision) needs nothing: the driver carries them already.
+
 ## One run per cwd — never a wedged project
 A forgotten `end_session` must not need the out-of-band CLI to recover:
 - `describe` reports `session { id, status, goal }` — the run this server holds

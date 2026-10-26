@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
@@ -8,6 +8,7 @@ import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { chromium } from 'playwright-core';
 import { z } from 'zod';
+import { DesktopAdapter } from '../adapters/desktop/desktop-adapter.js';
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import { AdapterError, AuthError, ConfigError, TargetNotFoundError } from '../errors.js';
@@ -321,8 +322,7 @@ const CHROME = findChrome();
 
 /**
  * Capture what the driver model is actually sent, then stop the loop at once.
- * The prompt is the only place `notes` can be observed — it is composed, not
- * stored — so this drives one real (mock-backed) step to read it back.
+ * Notes are composed, not stored; this drives one mock-backed driver step.
  */
 function capturingDriver(seen: string[]): MockLanguageModelV3 {
   return new MockLanguageModelV3({
@@ -386,6 +386,76 @@ test('buildSession sends no notes section for a target that declares none', asyn
   });
 
   expect(seen[0]).not.toContain('Known about this app');
+});
+
+test('buildSession binds selected multiline target notes to the separate vision provider', async () => {
+  const png = new Uint8Array([137, 80, 78, 71]);
+  const capture = spyOn(DesktopAdapter.prototype, 'screenshot').mockResolvedValue(png);
+  const seen: string[] = [];
+  let calls = 0;
+  const reply = {
+    finishReason: { unified: 'stop' as const, raw: 'stop' },
+    usage: {
+      inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+      outputTokens: { total: 1, text: 1, reasoning: undefined },
+    },
+    warnings: [],
+  };
+  const driver = new MockLanguageModelV3({
+    doGenerate: async () => ({
+      ...reply,
+      content:
+        calls++ === 0
+          ? [
+              {
+                type: 'tool-call' as const,
+                toolCallId: 'look1',
+                toolName: 'look',
+                input: '{}',
+              },
+            ]
+          : [{ type: 'text' as const, text: 'done' }],
+    }),
+  });
+  const vision = new MockLanguageModelV3({
+    doGenerate: async ({ prompt }) => {
+      seen.push(JSON.stringify(prompt));
+      return {
+        ...reply,
+        content: [{ type: 'text', text: '{"description":"empty table","issues":[]}' }],
+      };
+    },
+  });
+  const d = deps();
+  d.models = { ...d.models, driver, vision, selfLook: false };
+  d.config = {
+    ...CONFIG,
+    targets: {
+      ...CONFIG.targets,
+      screen: {
+        adapter: 'desktop',
+        launch: 'myapp',
+        notes: '  Empty tables are expected.\n\n  Header must remain visible.  ',
+      },
+      other: { adapter: 'desktop', launch: 'other', notes: 'UNSELECTED TARGET NOTE' },
+    },
+  };
+  try {
+    const built = await buildSession(d, { id: 'vision-notes', target: 'screen', goal: 'inspect' });
+    await built.run({
+      inbox: { drain: () => [] },
+      progress: { writeFindings: async () => 'findings.json' },
+      signal: new AbortController().signal,
+    });
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain('Known about this app');
+    expect(seen[0]).toContain('- Empty tables are expected.');
+    expect(seen[0]).toContain('- Header must remain visible.');
+    expect(seen[0]).not.toContain('UNSELECTED TARGET NOTE');
+  } finally {
+    capture.mockRestore();
+  }
 });
 
 // --- named auth personas (`start_debug({as})`) ------------------------------

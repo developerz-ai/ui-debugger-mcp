@@ -1,7 +1,12 @@
 import { expect, test } from 'bun:test';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { Adapter } from '../../adapters/contract.js';
 import { AdapterError, AgentError, VisionUnavailableError } from '../../errors.js';
+import { FindingsStore } from '../../session/findings-store.js';
+import { sessionPaths, workspacePaths } from '../../session/workspace.js';
 import {
   createLookExecute,
   createLookTool,
@@ -9,11 +14,15 @@ import {
   type EvidenceRecorder,
   isImageRejection,
   LookInputSchema,
+  type LookIssue,
+  type LookResult,
   runLook,
+  VISION_SYSTEM_PROMPT,
   type VisionGenerate,
   type VisionRequest,
   visionUnavailableMessage,
 } from './look.js';
+import { createReportTool, ReportInputSchema } from './report.js';
 import { type ActTrail, createActTrail } from './trail.js';
 
 /** A fake {@link Adapter} whose only meaningful method is `screenshot`. */
@@ -92,6 +101,129 @@ test('captures the frame and sends it to the vision model with the question', as
   expect(seen[0]?.messages[0]?.role).toBe('user');
   expect(typeof seen[0]?.system).toBe('string');
 });
+
+// Each case binds one `notes` value to `createLookTool`: `undefined` (no
+// preconditions at all), `[]` (an EMPTY preconditions list) and a real list.
+// The empty list is a case of its own — the notes section must stay OUT of the
+// vision prompt, or the provider is told "expected empty states are never
+// issues" while the list that would justify it holds no conditions at all.
+for (const [label, notes] of [
+  ['no notes', undefined],
+  ['empty notes', []],
+  ['notes', ['Empty tables are expected on /new.', 'The header must be visible.']],
+] as const) {
+  test(`separate vision request preserves context and transport (${label})`, async () => {
+    const model = slowVision(cleanReply, 0);
+    const look = createLookTool(fakeAdapter(PNG), model, fakeRecorder().recorder, undefined, notes);
+    await look.execute?.(
+      { question: 'How does it look?', expect: 'a readable table' },
+      { toolCallId: 'boundary', messages: [] },
+    );
+    const prompt = model.doGenerateCalls[0]?.prompt;
+    const hasNotes = notes !== undefined && notes.length > 0;
+    expect(prompt?.[0]).toEqual({
+      role: 'system',
+      content: hasNotes ? expect.stringContaining('## Known about this app') : VISION_SYSTEM_PROMPT,
+    });
+    if (hasNotes) {
+      const system = JSON.stringify(prompt?.[0]);
+      for (const note of notes) expect(system).toContain(note);
+      expect(system).toContain('Expected conditions (including empty states) are not issues');
+      expect(system).toContain('Screens that contradict these preconditions remain reportable');
+    } else {
+      // The base prompt must stand ALONE: it mentions no preconditions this run
+      // does not have — an empty state stays a defect until the project says so.
+      expect(VISION_SYSTEM_PROMPT).not.toContain('precondition');
+      // No notes section may open with no conditions in it — an empty list is
+      // not a licence to stop judging empty states.
+      expect(JSON.stringify(prompt?.[0])).not.toContain('## Known about this app');
+    }
+    expect(prompt?.[1]).toEqual({
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Question: How does it look?\nExpected look: a readable table' },
+        { type: 'file', data: PNG, mediaType: 'image/png' },
+      ],
+    });
+  });
+}
+
+for (const contradictory of [false, true]) {
+  test(`run-bound preconditions survive look → trail → default report (${contradictory ? 'contradiction' : 'expected empty state'})`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'look-notes-'));
+    try {
+      const store = new FindingsStore(sessionPaths(workspacePaths('/project', root), 'notes'));
+      const trail = createActTrail();
+      const issue: LookIssue = {
+        what: 'Header missing above empty table',
+        where: 'top',
+        severity: 'high',
+      };
+      const model = new MockLanguageModelV3({
+        doGenerate: async ({ prompt }) => {
+          // Context-sensitive fake: missing preconditions reproduces the false positive.
+          const context = JSON.stringify(prompt.filter((message) => message.role === 'system'));
+          const expected =
+            context.includes('Empty tables are expected on /new.') &&
+            context.includes('Expected conditions (including empty states) are not issues');
+          const contradictionAllowed = context.includes(
+            'Screens that contradict these preconditions remain reportable',
+          );
+          const issues =
+            contradictory && contradictionAllowed
+              ? [issue]
+              : expected
+                ? []
+                : [{ what: 'Empty table', where: 'centre', severity: 'medium' }];
+          return {
+            content: [
+              { type: 'text', text: JSON.stringify({ description: 'An empty table', issues }) },
+            ],
+            finishReason: { unified: 'stop', raw: 'stop' },
+            usage: {
+              inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+              outputTokens: { total: 1, text: 1, reasoning: undefined },
+            },
+            warnings: [],
+          };
+        },
+      });
+      const look = createLookTool(fakeAdapter(PNG), model, store, trail, [
+        'Empty tables are expected on /new.',
+        'The header must be visible.',
+      ]);
+      // `look.execute` may stream, so its result is a union — narrow it to the
+      // one shape this tool returns (same cast as the abort-signal test below).
+      const result = (await look.execute?.({}, { toolCallId: 'look', messages: [] })) as
+        | LookResult
+        | undefined;
+      const report = createReportTool(store, () => trail.settled());
+      await report.execute?.(ReportInputSchema.parse({ status: 'passed' }), {
+        toolCallId: 'report',
+        messages: [],
+      });
+      const findings = await store.readFindings();
+      expect(findings.visual).toEqual(
+        contradictory
+          ? [
+              {
+                issue: issue.what,
+                where: issue.where,
+                severity: issue.severity,
+                screenshot: result?.screenshot,
+              },
+            ]
+          : [],
+      );
+      expect(trail.visual).toEqual(findings.visual);
+      if (contradictory) {
+        expect(new Uint8Array(await readFile(findings.visual[0]?.screenshot ?? ''))).toEqual(PNG);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test('parses a clean JSON reply into description + matches + issues', async () => {
   const adapter = fakeAdapter(PNG);
