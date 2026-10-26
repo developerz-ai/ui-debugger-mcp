@@ -53,8 +53,9 @@ bun install
 
 # dummy/web is a standalone package with its own bun.lock, so the repo-root
 # install never reaches it. Both `bun test` (src/dummy-web.e2e.test.ts:141) and
-# CI (.github/workflows/ci.yml:42) build the fixture's dist/ up front; doing it
-# here too keeps `bin/check` honest when run from a fresh clone.
+# CI (the "build dummy/web fixture" step in .github/workflows/ci.yml) build the
+# fixture's dist/ up front; doing it here too keeps `bin/check` honest when run
+# from a fresh clone.
 echo "==> dummy/web fixture (install + build)"
 (
   cd dummy/web
@@ -92,10 +93,11 @@ else
   echo "==> chromium install (playwright-core revision $PLAYWRIGHT_REV)"
   # Use the repo-pinned CLI, NEVER `bunx playwright`: `bunx` resolves an
   # unpinned version that "exit 0 in 0.7s without fetching the headless
-  # shell the pinned version requires" (ci.yml:71-73). This stage DOWNLOADS
-  # only — it never installs system libraries. The library check in the
-  # next stage is what inspects the binary's shared libraries, and it
-  # remediates missing ones via apt / install-deps.
+  # shell the pinned version requires" (the "install chromium" step comment
+  # in .github/workflows/ci.yml). This stage DOWNLOADS only — it never
+  # installs system libraries. The library check in the next stage is what
+  # inspects the binary's shared libraries, and it remediates missing ones
+  # via apt / install-deps.
   # Bounded retry: `timeout` kills a wedged or crawling attempt so the retry
   # actually fires. Exit 124 (or 137 after the KILL fallback) means the
   # 300s budget was exceeded and the attempt is logged as such. 300s
