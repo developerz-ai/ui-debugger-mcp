@@ -33,7 +33,7 @@ code, asks again. Loop until the UI works. No human clicking.
 - `src/mcp/` — MCP server, tool defs (few fat tools, NOT one-per-action).
 - `src/agent/` — debug agent (Vercel AI SDK loop). The **fast guy** (driver) +
   the **vision guy** (eyes via `look`). Models per role via OpenAI-compatible
-  router (OpenRouter default). Defaults: deepseek (text), glm (image).
+  router (OpenRouter default). Defaults: deepseek (text), qwen (image).
   - `prompts/` — OUR system prompts: in-repo, versioned, tested, provider-agnostic.
     NEVER rely on a 3rd-party model's defaults. Written compressed — they are
     resent every step (`../../sebyx07/claude-code-bible/docs/11-compressed-config.md`).
@@ -93,7 +93,7 @@ unfiltered tail of 50 returned zero API traffic. Failed requests are never hidde
 ## CLI (bin: `ui-debugger-mcp`)
 - no args → run the stdio MCP server (default).
 - `init` → scaffold: create `./tmp/ui-debugger-mcp/`, write a starter config
-  (deepseek/glm defaults + `web` stub) if absent — at `.dz/ui-debugger/ui-debugger-mcp.json`
+  (deepseek/qwen defaults + `web` stub) if absent — at `.dz/ui-debugger/ui-debugger-mcp.json`
   when a `.dz/` dir exists, else root `.ui-debugger-mcp.json` — add `tmp/`
   to `.gitignore`, print the `.mcp.json` snippet. NEVER writes the API key.
 - `status` → the active run for this cwd: session id, target, goal, server pid
@@ -115,7 +115,7 @@ project (cwd) → no run selector needed.
 
 Project config shape:
 ```
-models:  { driver, vision, summary? }   per-role; defaults: deepseek (text), glm (image)
+models:  { driver, vision, summary? }   per-role; defaults: deepseek (text), qwen (image)
 targets:
   web:     { adapter: "browser", url, headless, notes, debugLogin, auth, executablePath, profile, cdpUrl }
   desktop: { adapter: "desktop", launch, notes }
