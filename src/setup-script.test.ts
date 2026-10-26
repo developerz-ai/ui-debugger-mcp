@@ -5,8 +5,8 @@
  * BEFORE it (so a missing system library is named, not discovered as a mystery
  * inside the launch).
  *
- * These assertions read the script's TEXT and never execute it: running
- * `bin/setup` would download browsers and install system packages.
+ * Provisioning is never executed: only extracted install commands run under
+ * bash with a stubbed bun. Running all of `bin/setup` would provision browsers.
  *
  * Every lookup runs against the script with its COMMENTS stripped. A comment
  * that merely mentions `src/cli/chromium-libs.ts` must not be able to satisfy
@@ -14,6 +14,7 @@
  */
 
 import { expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -35,6 +36,91 @@ const codeLines = setupScript
 function codeLineOf(needle: string): number {
   const hit = codeLines.find((entry) => entry.text.includes(needle));
   return hit ? hit.line : -1;
+}
+
+function installCommands(script: string): { root: string; fixture: string } {
+  const rootSection =
+    script
+      .split('echo "==> bun install (root)"')[1]
+      ?.split('echo "==> dummy/web fixture (install + build)"')[0] ?? '';
+  const fixtureSection =
+    script
+      .split('echo "==> dummy/web fixture (install + build)"')[1]
+      ?.split('# Resolve the cache dir')[0] ?? '';
+  const extract = (section: string): string => {
+    const commands = section
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => /^bun install(?:\s|$)/.test(line));
+    expect(commands).toHaveLength(1);
+    return commands[0] ?? '';
+  };
+  return { root: extract(rootSection), fixture: extract(fixtureSection) };
+}
+
+function executeInstall(command: string, ci: string | undefined, status = 0) {
+  // No inherited environment or PATH: the shell function is the only bun.
+  // The completion marker proves errexit stops execution on install failure.
+  const result = spawnSync(
+    '/bin/bash',
+    [
+      '-euo',
+      'pipefail',
+      '-c',
+      `
+    bun() { printf '<%s>\\n' "$@"; return ${status}; }
+    ${command}
+    printf 'completed\\n'
+  `,
+    ],
+    {
+      env: ci === undefined ? {} : { CI: ci },
+      encoding: 'utf8',
+      timeout: 2_000,
+    },
+  );
+  expect(result.error).toBeUndefined();
+  expect(result.signal).toBeNull();
+  expect(result.stderr).toBe('');
+  return { status: result.status, output: result.stdout.trim().split('\n') };
+}
+
+function assertInstallPolicy(command: string, ci: string | undefined) {
+  const result = executeInstall(command, ci);
+  expect(result.status).toBe(0);
+  expect(result.output).toEqual(
+    ci ? ['<install>', '<--frozen-lockfile>', 'completed'] : ['<install>', 'completed'],
+  );
+}
+
+for (const ci of [undefined, '', 'true', 'false']) {
+  for (const kind of ['root', 'fixture'] as const) {
+    test(`${kind} install arguments with CI=${JSON.stringify(ci)}`, () => {
+      assertInstallPolicy(installCommands(setupScript)[kind], ci);
+    });
+
+    test(`${kind} install failure propagates with CI=${JSON.stringify(ci)}`, () => {
+      const result = executeInstall(installCommands(setupScript)[kind], ci, 23);
+      expect(result.status).toBe(23);
+      expect(result.output).not.toContain('completed');
+    });
+  }
+}
+
+test('root flag-removal mutation fails independently of the intact fixture', () => {
+  const commands = installCommands(setupScript);
+  const mutated = commands.root.replace('${CI:+--frozen-lockfile}', '');
+  expect(mutated).not.toBe(commands.root);
+  assertInstallPolicy(commands.fixture, 'true');
+  expect(() => assertInstallPolicy(mutated, 'true')).toThrow();
+});
+
+for (const replacement of ['', '# bun install ${CI:+--frozen-lockfile}']) {
+  test(`root extraction rejects ${JSON.stringify(replacement)} (mutation)`, () => {
+    const mutated = setupScript.replace(/^bun install[^\n]*$/m, replacement);
+    expect(mutated).not.toBe(setupScript);
+    expect(() => installCommands(mutated)).toThrow();
+  });
 }
 
 test('the launch verification still launches chromium headless', () => {

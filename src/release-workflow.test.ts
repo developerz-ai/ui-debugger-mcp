@@ -196,6 +196,29 @@ function mustFind(what: string, find: () => Step | undefined): Step {
   return step;
 }
 
+function assertFrozenReleaseInstall(text: string): void {
+  const installs = parseSteps(text).filter((step) => step.name === 'install');
+  expect(installs).toHaveLength(1);
+  expect(executableLines(installs[0]?.run ?? '')).toEqual(['bun install --frozen-lockfile']);
+  expect(installs[0]?.if).toBe('');
+  expect(installs[0]?.continueOnError).toBe('');
+}
+
+test('release keeps its executable frozen root install', () => {
+  assertFrozenReleaseInstall(workflowText);
+});
+
+for (const replacement of ['', '# bun install --frozen-lockfile', 'bun install']) {
+  test(`release install guard rejects ${JSON.stringify(replacement)} (mutation)`, () => {
+    const mutated = workflowText.replace(
+      /^(        run:) bun install --frozen-lockfile$/m,
+      `$1 ${replacement}`,
+    );
+    expect(mutated).not.toBe(workflowText);
+    expect(() => assertFrozenReleaseInstall(mutated)).toThrow();
+  });
+}
+
 test('the publish job has a validation step running the version-consistency tests', () => {
   const validation = mustFind('the validation step', validationStep);
 

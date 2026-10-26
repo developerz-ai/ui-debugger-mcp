@@ -49,7 +49,9 @@ fi
 command -v bun >/dev/null || { echo "X_BUN_MISSING: install bun — https://bun.sh"; exit 1; }
 
 echo "==> bun install (root)"
-bun install
+# Freeze only for nonempty CI; unset/empty CI permits local lockfile updates.
+# `${CI:+...}` is safe under `set -u` even when CI is unset.
+bun install ${CI:+--frozen-lockfile}
 
 # dummy/web is a standalone package with its own bun.lock, so the repo-root
 # install never reaches it. Both `bun test` (src/dummy-web.e2e.test.ts:141) and

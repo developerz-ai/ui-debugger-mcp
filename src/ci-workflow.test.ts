@@ -3,8 +3,42 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { YAML } from 'bun';
 
 const workflow = readFileSync(join(import.meta.dirname, '../.github/workflows/ci.yml'), 'utf8');
+
+type InstallStep = { name?: string; run?: string; 'working-directory'?: string };
+
+function assertFrozenRootInstall(text: string) {
+  const parsed = YAML.parse(text) as { jobs: { bun: { steps: InstallStep[] } } };
+  const root = parsed.jobs.bun.steps.filter(
+    (step) => step.name === 'install' && !step['working-directory'],
+  );
+  expect(root).toHaveLength(1);
+  const commands = (root[0]?.run ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+  expect(commands).toEqual(['bun install --frozen-lockfile']);
+}
+
+test('CI freezes the root install independently of the fixture', () => {
+  assertFrozenRootInstall(workflow);
+  const parsed = YAML.parse(workflow) as { jobs: { bun: { steps: InstallStep[] } } };
+  const fixture = parsed.jobs.bun.steps.find((step) => step['working-directory'] === 'dummy/web');
+  expect(fixture?.run).toBe('bun install --frozen-lockfile && bun run build');
+});
+
+for (const replacement of ['', '# bun install --frozen-lockfile', 'bun install']) {
+  test(`root install guard rejects ${JSON.stringify(replacement)} (mutation)`, () => {
+    const mutated = workflow.replace(
+      /^(        run:) bun install --frozen-lockfile$/m,
+      `$1 ${replacement}`,
+    );
+    expect(mutated).not.toBe(workflow);
+    expect(() => assertFrozenRootInstall(mutated)).toThrow();
+  });
+}
 // Execute the real block, including comments and blanks, stopping at YAML's
 // next outer key/comment. Do not maintain a second copy of the retry loop.
 const block = workflow.match(
