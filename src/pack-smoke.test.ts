@@ -11,7 +11,10 @@
  *   - the script, EXECUTED against a stub npm and a stub node, so a tarball
  *     without the manifest's bin/exports targets, a CLI that exits non-zero
  *     and a package that needs a newer node all fail loud instead of
- *     passing quietly.
+ *     passing quietly;
+ *
+ *   - the shipped SOURCE, scanned for Bun-only imports, because a static one
+ *     is what makes the installed copy die before it can print anything.
  *
  * Every guard carries a mutation test: the text it exists to reject is
  * mutated and the guard must notice. A guard that cannot fail is a defect.
@@ -19,13 +22,16 @@
 
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const REPO_ROOT = join(import.meta.dirname, '..');
 const workflowText = readFileSync(join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
 const scriptText = readFileSync(join(REPO_ROOT, 'bin/smoke-packed'), 'utf8');
+
+/** The shipped source root — every module the published bin loads. */
+const SRC_ROOT = join(REPO_ROOT, 'src');
 
 interface PackageJson {
   name: string;
@@ -327,6 +333,53 @@ function installIsEngineStrict(script: string): boolean {
   const line = installCommandLine(script);
   if (!line) return false;
   return /npm_config_engine_strict=true\b/.test(line) || /--engine-strict\b/.test(line);
+}
+
+/**
+ * A static VALUE import of a Bun-only specifier.
+ *
+ * Node's ESM loader rejects the `bun:` scheme outright
+ * (ERR_UNSUPPORTED_ESM_URL_SCHEME) and has no `bun` module at all, so a static
+ * import of one kills the published bin before it can print anything. Two
+ * forms are harmless and must not trip the guard: a DYNAMIC import, which only
+ * runs where a runtime check chose it (the Node-side lock backend reaches
+ * Bun's FFI exactly that way), and a type-only import, which the build erases.
+ */
+const STATIC_BUN_IMPORT = /^\s*import\s+(?!type\s)[^'";]*?['"](bun|bun:[^'"]*)['"]/gm;
+
+/** The Bun-only specifiers a chunk of code statically imports. */
+function staticBunImports(code: string): string[] {
+  return [...code.matchAll(STATIC_BUN_IMPORT)].map((match) => match[1] ?? '');
+}
+
+/**
+ * The modules under `dir` that statically import a Bun-only specifier.
+ *
+ * Tests may use Bun freely — only shipped code has to be runtime-agnostic —
+ * so the test files are skipped.
+ */
+function bunImportOffenders(dir: string): string[] {
+  const offenders: string[] = [];
+  const walk = (current: string): void => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(path);
+        continue;
+      }
+      if (!entry.name.endsWith('.ts') || entry.name.includes('.test.')) continue;
+      // Comments may name `bun:ffi` — the ban is on importing it, not on
+      // explaining it.
+      const code = readFileSync(path, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      for (const specifier of staticBunImports(code)) {
+        offenders.push(`${path.slice(dir.length + 1)} imports '${specifier}'`);
+      }
+    }
+  };
+  walk(dir);
+  return offenders;
 }
 
 /* ---------------------------------------------------------------- mutations */
@@ -704,6 +757,41 @@ test('the script installs engine-strict, so an incompatible package cannot land'
         ),
     ),
   ).toBe(false);
+});
+
+test('no shipped module statically imports a Bun-only specifier — the published bin loads on Node', () => {
+  // The half of the runtime-agnostic rule `src/index.test.ts` cannot see: it
+  // bans `Bun.` GLOBALS, but a Bun-only MODULE (`bun:ffi`) is just as fatal and
+  // slips past it. The published bin runs behind `#!/usr/bin/env node`, and
+  // node's ESM loader refuses the `bun:` scheme outright — the installed copy
+  // dies with ERR_UNSUPPORTED_ESM_URL_SCHEME before it can print its help.
+  expect(bunImportOffenders(SRC_ROOT)).toEqual([]);
+
+  // Mutation: the walk MUST notice a static Bun-only import — that is the
+  // text this guard exists to reject.
+  const dir = mkdtempSync(join(tmpdir(), 'bun-import-'));
+  try {
+    writeFileSync(
+      join(dir, 'offender.ts'),
+      "import { dlopen } from 'bun:ffi';\nexport const open = dlopen;\n",
+    );
+    writeFileSync(
+      join(dir, 'clean.ts'),
+      "import { readFileSync } from 'node:fs';\nexport const read = readFileSync;\n",
+    );
+    expect(bunImportOffenders(dir)).toEqual(["offender.ts imports 'bun:ffi'"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // Mutation: a dynamic import is not fatal — it runs only where a runtime
+  // check chose it (the Node-side lock backend reaches Bun's FFI that way).
+  expect(staticBunImports("const ffi = await import('bun:ffi');")).toEqual([]);
+  // Mutation: a type-only import is erased by the build, so it never reaches
+  // the artifact.
+  expect(staticBunImports("import type { dlopen } from 'bun:ffi';")).toEqual([]);
+  // Mutation: the text quoted inside a string is not an import statement.
+  expect(staticBunImports('const note = "import x from \'bun:ffi\'";')).toEqual([]);
 });
 
 describe('bin/smoke-packed, executed against a stub npm and a stub node', () => {

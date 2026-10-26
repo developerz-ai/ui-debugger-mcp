@@ -39,13 +39,17 @@
  * reads or removes it. It cannot resurrect an owner — exclusion lives in the
  * kernel, not in file contents.
  *
- * `flock` comes from libc via `bun:ffi`. The server targets Linux (see
- * CLAUDE.md); the glibc and musl sonames and the macOS libc are covered, and
- * anything else fails loud at first use — a silent fallback here would be two
- * processes both believing they own the workspace.
+ * `flock` comes from the kernel. Under Bun it is libc's, reached through Bun's
+ * FFI; under Node there is no FFI, so the very same kernel lock is taken by
+ * util-linux's `flock(1)`, applied to the descriptor this process already
+ * holds. Either way it is ONE lock on ONE file: the kernel refuses every
+ * other `flock` on it, and it dies with the descriptor. The server targets
+ * Linux (see CLAUDE.md); the glibc and musl sonames and the macOS libc are
+ * covered, and anything else fails loud at first use — a silent fallback here
+ * would be two processes both believing they own the workspace.
  */
 
-import { dlopen, FFIType } from 'bun:ffi';
+import { spawn } from 'node:child_process';
 import {
   closeSync,
   constants as fsConstants,
@@ -87,6 +91,33 @@ const LOCK_EX = 2;
 const LOCK_NB = 4;
 const LOCK_UN = 8;
 
+/**
+ * Taking the kernel's `flock(2)` on a descriptor.
+ *
+ * Both backends lock the SAME open file description — the one this process
+ * holds on `owner.lock` — so every invariant above survives either one: a
+ * rival is refused by the kernel, the lock is not revocable, and it dies with
+ * the descriptor.
+ */
+export interface FlockBackend {
+  /**
+   * Take the exclusive, non-blocking lock on `fd`.
+   *
+   * `false` means a rival holds it — a fact the kernel reported, not a
+   * judgment this process made. Anything else (no `flock(1)`, a platform
+   * without one) throws: a lock nobody took is not a busy workspace.
+   */
+  tryLock(fd: number): Promise<boolean>;
+  /**
+   * Give the lock back and dispose of the descriptor.
+   *
+   * The kernel drops a flock when the last descriptor referring to it is
+   * closed, so releasing means closing — the explicit unlock is only there
+   * for the runtime that can make one.
+   */
+  release(fd: number): void;
+}
+
 /** libc sonames carrying `flock`, in probe order (glibc, musl, macOS). */
 const LIBC_CANDIDATES = [
   'libc.so.6',
@@ -97,22 +128,46 @@ const LIBC_CANDIDATES = [
 
 type FlockFn = (fd: number, operation: number) => number;
 
-let flockFn: FlockFn | undefined;
+/**
+ * `flock(2)` from libc, through Bun's FFI.
+ *
+ * `bun:ffi` is a Bun-only module, and a STATIC import of it would make every
+ * installed copy die on Node with ERR_UNSUPPORTED_ESM_URL_SCHEME before it
+ * could print its own help — the published bin runs on the node floor
+ * package.json declares. So the import is dynamic, and only the runtime check
+ * in {@link loadBackend} ever reaches it.
+ */
+async function bunFlockBackend(): Promise<FlockBackend> {
+  let ffi: typeof import('bun:ffi');
+  try {
+    ffi = await import('bun:ffi');
+  } catch (error) {
+    throw new WorkspaceError(
+      `cannot load flock(2) for the workspace ownership lock: ${(error as Error).message}`,
+    );
+  }
 
-/** Resolve `flock(2)` from libc once; fail loud when the platform has none. */
-function loadFlock(): FlockFn {
-  if (flockFn !== undefined) return flockFn;
   const misses: string[] = [];
   for (const name of LIBC_CANDIDATES) {
+    let flock: FlockFn;
     try {
-      const lib = dlopen(name, {
-        flock: { args: [FFIType.int, FFIType.int], returns: FFIType.int },
+      const lib = ffi.dlopen(name, {
+        flock: { args: [ffi.FFIType.int, ffi.FFIType.int], returns: ffi.FFIType.int },
       });
-      flockFn = lib.symbols.flock as FlockFn;
-      return flockFn;
+      flock = lib.symbols.flock as FlockFn;
     } catch (error) {
       misses.push(`${name}: ${(error as Error).message}`);
+      continue;
     }
+    return {
+      async tryLock(fd: number): Promise<boolean> {
+        return flock(fd, LOCK_EX | LOCK_NB) === 0;
+      },
+      release(fd: number): void {
+        flock(fd, LOCK_UN);
+        closeSync(fd);
+      },
+    };
   }
   throw new WorkspaceError(
     `cannot load flock(2) for the workspace ownership lock on ${process.platform} ` +
@@ -120,12 +175,126 @@ function loadFlock(): FlockFn {
   );
 }
 
+/** util-linux `flock(1)`'s exit code for "another process holds the lock". */
+const FLOCK_CONFLICT_EXIT = 42;
+
+/**
+ * The slot our descriptor rides in on the child's stdio.
+ *
+ * `flock(1)` locks THAT descriptor — the one this process already holds — so
+ * the lock lands on the open file description we keep: it stays ours after the
+ * child exits, every rival is refused by the kernel, and the kernel drops it
+ * when we close the descriptor or die.
+ */
+const CHILD_FD = 3;
+
+/** What `flock(1)` decided about our descriptor. */
+interface FlockOutcome {
+  /** The lock is ours. */
+  granted: boolean;
+  /** A rival holds it. */
+  conflict: boolean;
+  /** What went wrong, when something did. */
+  detail: string;
+}
+
+/** Run util-linux's `flock(1)` against our descriptor and read what it decided. */
+function runFlockCli(fd: number, bin: string): Promise<FlockOutcome> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      bin,
+      [
+        '--exclusive',
+        '--nonblock',
+        '--conflict-exit-code',
+        String(FLOCK_CONFLICT_EXIT),
+        String(CHILD_FD),
+      ],
+      { stdio: ['ignore', 'ignore', 'pipe', fd] },
+    );
+    let stderr = '';
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', (error: Error) => {
+      resolve({
+        granted: false,
+        conflict: false,
+        detail: `cannot run ${bin} to take the workspace lock: ${error.message}`,
+      });
+    });
+    child.on('close', (code: number | null) => {
+      if (code === 0) {
+        resolve({ granted: true, conflict: false, detail: '' });
+        return;
+      }
+      if (code === FLOCK_CONFLICT_EXIT) {
+        resolve({ granted: false, conflict: true, detail: '' });
+        return;
+      }
+      resolve({
+        granted: false,
+        conflict: false,
+        detail:
+          `${bin} could not take the workspace lock (exit ${code ?? 'none'}): ` +
+          (stderr.trim() || 'no output'),
+      });
+    });
+  });
+}
+
+/**
+ * `flock(2)` through util-linux's `flock(1)` — how Node reaches the syscall.
+ *
+ * Node has no FFI, so a short-lived child inherits our descriptor and locks
+ * it. The child exits at once; the lock stays ours because it lives on the
+ * open file description we still hold, and the kernel drops it when that
+ * descriptor closes or this process dies — a crashed owner never wedges the
+ * workspace.
+ *
+ * `bin` is a seam: the tests point it at a binary that does not exist to
+ * prove the failure is loud instead of a quiet "nobody holds this".
+ */
+export async function nodeFlockBackend(bin = 'flock'): Promise<FlockBackend> {
+  return {
+    async tryLock(fd: number): Promise<boolean> {
+      const outcome = await runFlockCli(fd, bin);
+      if (outcome.granted) return true;
+      if (outcome.conflict) return false;
+      throw new WorkspaceError(
+        `cannot take the workspace ownership lock on ${process.platform}: ${outcome.detail}`,
+      );
+    },
+    release(fd: number): void {
+      // Closing IS the unlock here: the child is long gone, so ours is the
+      // last descriptor referring to the locked description, and the kernel
+      // drops the flock when it closes.
+      closeSync(fd);
+    },
+  };
+}
+
+/**
+ * The backend for THIS runtime, resolved once.
+ *
+ * Bun reaches libc through its own FFI; Node has none, so the same kernel
+ * lock comes from util-linux's `flock(1)`. The choice is the runtime's, made
+ * once and cached — never a fallback: a platform with neither fails loud at
+ * first use rather than pretending the workspace is free.
+ */
+let backend: Promise<FlockBackend> | undefined;
+
+function loadBackend(): Promise<FlockBackend> {
+  backend ??= 'bun' in process.versions ? bunFlockBackend() : nodeFlockBackend();
+  return backend;
+}
+
 /**
  * The locks this process holds, keyed by lock path. The fd must live as long
  * as the ownership: `flock` is released when the fd closes, and the kernel
  * releases it when the process dies — a crashed server never wedges anything.
  */
-const holds = new Map<string, { fd: number; owner: OwnerLock }>();
+const holds = new Map<string, { fd: number; owner: OwnerLock; flock: FlockBackend }>();
 
 /** Whether two owners identify the same live process. */
 function sameOwner(left: OwnerLock, right: OwnerLock): boolean {
@@ -175,7 +344,7 @@ export async function acquireOwnerLock(
   lockPath: string,
   owner: OwnerLock,
 ): Promise<{ acquired: true; created: boolean } | { acquired: false; holder: OwnerLock }> {
-  const flock = loadFlock();
+  const flock = await loadBackend();
   const held = holds.get(lockPath);
   if (held !== undefined && sameOwner(held.owner, owner)) {
     return { acquired: true, created: false }; // re-entrant: this process already owns it
@@ -187,7 +356,7 @@ export async function acquireOwnerLock(
     const fd = openSync(lockPath, fsConstants.O_RDWR | fsConstants.O_CREAT, 0o644);
     let locked = false;
     try {
-      locked = flock(fd, LOCK_EX | LOCK_NB) === 0;
+      locked = await flock.tryLock(fd);
     } finally {
       if (!locked) closeSync(fd);
     }
@@ -198,7 +367,7 @@ export async function acquireOwnerLock(
         closeSync(fd); // closing releases the lock — a half-written claim owns nothing
         throw error;
       }
-      holds.set(lockPath, { fd, owner });
+      holds.set(lockPath, { fd, owner, flock });
       return { acquired: true, created: true };
     }
 
@@ -229,7 +398,7 @@ export async function acquireOwnerLock(
  * never unlinked: a stale claim file must never be mistaken for a held lock,
  * and unlinking the path would put a fresh inode where the owner's lock lives.
  *
- * The lock ALWAYS comes home: unlock + close run in a `finally`, so a failed
+ * The lock ALWAYS comes home: the release runs in a `finally`, so a failed
  * board write (a read-only remount, say) fails loud but cannot leave this
  * process holding the kernel lock with no registry entry to reach it by —
  * that would wedge every rival until the process exits (PR #104 review).
@@ -250,8 +419,9 @@ export async function releaseOwnerLock(
   try {
     emptyBoard(held.fd); // the board names no owner once we are out
   } finally {
-    loadFlock()(held.fd, LOCK_UN);
-    closeSync(held.fd); // closing alone releases the flock, even after a failed write
+    // The backend that took the lock gives it back — and disposes of the
+    // descriptor, which alone releases the flock even after a failed write.
+    held.flock.release(held.fd);
   }
   return true;
 }
