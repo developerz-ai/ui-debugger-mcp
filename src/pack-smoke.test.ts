@@ -7,7 +7,9 @@
  *
  *   - the workflow job, PARSED rather than grepped: comment lines and shell
  *     comments inside `run:` bodies are dropped, so a commented-out step
- *     satisfies no assertion;
+ *     satisfies no assertion; job-level `if:` and `continue-on-error:` are
+ *     parsed too, so a gate skipped (or made non-fatal) a whole level up is
+ *     caught as well;
  *   - the script, EXECUTED against a stub npm and a stub node, so a tarball
  *     without the manifest's bin/exports targets, a CLI that exits non-zero
  *     and a package that needs a newer node all fail loud instead of
@@ -83,6 +85,10 @@ interface Job {
   name: string;
   runsOn: string;
   timeoutMinutes: string;
+  /** The job-level `if:` — a condition that can skip the WHOLE job. */
+  if: string;
+  /** The job-level `continue-on-error:` — makes the WHOLE job non-fatal. */
+  continueOnError: string;
   steps: Step[];
 }
 
@@ -147,6 +153,8 @@ function parseJobs(text: string): Job[] {
         name: '',
         runsOn: '',
         timeoutMinutes: '',
+        if: '',
+        continueOnError: '',
         steps: [],
       };
       continue;
@@ -164,6 +172,10 @@ function parseJobs(text: string): Job[] {
         job.runsOn = value;
       } else if (key === 'timeout-minutes') {
         job.timeoutMinutes = value;
+      } else if (key === 'if') {
+        job.if = value;
+      } else if (key === 'continue-on-error') {
+        job.continueOnError = value;
       }
       continue;
     }
@@ -271,6 +283,22 @@ function smokeStepIsUnconditional(workflow: string): boolean {
   if (!smoke) return false;
   if (smoke.if !== '' || smoke.continueOnError !== '') return false;
   return executableLines(smoke.run).some((line) => line.trim() === SMOKE_COMMAND);
+}
+
+/**
+ * G4b — the JOB cannot be skipped, and its failure is fatal.
+ *
+ * The step-level guard above cannot see job-level settings, and they defeat
+ * the gate just as well: a job-level `if:` skips the whole job (the smoke
+ * never runs and the workflow is green anyway) and a job-level
+ * `continue-on-error: true` makes a failed smoke non-fatal (it runs, it
+ * fails, nobody notices). ANY job-level `if:` is refused — a condition that
+ * can skip the gate is a hole in the gate, whatever it evaluates to.
+ */
+function packSmokeJobIsUnconditional(workflow: string): boolean {
+  const job = packSmokeJob(workflow);
+  if (!job) return false;
+  return job.if === '' && job.continueOnError === '';
 }
 
 /**
@@ -705,6 +733,33 @@ test('the smoke step runs unconditionally and cannot be made non-fatal', () => {
         workflowText,
         '        run: bash bin/smoke-packed\n',
         '        run: |\n          # bash bin/smoke-packed\n',
+      ),
+    ),
+  ).toBe(false);
+});
+
+test('the pack-smoke job itself cannot be skipped or made non-fatal', () => {
+  expect(packSmokeJobIsUnconditional(workflowText)).toBe(true);
+
+  // Mutation: the whole job is skipped — the smoke never runs, and the
+  // workflow is green anyway. The step-level guard cannot see this.
+  expect(
+    packSmokeJobIsUnconditional(
+      mutateJob(
+        workflowText,
+        '    timeout-minutes: 15\n',
+        `    timeout-minutes: 15\n    if: \${{ false }}\n`,
+      ),
+    ),
+  ).toBe(false);
+  // Mutation: the job's failure is swallowed — the smoke runs, fails, and
+  // the workflow is green.
+  expect(
+    packSmokeJobIsUnconditional(
+      mutateJob(
+        workflowText,
+        '    timeout-minutes: 15\n',
+        '    timeout-minutes: 15\n    continue-on-error: true\n',
       ),
     ),
   ).toBe(false);
