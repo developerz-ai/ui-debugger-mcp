@@ -280,6 +280,7 @@ export async function buildSession(
   // run's dir even if the clock moved backwards since the previous one.
   await pruneSessions(workspace, { keep: SESSION_RETENTION, protect: id });
   const criteriaLines = splitLines(criteria);
+  const notes = splitLines(targetConfig.notes);
   const address = openAddress(targetConfig);
   const origin = runOrigin(targetConfig);
   await writeFile(paths.storyMd, renderStoryMd(target, address, goal, criteriaLines), 'utf8');
@@ -316,7 +317,7 @@ export async function buildSession(
     // The target's standing preconditions: config-level, so they are stated once
     // here instead of re-pasted into every `goal`. Length is capped at the config
     // boundary — this section rides along on every step.
-    notes: splitLines(targetConfig.notes),
+    notes,
   });
 
   const appendAgentLog = (line: string): Promise<string> =>
@@ -360,7 +361,7 @@ export async function buildSession(
           'look',
           selfLook
             ? createSelfLookTool(adapter, store)
-            : createLookTool(adapter, models.vision, store, trail),
+            : createLookTool(adapter, models.vision, store, trail, notes),
           logAgent,
         ),
         report: withToolLog(

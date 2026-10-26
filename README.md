@@ -272,6 +272,9 @@ One fact per line, on any target (web, desktop, android). Unlike the per-run
 `goal`, `notes` is config: it is composed into the driver's prompt once, as its
 own *"Known about this app"* section — treat these as expected, never report one
 as a defect, and a screen that **contradicts** one is still worth reporting.
+The same preconditions also reach the separate vision model that judges
+screenshots, so a configured expected empty state stops being filed as a visual
+defect — and a screen that contradicts one is still worth reporting.
 Capped at 1000 characters, enforced when the config loads (the prompt carrying it
 is resent to the model on every step, so an essay here is paid for per step).
 

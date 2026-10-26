@@ -140,6 +140,15 @@ system prompt (`agent/prompts/compose.ts`), ahead of the goal: *stated by the
 project, treat as expected, never `report` one as a bug — and a screen that
 CONTRADICTS one IS worth reporting*. A note is context, not a gag order.
 
+**Both consumers get them.** The same section is composed into the SEPARATE
+vision model's prompt too — the provider behind `look` (`agent/belt/look.ts`),
+which is a different model from the driver whenever control and vision are
+split. Without it, a configured expected empty state came back from the eyes as
+a visual issue and was persisted in `findings.json` as a defect. With it, an
+expected condition is never an issue, and a screen that CONTRADICTS one is still
+reported. A self-look run (control == vision) needs nothing extra — the driver
+already carries the notes in its own prompt.
+
 **Bounded, and loud about it.** Max 1000 characters (`TARGET_NOTES_MAX_CHARS`),
 enforced at config validation — over it, the config fails to load naming the cap.
 This section is part of the system prompt, which is resent to the provider on
