@@ -354,7 +354,7 @@ export async function buildSession(
     const agent = createDebugAgent({
       model: models.driver,
       tools: {
-        observe: withToolLog('observe', createObserveTool(adapter, store, trail), logAgent),
+        observe: withToolLog('observe', createObserveTool(adapter, store, trail, redact), logAgent),
         act: withToolLog('act', createActTool(adapter, store, trail, origin), logAgent),
         look: withToolLog(
           'look',
@@ -402,7 +402,7 @@ export async function buildSession(
     findingsStore: store,
     // Post-verdict seam: fills `findings.summary` over the summary model when the
     // driver left it empty (best-effort; the session wraps it fail-soft).
-    summarize: createSummarize(models.summary),
+    summarize: createSummarize(models.summary, redact),
     // Post-verdict seam: stitches the ordered screenshots into a captioned
     // `replay.mp4` (ffmpeg) and records its path in `findings.evidence` for the PR.
     // `log` surfaces an absent ffmpeg loud in `agent.log`; the step skips, never crashes.

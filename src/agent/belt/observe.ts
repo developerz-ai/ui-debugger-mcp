@@ -430,11 +430,18 @@ function truncation(dropped: number, cap: number): { truncated?: number; hint?: 
  * Route one `observe` call to the adapter and shape the result. Pure over the
  * {@link Adapter} + {@link EvidenceRecorder} seams (no `tool()` wrapper), so it
  * unit-tests against fakes.
+ *
+ * `redact` is the run's secret redactor (`createSecretRedactor`, bound per run to
+ * the auth persona's values); it defaults to identity, so an un-wired call is
+ * unchanged. It is applied ONLY to console-derived free text — an adapter error
+ * or a logged-in app can echo a typed credential back through a console row —
+ * never to the network channel, whose entries are whole exchanges.
  */
 export async function runObserve(
   adapter: Adapter,
   recorder: EvidenceRecorder,
   input: ObserveInput,
+  redact: (line: string) => string = (line) => line,
 ): Promise<ObserveResult> {
   const { kind, query, fields, filters, limit, within } = input;
 
@@ -463,7 +470,15 @@ export async function runObserve(
     case 'console': {
       const cap = limit ?? DEFAULT_LOG_LIMIT;
       const matched = await adapter.console({ filters });
-      const entries = matched.slice(0, cap);
+      // Cap first, then redact the kept rows: a persona value typed into the app
+      // is echoed back in console text and source locations (`url?token=…`),
+      // and these rows are what the driver reads AND what the trail records as
+      // bugs — both must carry the redactor's marker, never the raw value.
+      const entries = matched.slice(0, cap).map((entry) => ({
+        ...entry,
+        text: redact(entry.text),
+        ...(entry.location !== undefined && { location: redact(entry.location) }),
+      }));
       return { kind, count: entries.length, entries, ...truncation(matched.length - cap, cap) };
     }
     case 'network': {
@@ -518,8 +533,17 @@ export async function runObserve(
  * is the trail's job, so re-reads of the ring buffer add nothing — and a `report`
  * racing in the SAME step carries them even when the driver's `bugs` array omits
  * them. Other kinds record nothing; a failed read records nothing.
+ *
+ * `redact` threads through to {@link runObserve}'s console channel (identity when
+ * omitted), so both the entries the driver reads and the error rows recorded on
+ * the trail below arrive persona-redacted.
  */
-export function createObserveTool(adapter: Adapter, recorder: EvidenceRecorder, trail?: ActTrail) {
+export function createObserveTool(
+  adapter: Adapter,
+  recorder: EvidenceRecorder,
+  trail?: ActTrail,
+  redact: (line: string) => string = (line) => line,
+) {
   return tool({
     description:
       'Read the target without mutating it. Pick a channel with kind (tree=UI nodes incl. iframe content, screenshot=PNG evidence saved to screenshots/ — returns its path, console=logs, network=requests with status/timing/payloads, tabs=open tabs); compose with query/fields/filters/limit/within. Use it to inspect state before and after acting.',
@@ -530,7 +554,7 @@ export function createObserveTool(adapter: Adapter, recorder: EvidenceRecorder, 
       // gate.
       const settle = trail?.begin();
       try {
-        const result = await runObserve(adapter, recorder, input);
+        const result = await runObserve(adapter, recorder, input, redact);
         // Record AFTER the result exists, BEFORE releasing: the read succeeded, so
         // its error rows are real surfaced findings.
         if (result.kind === 'console') {

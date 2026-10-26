@@ -1,7 +1,9 @@
 import { expect, test } from 'bun:test';
+import { MockLanguageModelV3 } from 'ai/test';
+import { createSecretRedactor } from '../adapters/browser/log-format.js';
 import { AgentError } from '../errors.js';
 import type { Findings } from '../findings/schema.js';
-import { findingsDigest, SUMMARY_SYSTEM_PROMPT, summarize } from './summarize.js';
+import { createSummarize, findingsDigest, SUMMARY_SYSTEM_PROMPT, summarize } from './summarize.js';
 
 // --- findingsDigest ----------------------------------------------------------
 
@@ -115,4 +117,67 @@ test('summarize throws AgentError when the generate seam returns whitespace only
   const fake = async () => ({ text: '   \n  \t  ' });
   const findings: Findings = { status: 'failed', steps: [], bugs: [], visual: [] };
   await expect(summarize(fake, findings)).rejects.toThrow(AgentError);
+});
+
+// --- redaction: the provider prompt never carries a raw persona value ----------
+
+/**
+ * `hunter2` is a SYNTHETIC persona value (7 chars → `<redacted, 7 chars>`),
+ * never a real credential — the same redactor `session-builder.ts` binds per run.
+ */
+const REDACT = createSecretRedactor(['hunter2']);
+
+test('summarize passes the digest through the per-run redactor before the generate seam', async () => {
+  let captured: { system: string; prompt: string } | undefined;
+  const fake = async (req: { system: string; prompt: string }) => {
+    captured = req;
+    return { text: 'one bug found' };
+  };
+  const findings: Findings = {
+    status: 'failed',
+    steps: [],
+    bugs: [{ kind: 'console', detail: 'login failed for hunter2', evidence: '/login' }],
+    visual: [],
+  };
+  await summarize(fake, findings, undefined, REDACT);
+  expect(captured?.system).toBe(SUMMARY_SYSTEM_PROMPT);
+  expect(captured?.prompt).toContain('<redacted, 7 chars>');
+  expect(captured?.prompt).not.toContain('hunter2');
+  // Non-persona bug text survives redaction untouched.
+  expect(captured?.prompt).toContain('login failed for <redacted, 7 chars>');
+  expect(captured?.prompt).toContain('evidence: /login');
+});
+
+test('createSummarize binds the redactor: the provider sees the redacted prompt only', async () => {
+  const seen: string[] = [];
+  const model = new MockLanguageModelV3({
+    doGenerate: async ({ prompt }) => {
+      seen.push(JSON.stringify(prompt));
+      return {
+        content: [{ type: 'text' as const, text: 'summary paragraph' }],
+        finishReason: { unified: 'stop' as const, raw: 'stop' },
+        usage: {
+          inputTokens: {
+            total: 1,
+            noCache: 1 as number | undefined,
+            cacheRead: undefined,
+            cacheWrite: undefined,
+          },
+          outputTokens: { total: 1, text: 1 as number | undefined, reasoning: undefined },
+        },
+        warnings: [] as [],
+      };
+    },
+  });
+  const step = createSummarize(model, REDACT);
+  const findings: Findings = {
+    status: 'failed',
+    steps: [],
+    bugs: [{ kind: 'console', detail: 'auth crashed for hunter2' }],
+    visual: [],
+  };
+  const paragraph = await step(findings);
+  expect(paragraph).toBe('summary paragraph');
+  expect(seen[0]).toContain('<redacted, 7 chars>');
+  expect(seen[0]).not.toContain('hunter2');
 });
