@@ -79,9 +79,10 @@ const NATIVE_PROMPTS: Record<string, string> = {
   'android addendum': ANDROID_ADDENDUM_PROMPT,
 };
 
-/** A minimal NATIVE-shaped adapter — no `tabs`, which is what marks a web target. */
+/** A minimal NATIVE-shaped adapter — it DECLARES the native dialect (and has no `tabs`). */
 function nativeAdapter(nodes: Node[]): Adapter {
   return {
+    selectorDialect: 'native',
     open: async () => {},
     find: async () => null,
     click: async () => {},

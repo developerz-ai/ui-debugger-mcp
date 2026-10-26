@@ -35,6 +35,7 @@ import type {
   NodeRef,
   Query,
   ScrollOptions,
+  SelectorDialect,
   WaitOptions,
 } from '../contract.js';
 import {
@@ -107,6 +108,13 @@ export interface DesktopAdapterInit {
  * contract. Construct via {@link DesktopAdapter.create}.
  */
 export class DesktopAdapter implements Adapter {
+  /**
+   * The native selector grammar — the AT-SPI parser this adapter's
+   * `find`/`click`/`type` accept: `role "name"` or a bare name substring, and
+   * nothing else. Declared here, not derived from the absence of `tabs`: the
+   * dialect is the grammar, and the grammar is the adapter's own.
+   */
+  readonly selectorDialect: SelectorDialect = 'native';
   readonly #config: DesktopTarget;
   readonly #env: NodeJS.ProcessEnv;
   readonly #atspi: AtspiSource;

@@ -90,6 +90,28 @@ function fakeLauncher(over: Record<string, unknown>): Launcher {
   return over as unknown as Launcher;
 }
 
+// --- declared selector dialect ------------------------------------------------
+
+test('the web adapter DECLARES the web selector dialect', async () => {
+  const chromium = fakeLauncher({
+    launchPersistentContext: async () => ({
+      pages: () => [fakePage()],
+      close: async () => undefined,
+    }),
+  });
+
+  const adapter = await BrowserAdapter.create({
+    config: webTarget(),
+    profileDir: '/tmp/unused-profile',
+    chromium,
+  });
+
+  // The belt emits every tree node's `target` in the adapter's DECLARED dialect
+  // and the driver copies it verbatim — a web target declared `native` would hand
+  // the driver `button "Save"`, which no Playwright engine resolves.
+  expect(adapter.selectorDialect).toBe('web');
+});
+
 // --- create (launch failure cleanup) -----------------------------------------
 
 test('create closes a just-launched context when post-connect setup throws (no zombie Chrome)', async () => {

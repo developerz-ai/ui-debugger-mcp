@@ -33,6 +33,7 @@ import type {
   Node,
   NodeField,
   NodeRef,
+  SelectorDialect,
   TabInfo,
 } from '../../adapters/contract.js';
 import { AgentError } from '../../errors.js';
@@ -210,23 +211,32 @@ export type ObserveResult =
  * `target` of every tree node in it, and the driver is told to copy that string
  * verbatim, so a `target` in the wrong dialect makes every click and type fail.
  *
- *  - `web` — Playwright engines (`data-testid="…"`, `role=button[name="…" i]`,
- *    `text=…`, `>> nth=N`), normalized by `adapters/browser/query.ts`.
- *  - `native` — the desktop (AT-SPI) and android (uiautomator) parsers, which take
- *    `role "name"` or a bare name substring and NOTHING else: an engine-prefixed
- *    selector degrades to a literal name substring, matches nothing, and `act`
- *    throws `no element matched …`.
+ * The type lives in the shared contract ({@link Adapter.selectorDialect}) — the
+ * dialect is a property of the ADAPTER, not of the belt that reads it. It is
+ * re-exported here so the belt's own public name still resolves.
  */
-export type SelectorDialect = 'web' | 'native';
+export type { SelectorDialect };
 
 /**
- * The dialect an adapter speaks. Inferred from `tabs`, which the contract marks
- * web-only ("implemented by targets that have a tab concept (web); absent
- * elsewhere") — the one structural difference between the browser adapter and the
- * two native ones, since the rest of the contract is deliberately identical.
+ * The dialect an adapter speaks — READ from the adapter's own declaration
+ * ({@link Adapter.selectorDialect}).
+ *
+ * It used to be inferred from `tabs`, which the contract marks optional and
+ * web-only: a native target that grew a tab listing would silently flip to the
+ * web dialect and hand the driver selectors its own parser cannot resolve. The
+ * dialect is explicit now, and a missing or unknown declaration fails loud
+ * instead of falling back to `web`.
  */
 export function dialectOf(adapter: Adapter): SelectorDialect {
-  return typeof adapter.tabs === 'function' ? 'web' : 'native';
+  // Read as `unknown`: the declaration is data, and a missing or misspelled one
+  // must fail loud rather than slip through as the web default.
+  const declared: unknown = adapter.selectorDialect;
+  if (declared === 'web') return 'web';
+  if (declared === 'native') return 'native';
+  throw new AgentError(
+    `adapter declares no usable selector dialect (got ${String(declared)}) — ` +
+      'every adapter must declare `selectorDialect: "web" | "native"`',
+  );
 }
 
 /** A role token both native parsers accept as the leading word of `role "name"`. */
