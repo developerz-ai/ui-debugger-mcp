@@ -110,7 +110,7 @@ export function centerOf(bounds: Bounds): { x: number; y: number } {
  * The on-screen rectangle of a {@link Node}, or a loud failure when it has none.
  *
  * AT-SPI nodes that expose no `Component` (app roots, toolkit fillers) carry
- * placeholder zero bounds (`atspi.ts` marks them `measured: false`), and a real
+ * placeholder zero bounds (`atspi-busctl.ts` marks them `measured: false`), and a real
  * widget reports `0x0` until it is laid out. Either way the "center" is the screen
  * origin — clicking it would hit the top-left of the desktop and read as success.
  * (The android adapter applies the same rule in `tapPointOf`.)
