@@ -130,3 +130,34 @@ jobs:
 
       - name: build
         run: bun run build
+
+  pack-smoke:
+    name: pack-smoke (packed artifact on the node floor)
+    # The `bun` job above runs the SOURCE under bun. Nothing proved the copy a
+    # user installs from npm works on the node floor package.json declares, so
+    # this job packs the package, installs the tarball and runs the INSTALLED
+    # CLI with node — the floor, not the dev version.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.3"
+
+      # The floor from package.json engines.node (">=20"). bin/smoke-packed
+      # installs the tarball with npm_config_engine_strict=true, so a package
+      # that needs a newer node fails here, by name.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: install
+        run: bun install --frozen-lockfile
+
+      - name: build
+        run: bun run build
+
+      - name: smoke the packed artifact
+        run: bash bin/smoke-packed
