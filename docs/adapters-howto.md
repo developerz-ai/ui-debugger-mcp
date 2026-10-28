@@ -26,12 +26,14 @@ scroll(opts)           scroll viewport or a scoped region
 readState(opts?)       read the normalized UI tree (capped list of Node[])
 screenshot()           capture PNG bytes
 waitFor(opts)          block until a condition holds or time out
-console(opts?)         drain captured log messages (newest first)
-network(opts?)         drain captured network exchanges (newest first)
+console(opts?)         read captured log messages (newest first, narrowed by LogQuery, non-destructive)
+network(opts?)         read captured network exchanges (newest first, narrowed by LogQuery, non-destructive)
 close()                release the target (managed: stop; attach: disconnect only)
 ```
 
-All read parameters are `Query` (SQL-like `query/fields/filters/limit/within`).
+Tree reads (`find`/`readState`) take `Query` (SQL-like `query/filters/limit/within`), while the
+log channels (`console`/`network`) take `LogQuery` (`filters`/`limit` only) — `fields` is not a
+`Query` member but the belt's node-column projection (`observe`).
 Filters are whitelisted per adapter — reject unknown keys with `AdapterError`, never
 silently ignore them.
 
