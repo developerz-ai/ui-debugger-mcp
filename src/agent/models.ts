@@ -2,7 +2,7 @@
  * Per-role model resolver — binds the three actors' model ids to `LanguageModel`s.
  *
  * Each role's id resolves from project config over the per-role defaults
- * (`DEFAULT_MODELS`): deepseek for text (driver + summary), glm for image
+ * (`DEFAULT_MODELS`): deepseek for text (driver + summary), qwen for image
  * (vision) — see `idea/models.md`. Resolved ids are bound to the
  * OpenAI-compatible provider via `provider.chat(modelId)`, yielding the
  * `LanguageModel`s the agent loop hands to the Vercel AI SDK.

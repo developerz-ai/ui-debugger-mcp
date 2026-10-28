@@ -45,7 +45,7 @@ Picture a **boss**, a **fast blind driver**, and a **describer with eyes**:
    │             │ ◀─────── get_findings │   ┌────────────┐     ┌────────────┐   │
    │ sets goals  │                       │   │  fast guy  │ look│ vision guy │   │
    │ fixes code  │                       │   │  (driver)  │────▶│  (eyes)    │   │
-   │ loops       │                       │   │ deepseek   │◀────│  glm 5v    │   │
+   │ loops       │                       │   │ deepseek   │◀────│  qwen3-vl  │   │
    └─────────────┘                       │   │ text·blind │ desc│ image      │   │
           ▲                              │   └─────┬──────┘     └────────────┘   │
           │ "works + looks nice"         │     observe / act (SQL-like)          │
@@ -65,7 +65,7 @@ Picture a **boss**, a **fast blind driver**, and a **describer with eyes**:
   click loop on structure (DOM / a11y tree / view hierarchy). Default: deepseek.
 - **vision guy** — the eyes. **Multimodal**. The driver calls `look` to ask
   *"does this look right? is the button centred?"* and gets a description back.
-  Default: glm. Spent only when visual judgment is needed.
+  Default: qwen. Spent only when visual judgment is needed.
 
 One goal: **the UI works *and* looks nice.** Full design in [`docs/idea/`](docs/idea/).
 
@@ -139,7 +139,7 @@ npx @developerz.ai/ui-debugger-mcp@latest init   # in your project root
 [`docs/idea/config.md`](docs/idea/config.md)):
 
 - creates the workspace dir `./tmp/ui-debugger-mcp/`
-- writes a starter config (default deepseek/glm models, a `web` target stub) if
+- writes a starter config (default deepseek/qwen models, a `web` target stub) if
   one doesn't already exist — at `.dz/ui-debugger/ui-debugger-mcp.json` when the
   repo already has a `.dz/` dir, else at the root `.ui-debugger-mcp.json`
 - adds `tmp/` to `.gitignore`
@@ -416,7 +416,7 @@ still land without it.
 - **Bun** + **TypeScript** (ships as npm, runs via `npx`/`bunx`)
 - **Vercel AI SDK** — the agent loop (fast driver + vision describer)
 - **Any OpenAI-compatible router** (OpenRouter default) — swap models per role.
-  Defaults: **deepseek** (text) drives, **glm** (image) sees.
+  Defaults: **deepseek** (text) drives, **qwen** (image) sees.
 - **CDP** for web, **X11/Wayland** for desktop, **ADB** for Android
 - stdio MCP transport
 

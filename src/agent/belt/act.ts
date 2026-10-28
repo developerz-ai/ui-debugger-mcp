@@ -52,10 +52,10 @@ export const ACT_ACTIONS = [
  *
  * Flat on purpose. A `z.discriminatedUnion('action', …)` renders as a JSON-Schema
  * `anyOf`, which several tool-calling models — including our default driver
- * (glm) — fail to populate: they emit the call with empty `{}` args and the run
- * churns without ever acting. A single flat object with an enum discriminant is
- * filled reliably, at the cost of moving "click needs a target", "type needs
- * text" out of the schema and into a loud runtime check.
+ * (deepseek/deepseek-v4-flash) — fail to populate: they emit the call with empty
+ * `{}` args and the run churns without ever acting. A single flat object with an
+ * enum discriminant is filled reliably, at the cost of moving "click needs a
+ * target", "type needs text" out of the schema and into a loud runtime check.
  */
 export const ActInputSchema = z.object({
   action: z

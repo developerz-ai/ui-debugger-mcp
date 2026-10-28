@@ -190,12 +190,17 @@ discriminant.
 
 ## 6 — Session-builder hook (if needed)
 
-**`src/session/session-builder.ts`** wires the adapter into the agent loop. For most
-adapters nothing changes here — the factory already returns an `Adapter` and the loop
-is adapter-blind. But if your adapter needs a target-specific `open()` argument
-(e.g. the web adapter receives the configured `url`, the android adapter receives the
-configured package/activity), check how the builder calls `adapter.open(...)` and
-extend that logic if needed.
+**`src/adapters/factory.ts`** constructs the concrete adapter;
+**`src/services/session-builder.ts`** binds it into the agent belt/loop and supplies
+its `open()` arguments. For most adapters nothing changes in the builder — the
+factory already returns an `Adapter` and the loop is adapter-blind.
+
+If your adapter needs a target-specific `open()` argument, check the builder's
+`openAddress` helper and its `adapter.open(...)` call, and extend that logic if needed:
+- Web receives the URL (the configured `url` or the per-run override).
+- Desktop receives the `window.title` hint, or an empty string when unset.
+- Android receives an empty string to boot/attach; the agent navigates to the app
+  via `act navigate` using the package/activity from the story.
 
 ---
 
