@@ -21,8 +21,10 @@
  *    driver is blind and text-only, the vision model sees pixels. A line that
  *    names no role inherits the role its BLOCK names: the docs name the role
  *    once and keep talking about it (`… the driver. … Default: deepseek.`);
- *  - a `default:` label puts the token it names in the DEFAULT slot, so a
- *    foreign vendor written there (`Default: openai.`) is drift, not prose.
+ *  - a `default:` label puts the token it names in the DEFAULT slot, and a
+ *    role key (`"driver": …`) puts its value in that ROLE's slot. Slot
+ *    values are model references whatever their spelling: a foreign id with
+ *    no digits (`anthropic/claude-sonnet`) is drift, not skipped prose.
  *
  * The ids are never written out here: they are read from `DEFAULT_MODELS`, so
  * a default change fails this guard instead of being copied into the docs by
@@ -160,12 +162,23 @@ const TALKS_MODELS = /\b(?:driver|vision|summary|models?|defaults?)\b/i;
 const DEFAULT_LABEL = /\bdefaults?\s*:\s*$/i;
 
 /**
- * A vendor/model name — what a `default:` label may name.
+ * A model name — what a `default:` label or a role key names.
  *
  * A label cannot name a duration (`Default: 300s`), so the name starts with
- * a letter.
+ * a letter. `/` joins a full id's segments: a slot names A MODEL whatever
+ * its spelling, digits or none.
  */
-const VENDOR_NAME = /^[A-Za-z][A-Za-z0-9]*(?:[.-][A-Za-z0-9]+)*$/;
+const MODEL_NAME = /^[A-Za-z][A-Za-z0-9]*(?:[./-][A-Za-z0-9]+)*$/;
+
+/**
+ * A role slot — the value a `"driver":` / `vision:` key names.
+ *
+ * The config examples assign each role its model this way; the value is a
+ * model reference whatever it looks like. The role word must sit right
+ * before the colon, so a prose label (`Summary: the run …`) stops at its
+ * colon and never swallows the words after it.
+ */
+const ROLE_SLOT = /["']?\b(?:driver|vision|summary)\b["']?\s*:\s*["']?$/i;
 
 /** A segment that mixes letters and digits (`v4`, `model3`, `4o`). */
 function mixesLettersAndDigits(segment: string): boolean {
@@ -188,6 +201,11 @@ function isModelReference(token: string): boolean {
 }
 
 /**
+ * Markdown dressing a slot check must see through — quotes, emphasis, code.
+ */
+const SLOT_MARKUP = /["'`*_]/g;
+
+/**
  * Does this token sit in the DEFAULT slot — the one a `default:` label names?
  *
  * A foreign vendor written there (`Default: openai.`) is drift, not prose:
@@ -198,8 +216,20 @@ function isModelReference(token: string): boolean {
  * the last thing before the token (`Default: `), so the gap ends with it.
  */
 function namesDefaultSlot(gap: string, token: string): boolean {
-  if (!DEFAULT_LABEL.test(gap.replace(/[*_`]/g, ''))) return false;
-  return VENDOR_NAME.test(token);
+  if (!DEFAULT_LABEL.test(gap.replace(SLOT_MARKUP, ''))) return false;
+  return MODEL_NAME.test(token);
+}
+
+/**
+ * Does this token sit in a ROLE slot — the value a role key names?
+ *
+ * A foreign model written there (`"driver": "anthropic/claude-sonnet"`) is
+ * drift even though no heuristic calls its spelling a model: the key names
+ * the role, and the value is that role's model reference, full stop.
+ */
+function namesRoleSlot(gap: string, token: string): boolean {
+  if (!ROLE_SLOT.test(gap.replace(SLOT_MARKUP, ''))) return false;
+  return MODEL_NAME.test(token);
 }
 
 /** A run of lines the guard scans as one unit. */
@@ -320,7 +350,13 @@ function references(text: string): Reference[] {
         const token = match[0];
         const gap = line.slice(previousStart, match.index);
         previousStart = match.index;
-        if (!isModelReference(token) && !namesDefaultSlot(gap, token)) continue;
+        if (
+          !isModelReference(token) &&
+          !namesDefaultSlot(gap, token) &&
+          !namesRoleSlot(gap, token)
+        ) {
+          continue;
+        }
         out.push({ token, line: block.start + offset, roles });
       }
     });
@@ -396,6 +432,14 @@ const DRIFTED_REFERENCES = [
   'deepseek/deepseek-v3',
   'deepseek/gpt-4o-mini',
 ] as const;
+
+/**
+ * Foreign vendor/model ids with NO mixed letter-digit segment — spellings
+ * {@link isModelReference} cannot recognise. Each replaces a slot's value in
+ * the rejection tests: the slot must extract the value anyway, and the guard
+ * must reject it, however plain the id looks.
+ */
+const FOREIGN_IDS = ['anthropic/claude-sonnet', 'google/gemini-pro'] as const;
 
 /**
  * A near-miss id: the default's vendor + the model WITHOUT its last part.
@@ -482,4 +526,25 @@ test('the guard rejects a foreign vendor written as the default', () => {
   const mutated = text.replace(`Default: ${driver}.`, 'Default: openai.');
   expect(mutated).not.toBe(text);
   expect(() => assertDocumentedDefaults('README.md', mutated)).toThrow(/is not a default model/);
+});
+
+test('the guard rejects a role slot that names a foreign vendor model', () => {
+  const text = read('docs/idea/config.md');
+  for (const foreign of FOREIGN_IDS) {
+    const mutated = text.replace(`"driver": "${DEFAULT_MODELS.driver}"`, `"driver": "${foreign}"`);
+    expect(mutated).not.toBe(text);
+    expect(() => assertDocumentedDefaults('docs/idea/config.md', mutated)).toThrow(
+      /is not a default model/,
+    );
+  }
+});
+
+test('the guard rejects a foreign vendor/model id written as the default', () => {
+  const text = read('README.md');
+  const driver = segments(DEFAULT_BY_ROLE.driver)[0];
+  for (const foreign of FOREIGN_IDS) {
+    const mutated = text.replace(`Default: ${driver}.`, `Default: ${foreign}.`);
+    expect(mutated).not.toBe(text);
+    expect(() => assertDocumentedDefaults('README.md', mutated)).toThrow(/is not a default model/);
+  }
 });
