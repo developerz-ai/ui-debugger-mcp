@@ -116,7 +116,7 @@ shape MCP tools should have."* So: a handful of verbs, lots of composable params
 
 - **One `act`, not six tools.** `act({action:"click", target})` beats
   `click_element` / `fill_input` / `press_key` — one flat object with an enum discriminant.
-- **One `observe`, not four.** `kind` selects tree / screenshot / console / network.
+- **One `observe` for all channels.** `kind` selects tree / screenshot / console / network / tabs.
 - **`look` is the eyes.** The driver is a fast **blind text model**; `look` sends
   the screenshot to a **vision model** that describes / judges how it looks and
   answers questions. Blind-driver + sighted-describer — see [`models.md`](models.md).
@@ -133,7 +133,7 @@ Push composition into params, like a `SELECT`:
 | `fields`  | `SELECT cols` | sparse reads — ask only for role/name/bounds, not the whole tree |
 | `filters` | `WHERE field_op` | `{ visible_eq: true, role_in: ["button","link"] }` |
 | `limit` / `within` | `LIMIT` / scope | cap tree size; scope to a subtree/region |
-| `kind`    | table | `tree \| screenshot \| console \| network` |
+| `kind`    | table | `tree \| screenshot \| console \| network \| tabs` |
 
 One `observe({kind:"tree", query:"role=button[name=Checkout]", fields:["bounds","enabled"]})`
 beats a dozen `get_*` tools. The model composes the call; that's what it's good at.
