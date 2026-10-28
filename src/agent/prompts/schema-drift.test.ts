@@ -15,7 +15,9 @@
 
 import { expect, test } from 'bun:test';
 import type { Adapter, Node } from '../../adapters/contract.js';
+import { BUG_KINDS, TERMINAL_STATUSES, VISUAL_SEVERITIES } from '../../findings/schema.js';
 import { ACT_ACTIONS } from '../belt/act.js';
+import { VISION_SYSTEM_PROMPT } from '../belt/look.js';
 import { NODE_FIELDS, OBSERVE_KINDS, runObserve } from '../belt/observe.js';
 import { ANDROID_ADDENDUM_PROMPT } from './android-addendum.js';
 import { debugAgentPrompt } from './debug-agent.js';
@@ -151,4 +153,78 @@ test('the base prompt\'s "act" belt line lists exactly ACT_ACTIONS, in order', (
   expect(match).not.toBeNull();
   const verbs = (match?.[1] ?? '').split(',').map((verb) => verb.trim());
   expect(verbs).toEqual([...ACT_ACTIONS]);
+});
+
+// --- the findings vocabulary (severity / kind / terminal status) -------------
+
+/**
+ * The prompts also TEACH the findings vocabulary itself — the piped enumerations
+ * in the visual-finding shape and the terminal `report` JSON example. A doc edit
+ * that teaches `severity: "critical"` or drops `network` from the kind list makes
+ * the driver emit findings the schemas reject (or never emit a kind it should).
+ * These guards hold every prompt that teaches it — the driver (both eye modes)
+ * and the vision guy's system prompt — against the canonical owner,
+ * `findings/schema.ts`, so the literals are pinned in exactly one place.
+ */
+
+/** The prompts that teach the findings vocabulary, labelled for failure messages. */
+const FINDINGS_PROMPTS: Record<string, string> = {
+  'debug-agent (vision mode)': debugAgentPrompt(false),
+  'debug-agent (self-look mode)': debugAgentPrompt(true),
+  'vision guy': VISION_SYSTEM_PROMPT,
+};
+
+/** One taught piped enumeration: how to find it, what it must hold, the owner's name for failures. */
+const TAUGHT_ENUMS: ReadonlyArray<[RegExp, readonly string[], string]> = [
+  [/severity"?\s*:\s*"([^"]+)"((?:\s*\|\s*"?[a-z]+"?)*)/gi, VISUAL_SEVERITIES, 'VISUAL_SEVERITIES'],
+  [/"kind"\s*:\s*"([^"]+)"((?:\s*\|\s*"?[a-z]+"?)*)/g, BUG_KINDS, 'BUG_KINDS'],
+  [/"status"\s*:\s*"([^"]+)"((?:\s*\|\s*"?[a-z]+"?)*)/g, TERMINAL_STATUSES, 'TERMINAL_STATUSES'],
+];
+
+/** Split one matched enumeration into its bare value tokens ("low" | "medium" → low, medium). */
+function enumTokens(match: RegExpExecArray): string[] {
+  return `${match[1] ?? ''}${match[2] ?? ''}`
+    .split('|')
+    .map((token) => token.replace(/["\s]/g, ''))
+    .filter((token) => token.length > 0);
+}
+
+test('every taught severity/kind/status enumeration holds canonical findings values only', () => {
+  for (const [name, prompt] of Object.entries(FINDINGS_PROMPTS)) {
+    for (const [pattern, canonical, owner] of TAUGHT_ENUMS) {
+      for (const match of prompt.matchAll(pattern)) {
+        for (const token of enumTokens(match)) {
+          if (!canonical.includes(token)) {
+            throw new Error(
+              `${name}: teaches "${token}" in a ${owner} enumeration, which findings/schema.ts does not declare`,
+            );
+          }
+        }
+      }
+    }
+  }
+});
+
+test('every canonical findings value is taught by at least one prompt', () => {
+  const taught = new Set<string>();
+  for (const prompt of Object.values(FINDINGS_PROMPTS)) {
+    for (const [pattern] of TAUGHT_ENUMS) {
+      for (const match of prompt.matchAll(pattern)) {
+        for (const token of enumTokens(match)) taught.add(token);
+      }
+    }
+  }
+  for (const [canonical, owner] of [
+    [VISUAL_SEVERITIES, 'VISUAL_SEVERITIES'],
+    [BUG_KINDS, 'BUG_KINDS'],
+    [TERMINAL_STATUSES, 'TERMINAL_STATUSES'],
+  ] as const) {
+    for (const value of canonical) {
+      if (!taught.has(value)) {
+        throw new Error(
+          `no prompt teaches ${owner} value "${value}" — the driver or vision guy was never told it exists`,
+        );
+      }
+    }
+  }
 });
