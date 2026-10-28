@@ -195,43 +195,107 @@ const FINDINGS_PROMPTS: Record<string, string> = {
   'vision guy': VISION_SYSTEM_PROMPT,
 };
 
-/** One taught piped enumeration: how to find it, what it must hold, the owner's name for failures. */
+/**
+ * One taught piped enumeration: how to find it, what it must hold, the owner's
+ * name for failures.
+ *
+ * The head is one complete quoted value; every `|` alternative after it is
+ * consumed as a WHOLE segment — all characters up to the value's end (a `,`,
+ * `}`, `]`, newline, or the next `|`). Reading a PREFIX of an alternative
+ * (`[a-z]+` reads an appended `"high2"` as the canonical `high`) let a mutated
+ * enumeration pass the membership check below with a value the schema rejects,
+ * so {@link enumTokens} throws on any segment it cannot read as a complete
+ * quoted value instead of skipping it.
+ */
 const TAUGHT_ENUMS: ReadonlyArray<[RegExp, readonly string[], string]> = [
-  [/severity"?\s*:\s*"([^"]+)"((?:\s*\|\s*"?[a-z]+"?)*)/gi, VISUAL_SEVERITIES, 'VISUAL_SEVERITIES'],
-  [/"kind"\s*:\s*"([^"]+)"((?:\s*\|\s*"?[a-z]+"?)*)/g, BUG_KINDS, 'BUG_KINDS'],
-  [/"status"\s*:\s*"([^"]+)"((?:\s*\|\s*"?[a-z]+"?)*)/g, TERMINAL_STATUSES, 'TERMINAL_STATUSES'],
+  [
+    /severity"?\s*:\s*("[^"]+")((?:\s*\|\s*[^,}\]\n|]+)*)/gi,
+    VISUAL_SEVERITIES,
+    'VISUAL_SEVERITIES',
+  ],
+  [/"kind"\s*:\s*("[^"]+")((?:\s*\|\s*[^,}\]\n|]+)*)/g, BUG_KINDS, 'BUG_KINDS'],
+  [/"status"\s*:\s*("[^"]+")((?:\s*\|\s*[^,}\]\n|]+)*)/g, TERMINAL_STATUSES, 'TERMINAL_STATUSES'],
 ];
 
-/** Split one matched enumeration into its bare value tokens ("low" | "medium" → low, medium). */
-function enumTokens(match: RegExpExecArray): string[] {
-  return `${match[1] ?? ''}${match[2] ?? ''}`
-    .split('|')
-    .map((token) => token.replace(/["\s]/g, ''))
+/**
+ * Split one matched enumeration into its bare value tokens
+ * (`"low" | "medium"` → low, medium), reading every alternative WHOLE.
+ *
+ * Two taught shapes: the head may hold the entire union in one pair of quotes
+ * (`severity: "low|medium|high"`, the inline-code form), or each alternative
+ * after a `|` is quoted on its own (`"status": "passed" | "failed"`). A
+ * segment that is not a complete quoted value — an unquoted alternative, a
+ * value the closing quote never reaches — is thrown, never skipped: a
+ * half-read token would pass the membership check while the schema rejects it.
+ */
+function enumTokens(name: string, owner: string, match: RegExpExecArray): readonly string[] {
+  const alternatives = [match[1] ?? '', ...(match[2] ?? '').split('|')].filter(
+    (alternative) => alternative.trim().length > 0,
+  );
+  return alternatives
+    .map((alternative) => {
+      const quoted = /^"([^"]*)"$/.exec(alternative.trim());
+      if (quoted === null) {
+        throw new Error(
+          `${name}: teaches an unreadable ${owner} alternative ${JSON.stringify(alternative.trim())} — an alternative must be a complete quoted value`,
+        );
+      }
+      return quoted[1] ?? '';
+    })
+    .flatMap((quoted) => quoted.split('|'))
+    .map((token) => token.trim())
     .filter((token) => token.length > 0);
 }
 
-test('every taught severity/kind/status enumeration holds canonical findings values only', () => {
-  for (const [name, prompt] of Object.entries(FINDINGS_PROMPTS)) {
-    for (const [pattern, canonical, owner] of TAUGHT_ENUMS) {
-      for (const match of prompt.matchAll(pattern)) {
-        for (const token of enumTokens(match)) {
-          if (!canonical.includes(token)) {
-            throw new Error(
-              `${name}: teaches "${token}" in a ${owner} enumeration, which findings/schema.ts does not declare`,
-            );
-          }
+/** Every taught enumeration in one prompt must hold canonical findings values only. */
+function assertTaughtEnumsHoldCanonicalValues(name: string, prompt: string): void {
+  for (const [pattern, canonical, owner] of TAUGHT_ENUMS) {
+    for (const match of prompt.matchAll(pattern)) {
+      for (const token of enumTokens(name, owner, match)) {
+        if (!canonical.includes(token)) {
+          throw new Error(
+            `${name}: teaches "${token}" in a ${owner} enumeration, which findings/schema.ts does not declare`,
+          );
         }
       }
     }
   }
+}
+
+test('every taught severity/kind/status enumeration holds canonical findings values only', () => {
+  for (const [name, prompt] of Object.entries(FINDINGS_PROMPTS)) {
+    assertTaughtEnumsHoldCanonicalValues(name, prompt);
+  }
+});
+
+test('the enumeration guard rejects `| "high2"` appended to a severity enumeration', () => {
+  const prompt = debugAgentPrompt(false);
+  const joined = VISUAL_SEVERITIES.map((severity) => `"${severity}"`).join('|');
+
+  // The real prompt passes, and the schema really has no `high2` to pass on.
+  expect(() => assertTaughtEnumsHoldCanonicalValues('debug-agent', prompt)).not.toThrow();
+  expect([...VISUAL_SEVERITIES]).not.toContain('high2');
+
+  // Appending `| "high2"` to the report example's severity enumeration must
+  // FAIL the guard: `[a-z]+` used to read the appended token as the canonical
+  // prefix `high`, so a mutated prompt passed while the schema rejects `high2`.
+  const appended = prompt.replace(`"severity": ${joined}`, `"severity": ${joined}|"high2"`);
+  expect(appended).not.toBe(prompt);
+  expect(() => assertTaughtEnumsHoldCanonicalValues('mutated', appended)).toThrow(/high2/);
+
+  // An alternative the reader cannot close (an unquoted one) is drift too —
+  // failed loud, never skipped.
+  const unquoted = prompt.replace(`"severity": ${joined}`, `"severity": ${joined}|high2`);
+  expect(unquoted).not.toBe(prompt);
+  expect(() => assertTaughtEnumsHoldCanonicalValues('mutated', unquoted)).toThrow(/high2/);
 });
 
 test('every canonical findings value is taught by at least one prompt', () => {
   const taught = new Set<string>();
-  for (const prompt of Object.values(FINDINGS_PROMPTS)) {
-    for (const [pattern] of TAUGHT_ENUMS) {
+  for (const [name, prompt] of Object.entries(FINDINGS_PROMPTS)) {
+    for (const [pattern, , owner] of TAUGHT_ENUMS) {
       for (const match of prompt.matchAll(pattern)) {
-        for (const token of enumTokens(match)) taught.add(token);
+        for (const token of enumTokens(name, owner, match)) taught.add(token);
       }
     }
   }
