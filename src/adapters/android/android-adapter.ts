@@ -74,10 +74,12 @@ const BOOT_WAIT_MS = 120_000;
 const LOGCAT_TAIL = 500;
 
 /**
- * Cap on the remembered console coverage (raw keys of every row the durable trail
- * already holds) — bounded no matter how long the run or how wide a one-off `limit`
- * was. The oldest covered rows drop first; the logcat buffer drops them too, so a
- * trimmed row is also the first to become unreachable.
+ * Cap on the retained console-coverage keys — the raw keys of the covered rows
+ * still remembered individually. Bounded no matter how long the run or how wide
+ * a one-off `limit` was. Trimming a span's oldest keys does NOT forget their
+ * coverage: the rows stay covered as the span's `below` count, anchored by the
+ * span's first retained key (a drain reaching them still contains that key —
+ * the logcat buffer drops rows oldest first, and the anchor is newer).
  */
 const MAX_COVERED_KEYS = 4096;
 
@@ -129,6 +131,61 @@ function overlapAtHead(covered: readonly string[], keys: readonly string[], r: n
     if (covered[covered.length - r + i] !== keys[i]) return false;
   }
   return true;
+}
+
+/**
+ * One disjoint covered run — a contiguous stretch of log rows the durable
+ * trail already holds. Drains are contiguous windows of one append-only log
+ * and end up wholly covered, so each drain merges into one span; spans stay
+ * disjoint and ordered oldest first.
+ */
+interface CoveredSpan {
+  /**
+   * Covered rows that sit directly below `keys[0]`, remembered as a count once
+   * {@linkcode AndroidAdapter.capCoverage} trims their keys. They stay covered:
+   * `keys[0]` anchors them (a drain reaching them still contains it), so their
+   * coverage survives the trim without the keys.
+   */
+  below: number;
+  /** Retained raw keys, oldest first; `keys[0]` anchors the span in a drain. */
+  keys: string[];
+}
+
+/**
+ * Where one covered span sits inside a drain: the covered drain range
+ * (inclusive indexes), plus the span's covered rows OUTSIDE the drain — the
+ * count below its head with the retained keys anchoring them, and the retained
+ * keys above its tail — so the post-drain merge can keep covering them.
+ */
+interface SpanHit {
+  from: number;
+  to: number;
+  /** Span rows covered below the drain's head, minus the retained `headKeys`. */
+  belowAnchored: number;
+  /** The span's retained keys below the drain's head (still covered). */
+  headKeys: string[];
+  /** The span's retained keys above the drain's tail (still covered). */
+  tailKeys: string[];
+}
+
+/** The raw epoch time a row key starts with — `1546300800.000|1000|…` → 1546300800. */
+function keyTime(key: string): number {
+  return Number(key.slice(0, key.indexOf('|')));
+}
+
+/** Merge the hits' covered ranges into one sorted, disjoint union (overlaps fold). */
+function unionOfRanges(hits: readonly SpanHit[]): Array<{ from: number; to: number }> {
+  const sorted = [...hits].sort((a, b) => a.from - b.from || a.to - b.to);
+  const out: Array<{ from: number; to: number }> = [];
+  for (const hit of sorted) {
+    const last = out[out.length - 1];
+    if (last !== undefined && hit.from <= last.to + 1) {
+      last.to = Math.max(last.to, hit.to);
+    } else {
+      out.push({ from: hit.from, to: hit.to });
+    }
+  }
+  return out;
 }
 
 /** `1546300800.000  1000  1000 I Tag: message` — unmatched lines are skipped. */
@@ -278,12 +335,12 @@ export class AndroidAdapter implements Adapter {
   readonly #pickPort: () => Promise<number>;
   readonly #onLog: CaptureSink | undefined;
   /**
-   * The overlap window: raw keys of every row the durable trail already holds,
-   * in drain order (oldest first), capped at {@linkcode MAX_COVERED_KEYS} —
-   * so the remembered window is bounded no matter how long the run (see
-   * {@linkcode AndroidAdapter.streamRows}).
+   * The covered runs: disjoint spans of raw keys — every row the durable trail
+   * already holds, oldest first, capped at {@linkcode MAX_COVERED_KEYS} retained
+   * keys (see {@linkcode AndroidAdapter.streamRows} and
+   * {@linkcode AndroidAdapter.capCoverage}).
    */
-  #coveredKeys: string[] = [];
+  #covered: CoveredSpan[] = [];
   #transport: Transport | null;
   /** The device every call is bound to (`emulator-<port>` once managed boot picks one). */
   #serial: string | null;
@@ -502,52 +559,78 @@ export class AndroidAdapter implements Adapter {
    *
    * The sink is the run's redacting durable writer (the session layer binds it);
    * the adapter itself never writes to disk. `logcat -t N` re-dumps the same tail
-   * on every read, so the durable trail would otherwise repeat it — a coverage
-   * window prevents that without an ever-growing row set:
+   * on every read, so the durable trail would otherwise repeat it — coverage
+   * prevents that without an ever-growing row set:
    *
-   * Drains are chronological tails of one append-only log, so consecutive drains
-   * only ever slide FORWARD: this drain's overlap with the already-covered rows
-   * is a contiguous run of them, and its fresh rows are a suffix. Remembering
-   * the covered span as the SEQUENCE of raw keys already streamed
-   * ({@linkcode AndroidAdapter.coveredKeys}, capped) decides every row by
-   * locating that coverage inside this drain ({@linkcode AndroidAdapter.coveredSpan}):
+   * Drains are chronological tails of one append-only log: each is a contiguous
+   * run of rows, and the log's newest row only moves forward. What the trail
+   * already holds is therefore a set of DISJOINT covered runs —
+   * {@linkcode CoveredSpan}, oldest first — and this drain decides each of its
+   * rows by locating every span inside it ({@linkcode AndroidAdapter.spanHit}):
    *
-   *   - the whole covered sequence found as one contiguous block → the block and
-   *     everything up to its last row is covered → skipped; rows before it sit
-   *     below the earlier tail's cutoff, never drained → streamed now (a wider
-   *     `limit` back-fills them, once);
-   *   - only the covered sequence's TAIL found at the drain's head (a narrower
-   *     drain, or the oldest covered rows slid out of the buffer) → that overlap
+   *   - the span's retained keys found as one contiguous block of the drain →
+   *     the block and the span's rows directly below it are covered → skipped;
+   *     rows above the block sit below the earlier tail's cutoff, never drained
+   *     → streamed now (a wider `limit` back-fills them, once);
+   *   - the drain found inside a span's retained keys (a narrower read of an
+   *     already-covered stretch) → the whole drain is covered → skipped;
+   *   - only the span's key suffix found at the drain's head (the span
+   *     straddles the drain's cutoff — a narrower drain, the span's oldest rows
+   *     slid out of the buffer, or fresh rows arrived past it) → that overlap
    *     is skipped, everything after it streams;
-   *   - no overlap at all → the coverage predates this drain entirely → the
-   *     whole drain streams.
+   *   - no span located → the drain's rows are all fresh → they stream.
    *
-   * Matching the whole SEQUENCE — not a boundary key — is what keeps
+   * Everything outside the covered ranges streams — the fresh suffix, back-fill
+   * below an earlier cutoff, AND the unseen middle of a drain that bridged two
+   * disjoint spans. Matching whole key SEQUENCES — never a boundary key — keeps
    * byte-identical records honest: a drain holding two copies of one record ends
    * on the second copy, and only a sequence match finds it; a first-key
-   * `findIndex` would stop at the first copy and re-stream the rest. A narrower
-   * drain never SHRINKS the remembered coverage either (the rows it could not
-   * see stay remembered ahead of it), so wide → narrow → wide re-reads do not
-   * re-stream the rows the narrow drain temporarily hid. Under a fully periodic
-   * drain an overlap is genuinely ambiguous; the earliest (largest-skip) match
-   * wins, which never duplicates: two rows sharing a raw key format to the same
-   * trail line, so a skipped twin loses no content.
+   * `findIndex` would stop at the first copy and re-stream the rest. Under a
+   * fully periodic drain an overlap is genuinely ambiguous; the earliest
+   * (largest-skip) match wins, which never duplicates: two rows sharing a raw
+   * key format to the same trail line, so a skipped twin loses no content.
+   *
+   * After the drain its whole extent is covered (every row streamed or
+   * skipped), so it merges into one span — absorbing the spans it bridged,
+   * keeping a straddling span's retained rows on either side of the drain, and
+   * filing spans wholly below or above it where they were — and
+   * {@linkcode AndroidAdapter.capCoverage} bounds the retained keys, folding
+   * the oldest into the span's `below` count without forgetting their coverage.
    *
    * A failing sink never fails the read.
    */
   #streamRows(rows: RawLogcatRow[]): void {
     const sink = this.#onLog;
     const oldest = rows[0];
-    const newest = rows[rows.length - 1];
-    if (sink === undefined || oldest === undefined || newest === undefined) return;
+    if (sink === undefined || oldest === undefined) return;
     const keys = rows.map(rawRowKey);
-    const span = this.#coveredSpan(keys);
-    const coveredFrom = span === null ? -1 : span.from;
-    const coveredThrough = span === null ? -1 : span.to;
+    // Locate every covered span inside this drain, and file the spans it does
+    // not touch: disjoint from the drain, a span sits wholly below it (older
+    // than the drain's oldest row) or wholly above (newer than its newest).
+    const hits: SpanHit[] = [];
+    const below: CoveredSpan[] = [];
+    const above: CoveredSpan[] = [];
+    const drainStart = keyTime(rawRowKey(oldest));
+    for (const span of this.#covered) {
+      const hit = this.#spanHit(span, keys);
+      if (hit !== null) {
+        hits.push(hit);
+        continue;
+      }
+      const newest = span.keys[span.keys.length - 1];
+      if (newest !== undefined && keyTime(newest) < drainStart) below.push(span);
+      else above.push(span);
+    }
+    // Stream every row outside the union of the covered ranges.
+    const ranges = unionOfRanges(hits);
+    let cursor = 0;
     for (const [index, row] of rows.entries()) {
-      const backFilled = coveredFrom !== -1 && index < coveredFrom;
-      const arrived = coveredThrough === -1 || index > coveredThrough;
-      if (!backFilled && !arrived) continue;
+      let range = ranges[cursor];
+      while (range !== undefined && range.to < index) {
+        cursor++;
+        range = ranges[cursor];
+      }
+      if (range !== undefined && index >= range.from) continue;
       try {
         sink('console', formatConsoleLine(toConsoleEntry(row)));
       } catch (error) {
@@ -557,58 +640,115 @@ export class AndroidAdapter implements Adapter {
         );
       }
     }
-    // The window records what is covered NOW — the skipped overlap plus every
-    // streamed row — so the next read locates its overlap against it. A narrower
-    // drain extends the span; it never pulls the coverage start forward.
-    this.#rememberCoverage(keys, span);
+    // The drain's whole extent is covered now — every row streamed or skipped —
+    // so it becomes one span. A straddling span's retained rows stay remembered
+    // on either side of the drain; when several spans straddle (fully periodic
+    // content), the most coverage kept wins, which never duplicates.
+    let belowAnchored = 0;
+    let headKeys: string[] = [];
+    let tailKeys: string[] = [];
+    for (const hit of hits) {
+      if (hit.belowAnchored + hit.headKeys.length > belowAnchored + headKeys.length) {
+        belowAnchored = hit.belowAnchored;
+        headKeys = hit.headKeys;
+      }
+      if (hit.tailKeys.length > tailKeys.length) tailKeys = hit.tailKeys;
+    }
+    this.#covered = [
+      ...below,
+      { below: belowAnchored, keys: [...headKeys, ...keys, ...tailKeys] },
+      ...above,
+    ];
+    this.#capCoverage();
   }
 
   /**
-   * Locate the already-covered rows inside this drain's keys (both oldest
-   * first). Returns the covered span as inclusive `[from, to]` indexes into
-   * `keys`, or null when none of the coverage appears.
+   * Locate one covered span inside this drain's keys (both oldest first).
+   * Returns where the span's covered rows sit inside the drain — inclusive
+   * `[from, to]` indexes plus the span's covered rows outside the drain — or
+   * null when none of the span appears in it.
    */
-  #coveredSpan(keys: string[]): { from: number; to: number } | null {
-    const covered = this.#coveredKeys;
-    const m = covered.length;
+  #spanHit(span: CoveredSpan, keys: string[]): SpanHit | null {
+    const m = span.keys.length;
     const n = keys.length;
     if (m === 0 || n === 0) return null;
-    // The whole coverage as one contiguous block — a drain at least as wide as
-    // the span it covers. Earliest alignment wins (see the streamRows note).
+    // The span's retained keys as one contiguous block of the drain — a drain
+    // at least as wide as the span's retained window. Earliest alignment wins
+    // (see the streamRows note). The span's rows below the block are covered
+    // too: the retained ones are anchored by the block, the trimmed ones by the
+    // span's `below` count.
     if (n >= m) {
-      for (let from = 0; from + m <= n; from++) {
-        if (matchesAt(keys, from, covered)) return { from, to: from + m - 1 };
+      for (let i = 0; i + m <= n; i++) {
+        if (matchesAt(keys, i, span.keys)) {
+          return {
+            from: Math.max(0, i - span.below),
+            to: i + m - 1,
+            belowAnchored: span.below - Math.min(span.below, i),
+            headKeys: [],
+            tailKeys: [],
+          };
+        }
       }
     }
-    // Otherwise the drain's head sits inside the coverage: its longest suffix
-    // that matches the drain's prefix is the overlap (a narrower drain, or the
-    // covered oldest rows already slid out of the buffer).
+    // The drain as one contiguous block of the span's retained keys — a
+    // narrower read of an already-covered stretch. The whole drain is covered,
+    // and the span's retained rows on either side of it stay covered.
+    if (m >= n) {
+      for (let q = 0; q + n <= m; q++) {
+        if (matchesAt(span.keys, q, keys)) {
+          return {
+            from: 0,
+            to: n - 1,
+            belowAnchored: span.below,
+            headKeys: span.keys.slice(0, q),
+            tailKeys: span.keys.slice(q + n),
+          };
+        }
+      }
+    }
+    // Otherwise the drain's head sits inside the span: its longest suffix that
+    // matches the drain's prefix is the overlap (the span straddles the drain's
+    // cutoff, or its oldest rows slid out of the buffer).
     for (let r = Math.min(m, n); r >= 1; r--) {
-      if (overlapAtHead(covered, keys, r)) return { from: 0, to: r - 1 };
+      if (overlapAtHead(span.keys, keys, r)) {
+        return {
+          from: 0,
+          to: r - 1,
+          belowAnchored: span.below,
+          headKeys: span.keys.slice(0, m - r),
+          tailKeys: [],
+        };
+      }
     }
     return null;
   }
 
-  /** Extend the covered window by this drain — the overlap was skipped, the rest streamed. */
-  #rememberCoverage(keys: string[], span: { from: number; to: number } | null): void {
-    let grown: string[];
-    if (span === null) {
-      // No overlap located: the whole coverage predates this drain (it slid out
-      // of the buffer, or sits wholly below a too-narrow tail). Keep it — a
-      // later wider drain must not re-stream those rows — and extend by this drain.
-      grown = [...this.#coveredKeys, ...keys];
-    } else if (span.from === 0) {
-      // The drain starts inside the coverage: the remembered rows BELOW the
-      // drain (the coverage's head) stay remembered — a narrower drain must not
-      // shrink coverage — and the whole drain extends the span.
-      grown = [...this.#coveredKeys.slice(0, this.#coveredKeys.length - (span.to + 1)), ...keys];
-    } else {
-      // The coverage sat wholly inside the drain (its head rows were back-filled
-      // just now): the drain is the new coverage.
-      grown = keys;
+  /**
+   * Bound the retained coverage keys at {@linkcode MAX_COVERED_KEYS}, oldest
+   * first. A span's trimmed keys stay covered as its `below` count — the rows
+   * sit directly below the span's new first key, contiguous with it and
+   * anchored by it, so a later drain reaching them still skips them. A span
+   * always keeps one anchor key; when every span is down to its anchor and the
+   * cap still bites, the oldest spans drop whole — by then their rows left the
+   * logcat buffer long before (the anchor is newer, and the buffer drops rows
+   * oldest first).
+   */
+  #capCoverage(): void {
+    let total = this.#covered.reduce((sum, span) => sum + span.keys.length, 0);
+    for (const span of this.#covered) {
+      if (total <= MAX_COVERED_KEYS) break;
+      const droppable = span.keys.length - 1;
+      if (droppable <= 0) continue;
+      const drop = Math.min(droppable, total - MAX_COVERED_KEYS);
+      span.below += drop;
+      span.keys.splice(0, drop);
+      total -= drop;
     }
-    this.#coveredKeys =
-      grown.length > MAX_COVERED_KEYS ? grown.slice(grown.length - MAX_COVERED_KEYS) : grown;
+    while (total > MAX_COVERED_KEYS && this.#covered.length > 1) {
+      const dropped = this.#covered.shift();
+      if (dropped === undefined) break;
+      total -= dropped.keys.length;
+    }
   }
 
   /** Android exposes no network channel over ADB — unsupported, surfaced loud. */
