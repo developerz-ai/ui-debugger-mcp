@@ -182,6 +182,107 @@ test('DesktopTargetSchema: display accepts null, strict rejects unknown keys', (
   );
 });
 
+// --- the desktop launch contract, pinned on the doc comment -------------------
+
+const schemaSource = readFileSync(new URL('./schema.ts', import.meta.url), 'utf8');
+
+/**
+ * The doc comment immediately above `marker` in `source`.
+ *
+ * Returns '' when it cannot be located, so a caller can FAIL on the missing
+ * comment — a guard that skips its own assertions is worse than no guard.
+ */
+function docCommentAbove(source: string, marker: string): string {
+  const declaration = source.indexOf(marker);
+  if (declaration === -1) return '';
+  const before = source.slice(0, declaration);
+  const start = before.lastIndexOf('/**');
+  if (start === -1) return '';
+  const end = before.indexOf('*/', start);
+  if (end === -1) return '';
+  // Only whitespace may sit between the comment and the declaration it documents.
+  if (before.slice(end + 2).trim() !== '') return '';
+  return before.slice(start, end + 2);
+}
+
+/**
+ * Assert the desktop launch contract is stated by the given doc comment.
+ *
+ * Throws on any drift: the command-side rule (the launch command stays in the
+ * foreground and does not daemonize or background itself), the shell patterns to
+ * avoid, or the adapter's own `detached: true` spawn being read as a ban. The
+ * comment text is a PARAMETER — the caller reads it out of the source — so a
+ * test can feed this a mutated copy.
+ */
+function assertLaunchContractStated(comment: string): void {
+  const missing: string[] = [];
+  if (comment.trim() === '') missing.push('the doc comment is missing');
+  if (!/launch/i.test(comment)) {
+    missing.push('it never says the rule is about the launch command');
+  }
+  if (!/foreground/i.test(comment)) {
+    missing.push('it does not say the launch command stays in the foreground');
+  }
+  if (!/daemoniz/i.test(comment)) {
+    missing.push('it does not forbid the command to daemonize itself');
+  }
+  if (!/background/i.test(comment)) {
+    missing.push('it does not forbid the command to background itself');
+  }
+  // The shell patterns to avoid, named as such.
+  for (const pattern of ['`&`', '`nohup`', '`setsid`']) {
+    if (!comment.includes(pattern)) {
+      missing.push(`it does not name ${pattern} as a pattern to avoid`);
+    }
+  }
+  // The adapter spawns the command with `detached: true` ON PURPOSE — it owns
+  // that process group and kills the whole group in `close()`. The comment must
+  // not read as a ban on that flag, so the word may not appear here at all.
+  if (/detached/i.test(comment)) {
+    missing.push('it names `detached`, which is the spawn flag the adapter uses itself');
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `the DesktopTargetSchema doc comment misses the launch contract: ${missing.join('; ')}`,
+    );
+  }
+}
+
+test('DesktopTargetSchema: the doc comment states the foreground launch contract', () => {
+  const comment = docCommentAbove(schemaSource, 'export const DesktopTargetSchema');
+
+  // Extraction fails LOUD: an empty comment would leave every wording
+  // assertion below unchecked instead of guarding anything.
+  expect(comment.length).toBeGreaterThan(0);
+
+  assertLaunchContractStated(comment);
+});
+
+test('the launch-contract guard rejects the pre-fix comment', () => {
+  // The wording this guard replaces: it read as a ban on the adapter's own
+  // `detached: true` spawn and never named `setsid`.
+  const preFix = `/**
+ * Desktop target — X11/Xvfb + Wayland adapter. Managed launch.
+ *
+ * **Launch must stay foreground** (no daemonization via \`detached:true\`, \`&\`, \`nohup\`).
+ */`;
+
+  expect(() => assertLaunchContractStated(preFix)).toThrow(/detached/);
+  expect(() => assertLaunchContractStated(preFix)).toThrow(/setsid/);
+  expect(() => assertLaunchContractStated(preFix)).toThrow(/background/);
+});
+
+test('docCommentAbove: returns "" when the comment cannot be located', () => {
+  // The marker is not in the source at all.
+  expect(docCommentAbove(schemaSource, 'export const NoSuchSchema')).toBe('');
+  // No block comment precedes the declaration.
+  expect(docCommentAbove('const x = 1;\n', 'const x')).toBe('');
+  // The block comment is never closed.
+  expect(docCommentAbove('/** unterminated\nconst x = 1;\n', 'const x')).toBe('');
+  // The nearest block comment documents another declaration, not this one.
+  expect(docCommentAbove('/** doc */\nconst other = 1;\nconst x = 2;\n', 'const x')).toBe('');
+});
+
 test('AndroidTargetSchema: attach needs no `avd`, managed does', () => {
   // A physical device is `{adapter, adbSerial}` — attach binds straight to the serial and
   // never reads `avd`, so demanding one forced users to invent a fake AVD name.
