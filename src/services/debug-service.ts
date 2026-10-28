@@ -5,20 +5,16 @@
  * mid-flight, poll its findings, list targets, end it. Holds the cwd-keyed
  * {@link SessionManager} (the one-run-per-project gate) and the resolved config,
  * and delegates the heavy session assembly to an injected {@link SessionBuilder}
- * seam — so the orchestration here unit-tests with no browser or network. The MCP
- * handlers stay thin: validate input, call straight through to a method here.
+ * seam — so the orchestration here unit-tests with no browser or network.
  *
  * One run per project holds *across processes* too: the manager only knows this
  * server's memory, so `start` also consults the `state.json` breadcrumb and
  * refuses when another live server already owns a run here (a dead owner's stale
- * breadcrumb never blocks).
- *
- * The breadcrumb read is the FRIENDLY early refusal; the AUTHORITY is the
- * workspace's exclusive ownership claim, taken atomically by
- * {@link FileStatePort.record} when the breadcrumb is written. Two servers
- * starting in the same window both read "no foreign run" — only the claim
- * admits one of them, and the loser is refused with {@link SessionBusyError}
- * before a browser is launched.
+ * breadcrumb never blocks). That read is the FRIENDLY early refusal; the
+ * AUTHORITY is the workspace's exclusive ownership claim, taken atomically by
+ * {@link FileStatePort.record} — two servers starting in the same window both
+ * read "no foreign run", and only the claim admits one of them
+ * ({@link SessionBusyError}, before a browser is launched).
  *
  * Sessions are keyed by cwd, but the tools speak `session_id`. Every id-bearing
  * call resolves the active session for the cwd and fails loud
@@ -29,195 +25,57 @@
  * MCP client dying) leaves the manager, but its findings must not vanish with it:
  * the settled session is retained so `get_findings` keeps serving its terminal
  * snapshot. `end_session` is the explicit forget; the next `start_debug`
- * supersedes it. The retained snapshot holds no target resources (the adapter is
- * already closed) and never participates in the one-run gate.
+ * supersedes it. The snapshot holds no target resources and never gates a start.
+ *
+ * The pieces around this orchestration live in their own modules: the contract
+ * types in `debug-api.ts` (re-exported here, so no importer changes), the catalog
+ * projection in `catalog.ts`, the retained snapshot in `retained-snapshot.ts`
+ * and the start-time refusals in `start-guards.ts`.
  */
 
-import { isAdapterOperational } from '../adapters/availability.js';
-import { CONFIG_FILENAME, type ResolvedConfig } from '../config/load.js';
-import type { Target } from '../config/schema.js';
-import {
-  ConfigError,
-  SessionBusyError,
-  SessionNotFoundError,
-  SessionSettledError,
-  TargetNotFoundError,
-} from '../errors.js';
+import type { ResolvedConfig } from '../config/load.js';
+import { SessionBusyError, SessionNotFoundError, SessionSettledError } from '../errors.js';
 import { type Findings, FindingsSchema } from '../findings/schema.js';
 import type { SessionManager } from '../session/manager.js';
-import type { Session, SessionStatus, SnapshotField } from '../session/session.js';
+import type { Session, SnapshotField } from '../session/session.js';
 import { noopStatePort, type StatePort } from '../session/state-file.js';
 import { generateSessionId, workspacePaths } from '../session/workspace.js';
+import { selectTargets } from './catalog.js';
+import type {
+  Ack,
+  DebugApi,
+  DebugServiceDeps,
+  DescribeInput,
+  DescribeResult,
+  EndInput,
+  GetFindingsInput,
+  RunInfo,
+  SendInput,
+  StartInput,
+  StartResult,
+} from './debug-api.js';
+import { RetainedSnapshot } from './retained-snapshot.js';
 import type { SessionBuilder } from './session-builder.js';
+import { assertConfigFresh, assertNoForeignRun } from './start-guards.js';
+
+// The contract types live in `debug-api.ts` — the service stays what callers import.
+export type {
+  Ack,
+  DebugApi,
+  DebugServiceDeps,
+  DescribeInput,
+  DescribeResult,
+  EndInput,
+  GetFindingsInput,
+  RunInfo,
+  SendInput,
+  StartInput,
+  StartResult,
+  TargetInfo,
+} from './debug-api.js';
 
 /** Default wall-clock cap on a debug run before it auto-ends (overridable per run). */
 export const DEFAULT_SESSION_TIMEOUT_MS = 300_000;
-
-/** `start_debug` input — open a run for a configured target. */
-export interface StartInput {
-  target: string;
-  goal: string;
-  criteria?: string;
-  /** Per-run URL the caller points the driver at (web); overrides the target's configured url. */
-  url?: string;
-  /**
-   * Named auth persona to open the run as — a key in the target's `auth` map. The
-   * run signs in out-of-band before the driver's first step; an unknown key fails
-   * loud rather than running the goal signed out.
-   */
-  as?: string;
-  /**
-   * Take the project over instead of being refused when a run is already active
-   * here: end that run first (through the `end_session` path), then start.
-   *
-   * OFF by default, and it must stay off by default — a silent takeover kills a
-   * healthy run its own caller is still watching. Opt in when the active run is
-   * yours and you lost its id (a compacted context, a crashed client) or it is
-   * stuck. Only ever replaces a run THIS server owns; one held by another live
-   * server is still refused ({@link SessionBusyError}), since its browser is not
-   * ours to close.
-   */
-  replace?: boolean;
-  /**
-   * Wall-clock cap (ms) before the run auto-ends, counted from THIS call — assembly,
-   * launch and the first navigation spend it too. Defaults to
-   * {@link DEFAULT_SESSION_TIMEOUT_MS}.
-   */
-  timeoutMs?: number;
-}
-
-/** `start_debug` output — the id to poll/redirect/end the run by. */
-export interface StartResult {
-  session_id: string;
-}
-
-/** `send_message` input — inject a mid-run instruction. */
-export interface SendInput {
-  session_id: string;
-  message: string;
-}
-
-/** `send_message` / `end_session` acknowledgement. */
-export interface Ack {
-  ok: true;
-  session_id: string;
-}
-
-/** `get_findings` input — snapshot (optionally long-poll / project a subset). */
-export interface GetFindingsInput {
-  session_id: string;
-  wait?: number;
-  fields?: SnapshotField[];
-}
-
-/** `describe` input — the whole catalog, or one target when named. */
-export interface DescribeInput {
-  target?: string;
-}
-
-/** One target's public shape in the catalog (secrets stay out). */
-export interface TargetInfo {
-  name: string;
-  adapter: Target['adapter'];
-  /** `managed` = the server launches/owns it; `attach` = it connects to a running one. */
-  mode: 'managed' | 'attach';
-  /**
-   * Whether this adapter kind is available HERE: wired in this build AND
-   * supported on the host platform. It is NOT a launch promise — the target may
-   * be down, or its browser/emulator/device missing or disconnected; that fails
-   * loud at launch.
-   */
-  operational: boolean;
-  /** Web target entry url, when applicable. */
-  url?: string;
-  /** Web headless flag, when applicable. */
-  headless?: boolean;
-  /**
-   * Named auth personas configured for this target — the valid `start_debug({as})`
-   * values. NAMES ONLY; the credentials never leave `.ui-debugger-mcp.json`.
-   * Absent when the target has no `auth` block.
-   */
-  personas?: string[];
-  /**
-   * The target's standing `notes` — what is EXPECTED of this app (seeded data,
-   * onboarding modals, dark mode), verbatim from config. Also composed into the
-   * driver's prompt; surfaced here so a caller can see what the run was told.
-   */
-  notes?: string;
-}
-
-/**
- * The run this server holds for the project, as `describe` reports it — the way
- * back in-band for a caller that lost its `session_id` (a compacted context, a
- * client restart). Without it the only recovery was the out-of-band CLI.
- */
-export interface RunInfo {
-  /** Pass to `get_findings` / `send_message` / `end_session`. */
-  id: string;
-  /** `running`, or the verdict it settled on (still readable, still holding the slot). */
-  status: SessionStatus;
-  /** The goal this run was started with — enough to tell whose run it is. */
-  goal: string;
-}
-
-/** `describe` output — configured targets plus the resolved models + workspace. */
-export interface DescribeResult {
-  targets: TargetInfo[];
-  models: { driver: string; vision: string; summary: string };
-  /** Resolved per-project workspace root (`<base>/<project>`) — where evidence lands. */
-  workspace: string;
-  /**
-   * The active run for this project (or the retained snapshot of the last one that
-   * auto-ended). Absent when this server holds no run. A run another live server
-   * owns is NOT reported here — `start_debug` names that one in its refusal.
-   */
-  session?: RunInfo;
-}
-
-/** The surface the outer MCP tools call. Implemented by {@link DebugService}. */
-export interface DebugApi {
-  start(input: StartInput): Promise<StartResult>;
-  send(input: SendInput): Ack;
-  getFindings(input: GetFindingsInput): Promise<Findings | Partial<Findings>>;
-  describe(input: DescribeInput): DescribeResult;
-  end(input: EndInput): Promise<Ack>;
-}
-
-/** `end_session` input. */
-export interface EndInput {
-  session_id: string;
-}
-
-/** Everything the service needs, wired at boot. */
-export interface DebugServiceDeps {
-  /** The cwd-keyed registry (one run per project). */
-  manager: SessionManager<Session>;
-  /** Resolved project config — backs `describe` + target validation. */
-  config: ResolvedConfig;
-  /** This project's session key (one project = one cwd = one session). */
-  cwd: string;
-  /** Seam to the heavy session assembly; injected so `start` stays testable. */
-  build: SessionBuilder;
-  /** Cross-process run breadcrumb (`state.json`) for the CLI; defaults to a no-op. */
-  state?: StatePort;
-  /** Default wall-clock cap (ms) for a run; defaults to {@link DEFAULT_SESSION_TIMEOUT_MS}. */
-  defaultTimeoutMs?: number;
-  /** Injected clock (epoch ms) for session ids + the run deadline; defaults to `Date.now`. */
-  now?: () => number;
-  /**
-   * The host platform the adapter-availability rule is evaluated against;
-   * defaults to `process.platform`. Injected so `describe` reports the same
-   * fact on every host (the tests pin it).
-   */
-  platform?: NodeJS.Platform;
-  /**
-   * Has `.ui-debugger-mcp.json` changed since boot? Config is resolved once and
-   * wired into long-lived objects, so a changed file means every later run would
-   * silently use the OLD settings — see `config/fingerprint.ts`. Defaults to
-   * "never changed" (unit tests hold no file).
-   */
-  configChanged?: () => boolean;
-}
 
 /**
  * Narrow a findings object to the requested keys — the `fields` projection for a
@@ -247,11 +105,9 @@ export class DebugService implements DebugApi {
   #timer: ReturnType<typeof setTimeout> | undefined;
   /**
    * The last run that auto-ended (timeout / SIGTERM / client death), kept settled
-   * and closed so `get_findings` can still read its partial findings + evidence.
-   * Dropped by `end_session` (the explicit forget) and superseded by the next run.
-   * Never consulted by the one-run gate — a retained snapshot cannot block a start.
+   * and closed so `get_findings` can still read its findings. Never a gate.
    */
-  #retained: Session | undefined;
+  readonly #retained = new RetainedSnapshot();
   /**
    * The `start()` currently in flight (building/launching, slot not yet in the
    * manager), or `undefined`. Set synchronously before the first await so a
@@ -259,9 +115,8 @@ export class DebugService implements DebugApi {
    * racing a second browser onto the same profile.
    *
    * `controller` cancels it at the next checkpoint and `settled` resolves once it
-   * has finished tearing down (it never rejects) — so {@link endActive} can abort a
-   * launch *and wait for it*, instead of finding an empty manager and letting the
-   * process exit with a half-launched Chrome still holding the profile lock.
+   * has torn down (it never rejects) — so {@link endActive} can abort a launch
+   * *and wait for it*, instead of exiting with a half-launched Chrome on the lock.
    */
   #starting: { controller: AbortController; settled: Promise<void> } | undefined;
 
@@ -282,27 +137,24 @@ export class DebugService implements DebugApi {
    * the target, and kick the loop off in the background. Fails loud if a run is
    * already active for this cwd ({@link SessionBusyError}) — whether it belongs to
    * this server (the manager / in-flight guard) or to another live one (the
-   * `state.json` breadcrumb read, and then the workspace's exclusive ownership
-   * claim that the breadcrumb write takes); never leaks a launched browser — a
-   * lost lock race or a failed `open` tears the session back down.
+   * `state.json` breadcrumb read, and then the workspace's ownership claim);
+   * never leaks a launched browser — a lost lock race or a failed `open` tears
+   * the session back down.
    *
    * `timeout` is wall-clock from HERE: the deadline is fixed on entry and the
    * remaining budget is threaded into the build and the first navigation, so a slow
    * Chrome launch spends the caller's cap instead of sitting outside it.
    *
-   * The refusal is the default and stays the default; `replace: true` is the
-   * caller's explicit takeover. Either way the caller ends up with a way forward:
-   * the refusal names the active id and the exact calls that read, close or
-   * replace it, and `describe` reports that id at any time — so a lost session id
-   * is a detour, not the dead end that used to need the out-of-band CLI.
+   * The refusal is the default; `replace: true` is the caller's explicit takeover.
+   * Either way the caller has a way forward: the refusal names the active id and
+   * the calls that read, close or replace it, and `describe` reports that id.
    */
   async start(input: StartInput): Promise<StartResult> {
     const cwd = this.#cwd;
     // Checked first, and synchronously (no await before `#starting` is set) — a
     // concurrent start must fail here, not launch a second browser on the same
-    // profile. Ahead of `replace` on purpose: a run that is still opening owns no
-    // manager slot to hand over, and racing its teardown is how a half-launched
-    // Chrome gets orphaned on the profile lock.
+    // profile. Ahead of `replace` on purpose: a run still opening owns no manager
+    // slot to hand over, and racing its teardown orphans a half-launched Chrome.
     if (this.#starting !== undefined) {
       throw new SessionBusyError(
         `A debug session is already starting for '${cwd}' — one run per project at a time. ` +
@@ -323,8 +175,7 @@ export class DebugService implements DebugApi {
     // The previous run's teardown is still in flight: the manager freed its slot,
     // but its close has not settled, so the profile/browser it held is mid-release.
     // Launching now would race the ending run for those resources — refuse until
-    // the gate lifts, naming what the caller is waiting on (the manager refuses
-    // with the same message if its own start() is reached first).
+    // the gate lifts, naming what the caller waits on.
     const closing = this.#manager.closingId(cwd);
     if (closing !== undefined) {
       throw new SessionBusyError(
@@ -334,7 +185,7 @@ export class DebugService implements DebugApi {
     }
     // Before anything is launched: a run built from config the caller has already
     // replaced is worse than no run — it reproduces the very failure they just fixed.
-    this.#assertConfigFresh();
+    assertConfigFresh(this.#configChanged);
     const deadline = this.#now() + (input.timeoutMs ?? this.#defaultTimeoutMs);
     const controller = new AbortController();
     const attempt = this.#launch(input, deadline, controller.signal);
@@ -357,9 +208,8 @@ export class DebugService implements DebugApi {
   /**
    * The launch itself: breadcrumb, build, lock, open, arm. Every await is a
    * cancellation checkpoint — `signal` is the shutdown path asking this start to
-   * stop — and every failure (including a cancellation) tears down whatever
-   * already came up and drops the breadcrumb, so nothing is left holding the
-   * project's profile lock.
+   * stop — and every failure tears down whatever came up and drops the
+   * breadcrumb, so nothing is left holding the project's profile lock.
    */
   async #launch(
     { target, goal, criteria, url, as, replace }: StartInput,
@@ -370,26 +220,23 @@ export class DebugService implements DebugApi {
     /** Budget left on the caller's cap; never negative — a blown budget is simply spent. */
     const remaining = (): number => Math.max(0, deadline - this.#now());
 
-    // The friendly early refusal: another live server's breadcrumb already names
-    // a run here. It is a READ, so two servers starting in the same window can
-    // both see "no foreign run" — the AUTHORITATIVE admission is the exclusive
-    // ownership claim that `state.record()` takes below, atomically.
-    await this.#assertNoForeignRun(cwd);
+    // The friendly early refusal: another live server's breadcrumb already names a
+    // run here. It is a READ, so two servers in the same window can both see "no
+    // foreign run" — the AUTHORITATIVE admission is the claim `state.record()` takes.
+    await assertNoForeignRun(this.#state, cwd);
     // The caller asked to take the project over. Before the breadcrumb, so the
     // takeover's `clear()` cannot wipe the record of the run replacing it.
     if (replace === true) await this.#takeOverActive();
     const id = generateSessionId(this.#now());
-    // The breadcrumb goes down BEFORE the launch, not after it: a cold Chrome start
-    // takes 5-20s, and until `state.json` exists the run is invisible out-of-band —
-    // `status` prints "no debug run recorded" and `stop` never signals, while a real
-    // browser already holds the profile lock. It fails loud (a run the CLI cannot
-    // see is a run nobody can stop) — and here that costs nothing, since not one
-    // process has been launched yet.
+    // The breadcrumb goes down BEFORE the launch: a cold Chrome start takes 5-20s,
+    // and until `state.json` exists the run is invisible out-of-band — `status`
+    // prints "no debug run recorded" and `stop` never signals, while a real browser
+    // already holds the profile lock. It fails loud (a run the CLI cannot see is a
+    // run nobody can stop) — and here that costs nothing: nothing is launched yet.
     //
-    // Writing it also TAKES the workspace's exclusive ownership claim, which is
-    // the real gate: a live foreign owner refuses this write with
-    // {@link SessionBusyError} (naming its pid and session), so the loser never
-    // publishes a breadcrumb that would hide the winner's live run.
+    // Writing it also TAKES the workspace's ownership claim, the real gate: a live
+    // foreign owner refuses this write with {@link SessionBusyError} (naming its
+    // pid and session), so the loser never hides the winner's live run.
     await this.#state.record({ sessionId: id, target, goal });
 
     try {
@@ -413,7 +260,7 @@ export class DebugService implements DebugApi {
       }
       // This run owns the slot now — the previous run's retained snapshot is
       // superseded (its findings.json stays on disk for the CLI / a human).
-      this.#retained = undefined;
+      this.#retained.clear();
 
       try {
         await built.open(remaining());
@@ -430,9 +277,8 @@ export class DebugService implements DebugApi {
       return { session_id: id };
     } catch (err) {
       // Nobody holds this id, so nothing could ever end the run — leave no
-      // `running` breadcrumb pointing the CLI at a run that is already gone.
-      // Scoped to THIS attempt's id: a successor that recorded itself while the
-      // failure unwound (a raced takeover) must keep its breadcrumb.
+      // `running` breadcrumb pointing the CLI at a gone run. Scoped to THIS
+      // attempt's id: a successor that recorded itself meanwhile keeps its own.
       await this.#state.clear(id).catch(() => undefined);
       throw err;
     }
@@ -440,8 +286,7 @@ export class DebugService implements DebugApi {
 
   /**
    * Stop a start that the shutdown path has cancelled (SIGTERM, a CLI `stop`, the
-   * MCP client dying). The caller tears down whatever it had already built —
-   * teardown is exactly what the abort is for.
+   * MCP client dying). The caller tears down whatever it had already built.
    */
   #assertStartNotAborted(signal: AbortSignal, id: string): void {
     if (!signal.aborted) return;
@@ -453,16 +298,14 @@ export class DebugService implements DebugApi {
   }
 
   /**
-   * `replace: true` — end the run this server holds for the project so the new one
-   * can have it. No-op when nothing is active: replacing nothing is just a start.
+   * `replace: true` — end the run this server holds so the new one can have it.
+   * No-op when nothing is active: replacing nothing is just a start.
    *
-   * Deliberately routed through {@link end}, the very method `end_session` calls,
-   * rather than a private teardown: releasing a target correctly means the managed
-   * browser is STOPPED while an attached one is only DISCONNECTED, the wall-clock
-   * timer is cleared and the breadcrumb dropped — a second implementation of that
-   * would drift, and the drift would show up as a leaked Chrome sitting on the
-   * profile lock. A teardown that throws fails the start, loudly; the manager frees
-   * the slot before closing, so the project is not wedged either way.
+   * Deliberately routed through {@link end}, the very method `end_session` calls:
+   * releasing a target correctly means the managed browser is STOPPED while an
+   * attached one is only DISCONNECTED, the timer is cleared and the breadcrumb
+   * dropped — a second implementation of that would drift, and the drift would
+   * show up as a leaked Chrome on the profile lock.
    */
   async #takeOverActive(): Promise<void> {
     if (!this.#manager.has(this.#cwd)) return;
@@ -470,52 +313,9 @@ export class DebugService implements DebugApi {
   }
 
   /**
-   * Refuse to start on config this server can no longer honour.
-   *
-   * The message names the one action that works. Without it the caller edits the
-   * file, sees the identical failure, and has no way to tell a bad fix from an
-   * unread one — which is exactly how a real session burned two runs.
-   */
-  #assertConfigFresh(): void {
-    if (!this.#configChanged()) return;
-    throw new ConfigError(
-      `${CONFIG_FILENAME} changed on disk after this ui-debugger-mcp server started, so a run now ` +
-        'would still use the OLD settings (models, targets, urls are read once at boot). ' +
-        'Restart the MCP server to pick the new config up — in Claude Code, /mcp → reconnect ' +
-        'ui-debugger, or restart the session.',
-    );
-  }
-
-  /**
-   * The other half of the one-run gate: another *live* server process holding a
-   * run on this project. The manager only sees this process's memory, so without
-   * this a second MCP client on the same cwd would launch a second run onto the
-   * same profile/emulator and overwrite the live breadcrumb (leaving the CLI
-   * pointing at the wrong pid). A dead or PID-recycled owner does not count — a
-   * crashed server's stale `running` file must never wedge the project shut.
-   *
-   * This is the FRIENDLY early refusal, not the authority: it reads the
-   * breadcrumb, so two servers starting in the same window can both pass it.
-   * The authoritative admission is the workspace's exclusive ownership claim,
-   * taken atomically by the breadcrumb write in {@link #launch} — a refused
-   * claim surfaces as {@link SessionBusyError} from there.
-   */
-  async #assertNoForeignRun(cwd: string): Promise<void> {
-    const foreign = await this.#state.foreignRun();
-    if (foreign === null) return;
-    throw new SessionBusyError(
-      `Another ui-debugger-mcp server (pid ${foreign.pid}) already has a debug session ` +
-        `('${foreign.sessionId}') active for '${cwd}'. One run per project at a time. ` +
-        `Read what it is doing with get_findings({session_id:'${foreign.sessionId}'}) — a run ` +
-        'that has already settled is just waiting to be closed by its own client. To take the ' +
-        "project over, run 'ui-debugger-mcp stop' in this directory, then start again.",
-    );
-  }
-
-  /**
-   * Arm the wall-clock cap on what is LEFT of the run's budget: auto-end the run when
-   * it fires (replaces any prior timer). `0` — the launch outlived the whole cap —
-   * ends the run on the next tick rather than granting it a fresh one.
+   * Arm the wall-clock cap on what is LEFT of the run's budget: auto-end the run
+   * when it fires (replacing any prior timer). `0` — the launch outlived the whole
+   * cap — ends the run on the next tick, not with a fresh one.
    */
   #armTimeout(ms: number): void {
     this.#clearTimeout();
@@ -536,7 +336,7 @@ export class DebugService implements DebugApi {
   /**
    * Queue a mid-run instruction for the active run's driver. Fails loud
    * ({@link SessionSettledError}) once the run has settled — the loop no longer
-   * drains the inbox, so an ack then would silently drop the message.
+   * drains the inbox, so an ack then would drop the message.
    */
   send({ session_id, message }: SendInput): Ack {
     const session = this.#require(session_id);
@@ -553,8 +353,7 @@ export class DebugService implements DebugApi {
   /**
    * Snapshot the run's findings — optionally long-poll (`wait`) and/or project a
    * subset (`fields`). Serves the retained terminal snapshot once the run has
-   * auto-ended, so a timed-out run's partial findings stay reachable (the
-   * long-poll returns at once: a settled run has nothing left to wait for).
+   * auto-ended, so a timed-out run's findings stay reachable.
    */
   async getFindings({
     session_id,
@@ -567,8 +366,7 @@ export class DebugService implements DebugApi {
     } catch (error) {
       // Our own memory has no such run — but another live server on this project
       // might, and `start_debug` has already named that session to this caller.
-      // Answering "no such session" there is a contradiction that sends the
-      // caller into a retry loop; serve what that run has flushed instead.
+      // Answering "no such session" there is a contradiction; serve what it flushed.
       const foreign = await this.#foreignSnapshot(session_id);
       if (foreign) return fields ? projectFindings(foreign, fields) : foreign;
       throw error;
@@ -577,9 +375,8 @@ export class DebugService implements DebugApi {
   }
 
   /**
-   * A foreign run's findings as last flushed to disk, or `null` if this id names
-   * no such run. Read-only and point-in-time: we do not own that run, so there is
-   * nothing to long-poll — the owning server is the one advancing it.
+   * A foreign run's findings as last flushed to disk, or `null` if this id names no
+   * such run — we do not own that run, so there is nothing to long-poll.
    */
   async #foreignSnapshot(session_id: string): Promise<Findings | null> {
     const raw = await this.#state.foreignFindings(session_id);
@@ -590,18 +387,12 @@ export class DebugService implements DebugApi {
 
   /** List configured targets (the whole catalog, or one when named) plus resolved models/workspace. */
   describe({ target }: DescribeInput): DescribeResult {
-    const entries = Object.entries(this.#config.targets);
-    const selected = target === undefined ? entries : entries.filter(([name]) => name === target);
-    if (target !== undefined && selected.length === 0) {
-      throw new TargetNotFoundError(`target '${target}' not found in config.targets`);
-    }
+    const targets = selectTargets(this.#config.targets, target, this.#platform);
     const session = this.#currentRun();
     return {
-      targets: selected.map(([name, config]) => describeTarget(name, config, this.#platform)),
+      targets,
       models: this.#config.models,
-      // The RESOLVED per-project root, not the raw config string: the caller joins
-      // this to the relative evidence paths it gets back, and `./tmp/ui-debugger-mcp`
-      // would send it looking one directory short of where anything lands.
+      // The RESOLVED per-project root, not the raw config string (a directory short).
       workspace: workspacePaths(this.#cwd, this.#config.workspace).root,
       ...(session && { session }),
     };
@@ -609,42 +400,38 @@ export class DebugService implements DebugApi {
 
   /**
    * The run this server holds for the project — the active one, or the retained
-   * snapshot of the last run that auto-ended (both are readable and both are
-   * `end_session`-able by their id). `undefined` when there is none.
+   * snapshot of the last run that auto-ended (both readable, both `end_session`-able
+   * by their id). `undefined` when there is none.
    *
-   * This is the in-band answer to a lost `session_id`: without it, a caller whose
-   * context was compacted mid-conversation could neither read the run nor close
-   * it, and the only recovery left was `ui-debugger-mcp stop` in a shell the
-   * caller may not have. A start still in flight is deliberately not reported —
-   * it has no id to hand out yet, and the busy error says to wait for it.
+   * The in-band answer to a lost `session_id`: without it a compacted caller could
+   * neither read the run nor close it, and the only recovery left was the out-of-band
+   * CLI. A start still in flight is not reported — it has no id yet.
    */
   #currentRun(): RunInfo | undefined {
-    const session = this.#manager.has(this.#cwd) ? this.#manager.get(this.#cwd) : this.#retained;
+    const session = this.#manager.has(this.#cwd)
+      ? this.#manager.get(this.#cwd)
+      : this.#retained.peek();
     if (session === undefined) return undefined;
     return { id: session.id, status: session.status, goal: session.story };
   }
 
   /**
    * End the active run: abort the loop, close the adapter, free the profile lock.
-   * Ending a run that already auto-ended (timeout / client death) is not an error
-   * — it just forgets the retained snapshot, so `end_session` reads the same
-   * either way and stays the one explicit forget.
+   * Ending a run that already auto-ended is not an error — it just forgets the
+   * retained snapshot, so `end_session` stays the one explicit forget.
    */
   async end({ session_id }: EndInput): Promise<Ack> {
     if (this.#forgetRetained(session_id)) return { ok: true, session_id };
     this.#require(session_id);
     this.#clearTimeout();
-    // Clear the breadcrumb even when the close throws: the manager frees the slot
-    // before closing, so a stale `running` state.json would make a later CLI
-    // `stop` SIGTERM a healthy server. The close error still propagates.
     try {
       await this.#manager.end(this.#cwd);
     } finally {
       // Clear the breadcrumb even when the close throws: the manager frees the slot
       // before closing, so a stale `running` state.json would make a later CLI
       // `stop` SIGTERM a healthy server. The close error still propagates. Scoped
-      // to `session_id` — `#require` verified it against the active session — so a
-      // successor that records itself while this teardown is in flight is untouched.
+      // to `session_id` — `#require` verified it — so a successor that records
+      // itself while this teardown is in flight is untouched.
       await this.#state.clear(session_id);
     }
     return { ok: true, session_id };
@@ -652,15 +439,13 @@ export class DebugService implements DebugApi {
 
   /**
    * End whatever run is active for this cwd, if any — the graceful-shutdown path
-   * for a SIGTERM/SIGINT, a CLI `stop`, or the wall-clock timeout firing. No-op
-   * when nothing is running.
+   * for a SIGTERM/SIGINT, a CLI `stop`, or the wall-clock timeout firing.
    */
   async endActive(): Promise<void> {
     this.#clearTimeout();
     // A start still in flight owns no manager slot yet, so the check below would
     // sail straight past a Chrome that is mid-launch: cancel it and WAIT for its
-    // teardown, or the process exits with a browser still holding the profile lock
-    // and every later run fails with "Chrome profile ... is locked".
+    // teardown, or the process exits with a browser on the profile lock.
     const starting = this.#starting;
     if (starting !== undefined) {
       starting.controller.abort();
@@ -669,9 +454,9 @@ export class DebugService implements DebugApi {
     if (!this.#manager.has(this.#cwd)) return;
     // Nobody asked for this end, so nobody has read the results yet: retain the
     // session (settled + closed) so `get_findings` still serves them. Captured
-    // before the close, so even a failing teardown leaves the findings reachable.
+    // before the close, so a failing teardown leaves them reachable anyway.
     const ending = this.#manager.get(this.#cwd);
-    this.#retained = ending;
+    this.#retained.retain(ending);
     // Same contract as `end()`: the breadcrumb clears even when the close throws —
     // scoped to the run being ENDED, never a successor's.
     try {
@@ -683,34 +468,22 @@ export class DebugService implements DebugApi {
 
   /**
    * Resolve the session a read names: the active run, or — once the manager is
-   * empty — the retained snapshot of the last auto-ended run, so a timed-out run's
-   * partial findings stay readable by their id until `end_session` or the next
-   * `start_debug`. A different id still fails loud.
+   * empty — the retained snapshot of the last auto-ended run. A different id fails loud.
    */
   #requireReadable(session_id: string): Session {
-    const retained = this.#retained;
-    if (retained === undefined || this.#manager.has(this.#cwd)) {
+    if (this.#manager.has(this.#cwd) || this.#retained.peek() === undefined) {
       return this.#require(session_id);
     }
-    if (retained.id !== session_id) {
-      throw new SessionNotFoundError(
-        `No active debug session '${session_id}' for '${this.#cwd}' (the last run '${retained.id}' ` +
-          'has ended; its findings are still readable under that id).',
-      );
-    }
-    return retained;
+    return this.#retained.requireRetained(session_id, this.#cwd);
   }
 
   /**
-   * Forget the retained snapshot when the caller's `end_session` names it — the
-   * run is already torn down, so there is nothing left to close. Returns whether
-   * the id was the retained one (and it is now forgotten).
+   * Forget the retained snapshot when the caller's `end_session` names it — the run
+   * is already torn down. Returns whether the id was the retained one.
    */
   #forgetRetained(session_id: string): boolean {
     if (this.#manager.has(this.#cwd)) return false;
-    if (this.#retained?.id !== session_id) return false;
-    this.#retained = undefined;
-    return true;
+    return this.#retained.forget(session_id);
   }
 
   /** Resolve the active session for this cwd, asserting its id matches the caller's. */
@@ -723,42 +496,4 @@ export class DebugService implements DebugApi {
     }
     return session;
   }
-}
-
-/** Whether a target is in attach mode (connects to a running instance, never start/stop). */
-function isAttach(target: Target): boolean {
-  if (target.adapter === 'browser') return target.cdpUrl != null;
-  if (target.adapter === 'android') return target.adbSerial != null;
-  return false;
-}
-
-/**
- * Project one configured target onto its public {@link TargetInfo} (no secrets).
- *
- * `operational` is DERIVED, never hardcoded: the adapter kind must be wired in
- * this build AND supported on the host platform (see `adapters/availability.ts`).
- */
-function describeTarget(name: string, target: Target, platform: NodeJS.Platform): TargetInfo {
-  const base: TargetInfo = {
-    name,
-    adapter: target.adapter,
-    mode: isAttach(target) ? 'attach' : 'managed',
-    operational: isAdapterOperational(target.adapter, platform),
-    // What the project declares is EXPECTED of this app — the driver already gets
-    // it in its prompt; the caller sees it here so "the table is empty" coming back
-    // as a non-finding is explainable without opening the config file.
-    ...(target.notes !== undefined && { notes: target.notes }),
-  };
-  if (target.adapter === 'browser') {
-    // Persona NAMES are the discoverable half — a caller can pick a valid `as`
-    // without opening the config file, and never sees the values.
-    const personas = Object.keys(target.auth ?? {});
-    return {
-      ...base,
-      url: target.url,
-      headless: target.headless,
-      ...(personas.length > 0 && { personas }),
-    };
-  }
-  return base;
 }
