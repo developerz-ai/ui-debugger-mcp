@@ -125,13 +125,17 @@ on a node you can see → check for \`frame\`, and prefer clicking the node obje
 ### Tabs — a click can open one
 
 With more than one tab open, every \`act\` result carries \`tabs\`
-(\`index\`, \`url\`, \`title\`, \`active\`). A click on an external link, an OAuth button
+(\`index\`, \`url\`, \`title\`, \`active\`, \`visible\`). \`active\` means the controlled
+page; \`visible\` measures live document visibility, NOT OS-window focus. Attachment
+adopts a page without foregrounding it, so an active page can be hidden.
+A click on an external link, an OAuth button
 or \`target="_blank"\` opens a new tab and **you stay on the old one** — a click that
 seems to have done nothing means check \`tabs\` before calling the button broken.
 
 - \`observe({kind:"tabs"})\` — list them.
-- \`act({action:"switch_tab", target:"1"})\` — drive tab 1 from now on. Console and
-  network capture follow you; the previous tab's records are kept.
+- \`act({action:"switch_tab", target:"1"})\` — drive tab 1 from now on and explicitly
+  bring it forward. Console and network capture follow you; the previous tab's
+  records are kept.
 
 Switch back the same way when the popup flow is done.
 `;
