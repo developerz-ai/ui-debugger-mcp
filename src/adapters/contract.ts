@@ -235,6 +235,17 @@ export interface NetworkEntry {
   tab?: string;
 }
 
+/**
+ * Where captured console/network lines are streamed — the seam between an
+ * adapter's capture and the run's durable log trail.
+ *
+ * Declared HERE, in the contract, because two adapters stream to it (the browser's
+ * CDP capture and the android logcat drain): a second declaration would be a second
+ * type identity for the same seam. `browser/cdp.ts` re-exports it, so every reader
+ * of the capture channel keeps its import path.
+ */
+export type CaptureSink = (channel: 'console' | 'network', line: string) => void;
+
 /** One open tab/window of a multi-tab target (web). */
 export interface TabInfo {
   /** Position in the target's tab list — what {@link Adapter.selectTab} takes. */

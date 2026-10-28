@@ -31,7 +31,7 @@
  */
 
 import type { ConsoleMessage, Page, Request, Response } from 'playwright-core';
-import type { ConsoleEntry, LogQuery, NetworkEntry } from '../contract.js';
+import type { CaptureSink, ConsoleEntry, LogQuery, NetworkEntry } from '../contract.js';
 import { capToLimit } from '../limit.js';
 import { filterConsole, filterNetwork } from './log-filters.js';
 import {
@@ -44,9 +44,12 @@ import {
 } from './log-format.js';
 import type { TabContext } from './tab-context.js';
 
+// The capture seam is declared in the contract (two adapters stream to it now)
+// and re-exported here, so `cdp.js` stays the single import surface for the
+// capture channel — every existing reader keeps its import path and type identity.
 // Filtering lives in `log-filters.ts` and rendering/redaction in `log-format.ts`
-// (500-LOC cap); both are re-exported here so `cdp.js` stays the single import
-// surface for the capture channel.
+// (500-LOC cap); both are re-exported here for the same reason.
+export type { CaptureSink } from '../contract.js';
 export {
   CONSOLE_FILTER_KEYS,
   filterConsole,
@@ -151,13 +154,6 @@ async function readHeaders(
     return undefined;
   }
 }
-
-/**
- * Where captured entries are streamed as formatted log lines. The session layer
- * binds this to `findings-store`'s append-only `console`/`network` channels; the
- * adapter stays decoupled from the session (depends on this seam, not the store).
- */
-export type CaptureSink = (channel: 'console' | 'network', line: string) => void;
 
 export interface CdpCaptureInit {
   /** Page that emits `console`/`pageerror`/`requestfailed`/`response`. */

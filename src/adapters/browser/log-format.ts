@@ -2,10 +2,14 @@
  * Rendering + redaction for captured console/network entries.
  *
  * Split out of `cdp.ts` to keep that file under the 500-LOC cap — no behavior
- * change. Everything here is pure: level normalization, body truncation, the two
- * `logs/*.log` line renderers, and the two redactors that keep a credential out
- * of the model's context and out of the durable trail (a secret in a header
+ * change. Everything here is pure: level normalization, body truncation, the
+ * `logs/network.log` line renderer, and the two redactors that keep a credential
+ * out of the model's context and out of the durable trail (a secret in a header
  * VALUE, or in a query param of the URL itself).
+ *
+ * The console-line renderer is SHARED (the android logcat drain renders the
+ * same shape), so it lives in `src/adapters/log-format.ts` and is re-exported
+ * here — every existing reader keeps its import path.
  *
  * Both renderers put the TAB MARKER between the timestamp and the row
  * (`<ISO> [tab-1] LEVEL text @ location`, `<ISO> [tab-1] METHOD url → 200 …`),
@@ -15,6 +19,9 @@
  */
 
 import type { ConsoleEntry, NetworkEntry } from '../contract.js';
+import { stamp, tabMarker } from '../log-format.js';
+
+export { formatConsoleLine } from '../log-format.js';
 
 /**
  * Per-body character cap. Big enough for an error payload or a small collection,
@@ -106,28 +113,6 @@ export function normalizeConsoleLevel(type: string): ConsoleEntry['level'] {
 }
 
 // --- Line formatting (durable log trail) ------------------------------------
-
-/** ISO-8601 stamp from epoch ms; deterministic given the injected clock. */
-function stamp(ts: number): string {
-  return new Date(ts).toISOString();
-}
-
-/**
- * The tab marker, between the timestamp and the row — ` [tab-1]`.
- *
- * Empty when the entry carries no tab (a target without tabs — desktop,
- * mobile): such a row renders byte-identically to the line it rendered before
- * the marker existed.
- */
-function tabMarker(tab: string | undefined): string {
-  return tab === undefined ? '' : ` [${tab}]`;
-}
-
-/** Render a {@link ConsoleEntry} as one greppable `logs/console.log` line. */
-export function formatConsoleLine(entry: ConsoleEntry): string {
-  const where = entry.location ? ` @ ${entry.location}` : '';
-  return `${stamp(entry.timestamp)}${tabMarker(entry.tab)} ${entry.level.toUpperCase()} ${entry.text}${where}`;
-}
 
 /** One log line's worth of a captured body — single-line, hard-capped, never secret-bearing. */
 function bodySnippet(label: string, body: string | undefined): string {
