@@ -54,6 +54,7 @@ function slug(label: string): string {
 
 export class FindingsStore {
   readonly #paths: SessionPaths;
+  readonly #redact: (text: string) => string;
   /** Cached mkdir promise — directories are ensured once per instance. */
   #dirsReady: Promise<void> | null = null;
   /** Cached seed scan — the disk is scanned once per instance (resume-safe). */
@@ -61,8 +62,9 @@ export class FindingsStore {
   /** Highest screenshot sequence handed out; valid once `#seqReady` settles. */
   #screenshotSeq = 0;
 
-  constructor(paths: SessionPaths) {
+  constructor(paths: SessionPaths, redact: (text: string) => string = (text) => text) {
     this.#paths = paths;
+    this.#redact = redact;
   }
 
   /** Validate + write `findings.json` (overwrites). Returns its path. */
@@ -74,10 +76,37 @@ export class FindingsStore {
         .join('; ');
       throw new FindingsError(`Refusing to write invalid findings: ${issues}`);
     }
+    // Redact payload values, never serialized JSON: secrets can match enum values
+    // or contain JSON syntax. Parsing already made a fresh object, not caller data.
+    const data = result.data;
+    const optional = (text: string | undefined) =>
+      text === undefined ? undefined : this.#redact(text);
+    const safe: Findings = {
+      ...data,
+      steps: data.steps.map((step) => ({
+        ...step,
+        step: this.#redact(step.step),
+        note: optional(step.note),
+        screenshot: optional(step.screenshot),
+      })),
+      bugs: data.bugs.map((bug) => ({
+        ...bug,
+        detail: this.#redact(bug.detail),
+        evidence: optional(bug.evidence),
+      })),
+      visual: data.visual.map((issue) => ({
+        ...issue,
+        issue: this.#redact(issue.issue),
+        where: this.#redact(issue.where),
+        screenshot: optional(issue.screenshot),
+      })),
+      summary: optional(data.summary),
+      evidence: optional(data.evidence),
+    };
     await this.#ensureDirs();
     // Write-then-rename so a concurrent reader (get_findings, CLI `status`) never
     // sees a torn/empty findings.json — rename is atomic on the same filesystem.
-    await writeFileAtomic(this.#paths.findingsJson, `${JSON.stringify(result.data, null, 2)}\n`);
+    await writeFileAtomic(this.#paths.findingsJson, `${JSON.stringify(safe, null, 2)}\n`);
     return this.#paths.findingsJson;
   }
 

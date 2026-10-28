@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createSecretRedactor } from '../adapters/browser/log-format.js';
 import { FindingsError } from '../errors.js';
-import type { Findings } from '../findings/schema.js';
+import { type Findings, FindingsSchema } from '../findings/schema.js';
 import { FindingsStore } from './findings-store.js';
 import { sessionPaths, workspacePaths } from './workspace.js';
 
@@ -218,6 +219,72 @@ test('tryReadFindings still throws FindingsError when the file exists but is cor
     fs.writeFile(sp.findingsJson, 'not-json!!', 'utf8'),
   );
   await expect(store.tryReadFindings()).rejects.toBeInstanceOf(FindingsError);
+});
+
+test('write boundary redacts text only, without mutating input, on every disk write', async () => {
+  const secrets = ['a"b\\c d@local', 'failed', 'flow', 'high', 'step'];
+  const spellings = secrets.flatMap((value) => [
+    value,
+    encodeURIComponent(value),
+    encodeURIComponent(value).replaceAll('%20', '+'),
+    JSON.stringify(value).slice(1, -1),
+  ]);
+  const text = `context: ${spellings.join(' | ')}`;
+  const redact = createSecretRedactor(secrets);
+  const paths = sessionPaths(workspacePaths('/project/my-app', tmpDir), 'redacted');
+  const redactedStore = new FindingsStore(paths, redact);
+  const input: Findings = {
+    status: 'failed',
+    steps: [{ step: text, ok: false, skipped: true, note: text, screenshot: text }],
+    bugs: [{ kind: 'flow', detail: text, evidence: text }],
+    visual: [{ issue: text, where: text, severity: 'high', screenshot: text }],
+    summary: text,
+    evidence: text,
+  };
+  const original = structuredClone(input);
+  const expected: Findings = {
+    status: 'failed',
+    steps: [
+      {
+        step: redact(text),
+        ok: false,
+        skipped: true,
+        note: redact(text),
+        screenshot: redact(text),
+      },
+    ],
+    bugs: [{ kind: 'flow', detail: redact(text), evidence: redact(text) }],
+    visual: [
+      { issue: redact(text), where: redact(text), severity: 'high', screenshot: redact(text) },
+    ],
+    summary: redact(text),
+    evidence: redact(text),
+  };
+  for (const status of ['running', 'failed'] as const) {
+    const writeInput = { ...input, status };
+    expect(await redactedStore.writeFindings(writeInput)).toBe(paths.findingsJson);
+    const raw = await readFile(paths.findingsJson, 'utf8');
+    // Enum-like secrets legitimately remain in structure, never in payload text.
+    for (const value of spellings.slice(0, 4)) {
+      expect(raw).not.toContain(value);
+      expect(raw).not.toContain(JSON.stringify(value).slice(1, -1));
+    }
+    expect(FindingsSchema.parse(JSON.parse(raw))).toEqual({ ...expected, status });
+    expect(await redactedStore.readFindings()).toEqual({ ...expected, status });
+    expect(writeInput).toEqual({ ...original, status });
+  }
+  expect(input).toEqual(original);
+});
+
+test('default and empty-persona redactors preserve textual payloads on disk', async () => {
+  const input = { ...VALID_FINDINGS, summary: 'unselected a"b\\c d@local' };
+  for (const redact of [undefined, createSecretRedactor([])]) {
+    const paths = sessionPaths(workspacePaths('/project/my-app', tmpDir), 'identity');
+    const identity = new FindingsStore(paths, redact);
+    await identity.writeFindings(input);
+    expect(await identity.readFindings()).toEqual(input);
+    expect(JSON.parse(await readFile(paths.findingsJson, 'utf8'))).toEqual(input);
+  }
 });
 
 // --- failed / running status -------------------------------------------------
