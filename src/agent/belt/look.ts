@@ -24,6 +24,7 @@ import { generateText, tool } from 'ai';
 import { z } from 'zod';
 import type { Adapter } from '../../adapters/contract.js';
 import { AgentError, VisionUnavailableError } from '../../errors.js';
+import { VISUAL_SEVERITIES } from '../../findings/schema.js';
 import type { ActTrail } from './trail.js';
 
 /** `look` input — both optional: ask a `question`, and/or state the `expect`ed look. */
@@ -40,14 +41,11 @@ export const LookInputSchema = z.object({
 
 export type LookInput = z.infer<typeof LookInputSchema>;
 
-/** Severity of a visual issue — mirrors the findings `VisualIssue` scale. */
-const SEVERITIES = ['low', 'medium', 'high'] as const;
-
 /** One visual issue the vision guy flags: what, where, and how bad. */
 const LookIssueSchema = z.object({
   what: z.string().describe('the visual problem, e.g. "text is cut off"'),
   where: z.string().describe('where on screen, e.g. "top-right card header"'),
-  severity: z.enum(SEVERITIES).describe('low (polish) | medium (off) | high (broken)'),
+  severity: z.enum(VISUAL_SEVERITIES).describe('low (polish) | medium (off) | high (broken)'),
 });
 
 export type LookIssue = z.infer<typeof LookIssueSchema>;
@@ -107,7 +105,7 @@ Reply with ONLY this JSON object — no prose, no markdown fences:
   "description": "what you see, answering the question if one was asked",
   "matches": true,            // ONLY when an expected look was given: does it match?
   "issues": [                 // [] when there are none
-    { "what": "the problem", "where": "where on screen", "severity": "low" | "medium" | "high" }
+    { "what": "the problem", "where": "where on screen", "severity": ${VISUAL_SEVERITIES.map((s) => `"${s}"`).join(' | ')} }
   ]
 }
 

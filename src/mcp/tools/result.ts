@@ -19,6 +19,7 @@
  */
 
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { EVIDENCE_FIELD_NAMES } from '../../findings/schema.js';
 
 /** A plain object value (not an array) — what every outer tool returns. */
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -28,8 +29,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Cap on a top-level array field before it gets truncated for the response. */
 export const MAX_LIST_ITEMS = 20;
 
-/** Keys whose string value — when an absolute path — is evidence worth linking. */
-export const EVIDENCE_KEYS = new Set(['screenshot', 'evidence']);
+/** Keys whose string value — when an absolute path — is evidence worth linking.
+ * Sourced from the findings schema — the canonical owner of findings field names. */
+export const EVIDENCE_KEYS: ReadonlySet<string> = new Set<string>(EVIDENCE_FIELD_NAMES);
 
 type ResourceLinkContent = Extract<CallToolResult['content'][number], { type: 'resource_link' }>;
 

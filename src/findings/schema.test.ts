@@ -1,5 +1,12 @@
 import { expect, test } from 'bun:test';
-import { FindingsSchema } from './schema.js';
+import {
+  BUG_KINDS,
+  EVIDENCE_FIELD_NAMES,
+  FINDINGS_STATUSES,
+  FindingsSchema,
+  TERMINAL_STATUSES,
+  VISUAL_SEVERITIES,
+} from './schema.js';
 
 test('parses minimal running findings', () => {
   const result = FindingsSchema.parse({ status: 'running' });
@@ -49,4 +56,24 @@ test('rejects invalid visual severity', () => {
       visual: [{ issue: 'x', where: 'y', severity: 'critical' }],
     }),
   ).toThrow();
+});
+
+test('the findings vocabulary is exactly this pinned list', () => {
+  expect([...FINDINGS_STATUSES]).toEqual(['running', 'passed', 'failed']);
+  expect([...TERMINAL_STATUSES]).toEqual(['passed', 'failed']);
+  expect([...VISUAL_SEVERITIES]).toEqual(['low', 'medium', 'high']);
+  expect([...BUG_KINDS]).toEqual(['console', 'network', 'flow']);
+  expect([...EVIDENCE_FIELD_NAMES]).toEqual(['screenshot', 'evidence']);
+});
+
+test('every terminal status is a findings status', () => {
+  for (const status of TERMINAL_STATUSES) {
+    expect([...FINDINGS_STATUSES]).toContain(status);
+  }
+});
+
+test('every findings status parses', () => {
+  for (const status of FINDINGS_STATUSES) {
+    expect(FindingsSchema.parse({ status }).status).toBe(status);
+  }
 });
