@@ -156,7 +156,7 @@ console + network) AND to the android adapter (logcat rows,
 `src/adapters/factory.ts`). The web half is PUSH-based: the page's console
 streams as it happens. The android half is READ-driven —
 `AndroidAdapter.console()` streams the logcat rows it parses
-(`src/adapters/android/android-adapter.ts:433`) — so a mobile run writes
+(`src/adapters/android/android-adapter.ts:459`) — so a mobile run writes
 `logs/console.log` only when the driver observes the console, and never writes
 `logs/network.log` (ADB has no network channel). A desktop run writes neither.
 `agent` is the agent sink (`src/services/session-builder.ts`).

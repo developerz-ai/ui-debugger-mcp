@@ -73,15 +73,6 @@ const BOOT_WAIT_MS = 120_000;
 /** Default logcat tail (lines) drained per `console` read. */
 const LOGCAT_TAIL = 500;
 
-/**
- * How many streamed logcat rows are remembered for dedup.
- *
- * `logcat -t N` dumps the last N lines EVERY time, so consecutive drains overlap
- * and the durable trail would repeat the same rows. Bounded, so a long run cannot
- * grow the set without limit.
- */
-const STREAMED_ROWS_CAP = 2000;
-
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Android logcat priority letter → normalized console {@link ConsoleEntry} level. */
@@ -95,27 +86,68 @@ const LOGCAT_LEVEL: Record<string, ConsoleEntry['level']> = {
 };
 
 /**
+ * One raw logcat row — the record exactly as logcat emitted it, before
+ * normalization. This is the row's dedup identity: keying the NORMALIZED entry
+ * instead would merge distinct rows (the timestamp rounds to whole milliseconds,
+ * `F` and `E` fold into one level, and PID/TID are dropped entirely).
+ */
+interface RawLogcatRow {
+  /** Raw `sec.frac` text — the full precision logcat emitted, never rounded. */
+  time: string;
+  pid: string;
+  tid: string;
+  /** Raw priority letter — `F` and `E` normalize alike but are distinct rows. */
+  priority: string;
+  tag: string;
+  text: string;
+}
+
+/** The occurrence identity of a raw row: the whole record, at full precision. */
+function rawRowKey(row: RawLogcatRow): string {
+  return `${row.time}|${row.pid}|${row.tid}|${row.priority}|${row.tag}|${row.text}`;
+}
+
+/** `1546300800.000  1000  1000 I Tag: message` — unmatched lines are skipped. */
+const LOGCAT_ROW = /^\s*(\d+)\.(\d+)\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+([^:]*):\s?(.*)$/;
+
+/** Parse `logcat -v epoch` output into raw rows (oldest first, as emitted). */
+export function parseRawLogcat(raw: string): RawLogcatRow[] {
+  const out: RawLogcatRow[] = [];
+  for (const line of raw.split('\n')) {
+    const match = LOGCAT_ROW.exec(line);
+    if (!match) continue;
+    const [, sec, frac, pid, tid, priority, tag, text] = match;
+    if (
+      sec === undefined ||
+      frac === undefined ||
+      pid === undefined ||
+      tid === undefined ||
+      priority === undefined ||
+      text === undefined
+    ) {
+      continue;
+    }
+    out.push({ time: `${sec}.${frac}`, pid, tid, priority, tag: (tag ?? '').trim(), text });
+  }
+  return out;
+}
+
+/** Normalize a raw row onto the adapter-agnostic {@link ConsoleEntry} shape. */
+function toConsoleEntry(row: RawLogcatRow): ConsoleEntry {
+  return {
+    level: LOGCAT_LEVEL[row.priority] ?? 'log',
+    text: row.text,
+    location: row.tag === '' ? undefined : row.tag,
+    timestamp: Math.round(Number(row.time) * 1000),
+  };
+}
+
+/**
  * Parse `logcat -v epoch` output into {@link ConsoleEntry}s (oldest first, as emitted).
  * Line shape: `1546300800.000  1000  1000 I Tag: message` — unmatched lines are skipped.
  */
 export function parseLogcat(raw: string): ConsoleEntry[] {
-  const out: ConsoleEntry[] = [];
-  for (const line of raw.split('\n')) {
-    const match = /^\s*(\d+)\.(\d+)\s+\d+\s+\d+\s+([VDIWEF])\s+([^:]*):\s?(.*)$/.exec(line);
-    if (!match) continue;
-    const [, sec, frac, priority, tag, text] = match;
-    if (sec === undefined || frac === undefined || priority === undefined || text === undefined) {
-      continue;
-    }
-    const location = (tag ?? '').trim();
-    out.push({
-      level: LOGCAT_LEVEL[priority] ?? 'log',
-      text,
-      location: location === '' ? undefined : location,
-      timestamp: Math.round(Number(`${sec}.${frac}`) * 1000),
-    });
-  }
-  return out;
+  return parseRawLogcat(raw).map(toConsoleEntry);
 }
 
 /** Apply the whitelisted console `filters` (logcat). Loud on an unknown key or wrong type. */
@@ -172,8 +204,6 @@ interface AndroidAdapterHandles {
   pickPort: () => Promise<number>;
   /** Where drained logcat rows are streamed — the run's durable capture sink. */
   onLog: CaptureSink | undefined;
-  /** How many streamed rows the dedup set remembers before evicting the oldest. */
-  streamedRowsCap: number;
 }
 
 /** Launch the emulator process — the spawn seam tests replace with a fake child. */
@@ -202,11 +232,6 @@ export interface AndroidAdapterInit {
    * it, redacting, to `logs/console.log`).
    */
   onLog?: CaptureSink;
-  /**
-   * Override the streamed-row dedup bound (defaults to {@link STREAMED_ROWS_CAP});
-   * a seam for tests.
-   */
-  streamedRowsCap?: number;
 }
 
 /**
@@ -228,10 +253,13 @@ export class AndroidAdapter implements Adapter {
   readonly #bootWaitMs: number;
   readonly #pickPort: () => Promise<number>;
   readonly #onLog: CaptureSink | undefined;
-  /** How many streamed rows the dedup set remembers before evicting the oldest. */
-  readonly #streamedRowsCap: number;
-  /** Rows already streamed to the sink — a row is streamed at most once. */
-  readonly #streamed = new Set<string>();
+  /**
+   * The overlap cursor — raw keys of the PREVIOUS drain's first and last rows.
+   * Two strings, so the remembered window is bounded no matter how long the run
+   * (see {@linkcode AndroidAdapter.streamRows}).
+   */
+  #drainStart: string | null = null;
+  #drainEnd: string | null = null;
   #transport: Transport | null;
   /** The device every call is bound to (`emulator-<port>` once managed boot picks one). */
   #serial: string | null;
@@ -251,7 +279,6 @@ export class AndroidAdapter implements Adapter {
     this.#bootWaitMs = handles.bootWaitMs;
     this.#pickPort = handles.pickPort;
     this.#onLog = handles.onLog;
-    this.#streamedRowsCap = handles.streamedRowsCap;
     // Attach mode targets an already-running device — treat it as booted from the start.
     this.#booted = handles.attach;
   }
@@ -286,7 +313,6 @@ export class AndroidAdapter implements Adapter {
       bootWaitMs: init.bootWaitMs ?? BOOT_WAIT_MS,
       pickPort: init.pickPort ?? (() => pickEmulatorPort()),
       onLog: init.onLog,
-      streamedRowsCap: init.streamedRowsCap ?? STREAMED_ROWS_CAP,
     });
   }
 
@@ -437,12 +463,12 @@ export class AndroidAdapter implements Adapter {
       const tail = Math.max(LOGCAT_TAIL, opts.limit ?? 0);
       // `-t N` dumps the most recent N lines and exits (implies `-d`); `-v epoch` → real timestamps.
       const raw = await this.#adb.shell(['logcat', '-v', 'epoch', '-t', String(tail)]);
-      const parsed = parseLogcat(raw);
+      const rows = parseRawLogcat(raw);
       // The durable trail is the RAW record: every drained row is streamed before
       // filters/limit narrow the returned view — the browser's capture-then-filter
       // posture, on the same sink.
-      this.#streamRows(parsed);
-      const entries = applyLogFilters([...parsed].reverse(), opts.filters);
+      this.#streamRows(rows);
+      const entries = applyLogFilters(rows.map(toConsoleEntry).reverse(), opts.filters);
       return opts.limit !== undefined ? entries.slice(0, opts.limit) : entries;
     });
   }
@@ -451,25 +477,44 @@ export class AndroidAdapter implements Adapter {
    * Stream the drained logcat rows to the capture sink — one formatted line per row.
    *
    * The sink is the run's redacting durable writer (the session layer binds it);
-   * the adapter itself never writes to disk. A row already streamed is skipped:
-   * `logcat -t N` re-dumps the same tail on every read, so the durable trail would
-   * otherwise repeat it. A failing sink never fails the read.
+   * the adapter itself never writes to disk. `logcat -t N` re-dumps the same tail
+   * on every read, so the durable trail would otherwise repeat it — an overlap
+   * cursor prevents that without an ever-growing row set:
+   *
+   * Drains are chronological tails of one append-only log, so consecutive drains
+   * only ever slide FORWARD: this drain's overlap with the previous one is a
+   * prefix of it, and its fresh rows are a suffix. Remembering just the previous
+   * drain's first and last row ({@linkcode AndroidAdapter.drainStart} /
+   * {@linkcode AndroidAdapter.drainEnd}) therefore decides every row:
+   *
+   *   - up to and including the previous last row → covered by the previous
+   *     drain → already streamed, skipped (this is what keeps two reads of one
+   *     3000-row tail from appending the tail twice — a per-row remembered set
+   *     could not: once the tail outgrew the set, the forgotten oldest rows
+   *     re-streamed and, re-inserted as the newest entries, evicted the
+   *     remembered newer rows before they were checked);
+   *   - before the previous first row → below the earlier tail's cutoff, never
+   *     drained → streamed now (a wider `limit` back-fills them, once);
+   *   - after the previous last row (or when the previous drain has slid out of
+   *     the tail entirely) → arrived since → streamed.
+   *
+   * A failing sink never fails the read.
    */
-  #streamRows(rows: ConsoleEntry[]): void {
+  #streamRows(rows: RawLogcatRow[]): void {
     const sink = this.#onLog;
-    if (!sink) return;
-    for (const row of rows) {
-      const key = `${row.timestamp}|${row.level}|${row.location ?? ''}|${row.text}`;
-      if (this.#streamed.has(key)) continue;
-      // Marked BEFORE the emit: a row is streamed at most once, even when the sink
-      // fails half-way through.
-      this.#streamed.add(key);
-      if (this.#streamed.size > this.#streamedRowsCap) {
-        const oldest = this.#streamed.values().next().value;
-        if (oldest !== undefined) this.#streamed.delete(oldest);
-      }
+    const oldest = rows[0];
+    const newest = rows[rows.length - 1];
+    if (sink === undefined || oldest === undefined || newest === undefined) return;
+    const startIndex =
+      this.#drainStart === null ? -1 : rows.findIndex((row) => rawRowKey(row) === this.#drainStart);
+    const endIndex =
+      this.#drainEnd === null ? -1 : rows.findIndex((row) => rawRowKey(row) === this.#drainEnd);
+    for (const [index, row] of rows.entries()) {
+      const backFilled = startIndex !== -1 && index < startIndex;
+      const arrived = endIndex === -1 || index > endIndex;
+      if (!backFilled && !arrived) continue;
       try {
-        sink('console', formatConsoleLine(row));
+        sink('console', formatConsoleLine(toConsoleEntry(row)));
       } catch (error) {
         // A sink failure must not crash the read — the entries still come back.
         console.error(
@@ -477,6 +522,10 @@ export class AndroidAdapter implements Adapter {
         );
       }
     }
+    // The cursor records what THIS drain covered — streamed or skipped — so the
+    // next read tests its overlap against this drain, not an older one.
+    this.#drainStart = rawRowKey(oldest);
+    this.#drainEnd = rawRowKey(newest);
   }
 
   /** Android exposes no network channel over ADB — unsupported, surfaced loud. */
