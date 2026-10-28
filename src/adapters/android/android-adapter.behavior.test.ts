@@ -441,6 +441,80 @@ describe('AndroidAdapter.console', () => {
     expect(new Set(lines).size).toBe(3000);
   });
 
+  test('a repeated drain holding byte-identical records does not re-stream the tail', async () => {
+    // The reviewed defect: the overlap cursor located the previous drain's LAST
+    // row with findIndex on its raw key — the FIRST occurrence. A drain ending
+    // on a byte-identical twin of an earlier record therefore located its own
+    // end one twin too early and re-streamed everything after the first twin.
+    // Matching the whole covered key sequence (twins included) finds the true
+    // end, so the repeat streams nothing.
+    const lines: string[] = [];
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog: (_channel, line) => {
+        lines.push(line);
+      },
+    });
+    // Records 2 and 4 are byte-identical (same epoch ms, pid, tid, priority,
+    // tag, text) — the tail ENDS on a twin of an earlier row.
+    const twin = '1546300800.500  1000  1001 I Tag: twin';
+    adb.setResponse(
+      'logcat -v epoch -t 500',
+      `1546300800.100  1000  1001 I Tag: a\n${twin}\n1546300800.700  1000  1001 I Tag: b\n${twin}\n`,
+    );
+
+    await adapter.console({});
+    expect(lines).toHaveLength(4);
+    // The two twins format to the same durable line; a, twin and b are distinct.
+    expect(new Set(lines).size).toBe(3);
+
+    // The identical drain again: every row — the second twin included — sits
+    // inside the covered sequence.
+    await adapter.console({});
+    expect(lines).toHaveLength(4);
+  });
+
+  test('a narrower drain between two wide ones does not shrink coverage (wide → narrow → wide)', async () => {
+    // The reviewed defect: the default 500-row drain overwrote the coverage
+    // start the 3000-row drain had recorded, so the next wide read treated the
+    // 2500 rows below the narrow cutoff as never-drained back-fill and appended
+    // them a second time. A narrower drain must only ever extend the remembered
+    // coverage, never shrink it.
+    const lines: string[] = [];
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog: (_channel, line) => {
+        lines.push(line);
+      },
+    });
+    const all = Array.from(
+      { length: 3000 },
+      (_, i) => `${1546300800 + i}.000  1000  1001 I Tag: row ${i}`,
+    );
+    const wide = 'logcat -v epoch -t 3000';
+    adb.setResponse(wide, `${all.join('\n')}\n`);
+    await adapter.console({ limit: 3000 });
+    expect(lines).toHaveLength(3000);
+
+    // The default (500-line) drain of the same, unchanged log sees only the
+    // newest 500 rows — coverage must stay at the wide drain's span.
+    adb.setResponse('logcat -v epoch -t 500', `${all.slice(2500).join('\n')}\n`);
+    await adapter.console({});
+    expect(lines).toHaveLength(3000);
+
+    // Wide again, same rows: everything is already covered.
+    adb.setResponse(wide, `${all.join('\n')}\n`);
+    await adapter.console({ limit: 3000 });
+    expect(lines).toHaveLength(3000);
+    expect(new Set(lines).size).toBe(3000);
+  });
+
   test('a re-drain whose tail grew streams only the fresh rows', async () => {
     const lines: string[] = [];
     const adb = new FakeAdb();

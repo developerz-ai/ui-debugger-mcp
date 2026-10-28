@@ -73,6 +73,14 @@ const BOOT_WAIT_MS = 120_000;
 /** Default logcat window (lines) read per `console` call — reading never clears the log. */
 const LOGCAT_TAIL = 500;
 
+/**
+ * Cap on the remembered console coverage (raw keys of every row the durable trail
+ * already holds) — bounded no matter how long the run or how wide a one-off `limit`
+ * was. The oldest covered rows drop first; the logcat buffer drops them too, so a
+ * trimmed row is also the first to become unreachable.
+ */
+const MAX_COVERED_KEYS = 4096;
+
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Android logcat priority letter → normalized console {@link ConsoleEntry} level. */
@@ -105,6 +113,22 @@ interface RawLogcatRow {
 /** The occurrence identity of a raw row: the whole record, at full precision. */
 function rawRowKey(row: RawLogcatRow): string {
   return `${row.time}|${row.pid}|${row.tid}|${row.priority}|${row.tag}|${row.text}`;
+}
+
+/** True when `needle` appears in `hay` contiguously starting at `start`. */
+function matchesAt(hay: readonly string[], start: number, needle: readonly string[]): boolean {
+  for (let i = 0; i < needle.length; i++) {
+    if (hay[start + i] !== needle[i]) return false;
+  }
+  return true;
+}
+
+/** True when the last `r` entries of `covered` equal the first `r` of `keys`. */
+function overlapAtHead(covered: readonly string[], keys: readonly string[], r: number): boolean {
+  for (let i = 0; i < r; i++) {
+    if (covered[covered.length - r + i] !== keys[i]) return false;
+  }
+  return true;
 }
 
 /** `1546300800.000  1000  1000 I Tag: message` — unmatched lines are skipped. */
@@ -254,12 +278,12 @@ export class AndroidAdapter implements Adapter {
   readonly #pickPort: () => Promise<number>;
   readonly #onLog: CaptureSink | undefined;
   /**
-   * The overlap cursor — raw keys of the PREVIOUS drain's first and last rows.
-   * Two strings, so the remembered window is bounded no matter how long the run
-   * (see {@linkcode AndroidAdapter.streamRows}).
+   * The overlap window: raw keys of every row the durable trail already holds,
+   * in drain order (oldest first), capped at {@linkcode MAX_COVERED_KEYS} —
+   * so the remembered window is bounded no matter how long the run (see
+   * {@linkcode AndroidAdapter.streamRows}).
    */
-  #drainStart: string | null = null;
-  #drainEnd: string | null = null;
+  #coveredKeys: string[] = [];
   #transport: Transport | null;
   /** The device every call is bound to (`emulator-<port>` once managed boot picks one). */
   #serial: string | null;
@@ -478,25 +502,36 @@ export class AndroidAdapter implements Adapter {
    *
    * The sink is the run's redacting durable writer (the session layer binds it);
    * the adapter itself never writes to disk. `logcat -t N` re-dumps the same tail
-   * on every read, so the durable trail would otherwise repeat it — an overlap
-   * cursor prevents that without an ever-growing row set:
+   * on every read, so the durable trail would otherwise repeat it — a coverage
+   * window prevents that without an ever-growing row set:
    *
    * Drains are chronological tails of one append-only log, so consecutive drains
-   * only ever slide FORWARD: this drain's overlap with the previous one is a
-   * prefix of it, and its fresh rows are a suffix. Remembering just the previous
-   * drain's first and last row ({@linkcode AndroidAdapter.drainStart} /
-   * {@linkcode AndroidAdapter.drainEnd}) therefore decides every row:
+   * only ever slide FORWARD: this drain's overlap with the already-covered rows
+   * is a contiguous run of them, and its fresh rows are a suffix. Remembering
+   * the covered span as the SEQUENCE of raw keys already streamed
+   * ({@linkcode AndroidAdapter.coveredKeys}, capped) decides every row by
+   * locating that coverage inside this drain ({@linkcode AndroidAdapter.coveredSpan}):
    *
-   *   - up to and including the previous last row → covered by the previous
-   *     drain → already streamed, skipped (this is what keeps two reads of one
-   *     3000-row tail from appending the tail twice — a per-row remembered set
-   *     could not: once the tail outgrew the set, the forgotten oldest rows
-   *     re-streamed and, re-inserted as the newest entries, evicted the
-   *     remembered newer rows before they were checked);
-   *   - before the previous first row → below the earlier tail's cutoff, never
-   *     drained → streamed now (a wider `limit` back-fills them, once);
-   *   - after the previous last row (or when the previous drain has slid out of
-   *     the tail entirely) → arrived since → streamed.
+   *   - the whole covered sequence found as one contiguous block → the block and
+   *     everything up to its last row is covered → skipped; rows before it sit
+   *     below the earlier tail's cutoff, never drained → streamed now (a wider
+   *     `limit` back-fills them, once);
+   *   - only the covered sequence's TAIL found at the drain's head (a narrower
+   *     drain, or the oldest covered rows slid out of the buffer) → that overlap
+   *     is skipped, everything after it streams;
+   *   - no overlap at all → the coverage predates this drain entirely → the
+   *     whole drain streams.
+   *
+   * Matching the whole SEQUENCE — not a boundary key — is what keeps
+   * byte-identical records honest: a drain holding two copies of one record ends
+   * on the second copy, and only a sequence match finds it; a first-key
+   * `findIndex` would stop at the first copy and re-stream the rest. A narrower
+   * drain never SHRINKS the remembered coverage either (the rows it could not
+   * see stay remembered ahead of it), so wide → narrow → wide re-reads do not
+   * re-stream the rows the narrow drain temporarily hid. Under a fully periodic
+   * drain an overlap is genuinely ambiguous; the earliest (largest-skip) match
+   * wins, which never duplicates: two rows sharing a raw key format to the same
+   * trail line, so a skipped twin loses no content.
    *
    * A failing sink never fails the read.
    */
@@ -505,13 +540,13 @@ export class AndroidAdapter implements Adapter {
     const oldest = rows[0];
     const newest = rows[rows.length - 1];
     if (sink === undefined || oldest === undefined || newest === undefined) return;
-    const startIndex =
-      this.#drainStart === null ? -1 : rows.findIndex((row) => rawRowKey(row) === this.#drainStart);
-    const endIndex =
-      this.#drainEnd === null ? -1 : rows.findIndex((row) => rawRowKey(row) === this.#drainEnd);
+    const keys = rows.map(rawRowKey);
+    const span = this.#coveredSpan(keys);
+    const coveredFrom = span === null ? -1 : span.from;
+    const coveredThrough = span === null ? -1 : span.to;
     for (const [index, row] of rows.entries()) {
-      const backFilled = startIndex !== -1 && index < startIndex;
-      const arrived = endIndex === -1 || index > endIndex;
+      const backFilled = coveredFrom !== -1 && index < coveredFrom;
+      const arrived = coveredThrough === -1 || index > coveredThrough;
       if (!backFilled && !arrived) continue;
       try {
         sink('console', formatConsoleLine(toConsoleEntry(row)));
@@ -522,10 +557,58 @@ export class AndroidAdapter implements Adapter {
         );
       }
     }
-    // The cursor records what THIS drain covered — streamed or skipped — so the
-    // next read tests its overlap against this drain, not an older one.
-    this.#drainStart = rawRowKey(oldest);
-    this.#drainEnd = rawRowKey(newest);
+    // The window records what is covered NOW — the skipped overlap plus every
+    // streamed row — so the next read locates its overlap against it. A narrower
+    // drain extends the span; it never pulls the coverage start forward.
+    this.#rememberCoverage(keys, span);
+  }
+
+  /**
+   * Locate the already-covered rows inside this drain's keys (both oldest
+   * first). Returns the covered span as inclusive `[from, to]` indexes into
+   * `keys`, or null when none of the coverage appears.
+   */
+  #coveredSpan(keys: string[]): { from: number; to: number } | null {
+    const covered = this.#coveredKeys;
+    const m = covered.length;
+    const n = keys.length;
+    if (m === 0 || n === 0) return null;
+    // The whole coverage as one contiguous block — a drain at least as wide as
+    // the span it covers. Earliest alignment wins (see the streamRows note).
+    if (n >= m) {
+      for (let from = 0; from + m <= n; from++) {
+        if (matchesAt(keys, from, covered)) return { from, to: from + m - 1 };
+      }
+    }
+    // Otherwise the drain's head sits inside the coverage: its longest suffix
+    // that matches the drain's prefix is the overlap (a narrower drain, or the
+    // covered oldest rows already slid out of the buffer).
+    for (let r = Math.min(m, n); r >= 1; r--) {
+      if (overlapAtHead(covered, keys, r)) return { from: 0, to: r - 1 };
+    }
+    return null;
+  }
+
+  /** Extend the covered window by this drain — the overlap was skipped, the rest streamed. */
+  #rememberCoverage(keys: string[], span: { from: number; to: number } | null): void {
+    let grown: string[];
+    if (span === null) {
+      // No overlap located: the whole coverage predates this drain (it slid out
+      // of the buffer, or sits wholly below a too-narrow tail). Keep it — a
+      // later wider drain must not re-stream those rows — and extend by this drain.
+      grown = [...this.#coveredKeys, ...keys];
+    } else if (span.from === 0) {
+      // The drain starts inside the coverage: the remembered rows BELOW the
+      // drain (the coverage's head) stay remembered — a narrower drain must not
+      // shrink coverage — and the whole drain extends the span.
+      grown = [...this.#coveredKeys.slice(0, this.#coveredKeys.length - (span.to + 1)), ...keys];
+    } else {
+      // The coverage sat wholly inside the drain (its head rows were back-filled
+      // just now): the drain is the new coverage.
+      grown = keys;
+    }
+    this.#coveredKeys =
+      grown.length > MAX_COVERED_KEYS ? grown.slice(grown.length - MAX_COVERED_KEYS) : grown;
   }
 
   /** Android exposes no network channel over ADB — unsupported, surfaced loud. */
