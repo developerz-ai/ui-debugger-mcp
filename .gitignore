@@ -25,3 +25,9 @@ pnpm-lock.yaml
 # task-master tooling
 .claude-task-master/
 .ai-task-master/
+
+# CLI test scratch dirs created inside the source tree by
+# src/cli/chromium-libs.test.ts and src/cli/init.test.ts
+/src/cli/__test_chromium_libs_tmp__/
+/src/cli/__test_init_tmp__/
+

@@ -1,7 +1,7 @@
 /**
  * `observe` — the driver's read tool (inner belt).
  *
- * One SQL-like reader, four "tables" picked by `kind`, each routed to one method
+ * One SQL-like reader, with "tables" picked by `kind`, each routed to one method
  * on the shared {@link Adapter} contract:
  *   - `tree`       → `readState`   (normalized UI nodes; DOM · a11y · view-hierarchy)
  *   - `screenshot` → `screenshot`  (an evidence frame, SAVED to `screenshots/` — the
@@ -9,6 +9,7 @@
  *     the result carries the saved path, never the PNG bytes)
  *   - `console`    → `console`     (captured console/error log, newest first)
  *   - `network`    → `network`     (captured network exchanges, newest first)
+ *   - `tabs`       → `tabs`        (open browser tabs)
  *
  * Adapter-blind: routes through the contract only — it never learns the protocol
  * underneath. Composition lives in params (`query`/`fields`/`filters`/`limit`/
@@ -41,7 +42,7 @@ import type { EvidenceRecorder } from './look.js';
 import type { ActTrail } from './trail.js';
 
 /**
- * The four observable channels `kind` selects (each routes to one contract method).
+ * The observable channels `kind` selects (each routes to one contract method).
  * Exported so the prompt-vs-schema drift guard (`prompts/schema-drift.test.ts`) can
  * assert every `kind:"…"` example the prompts teach is one the belt actually accepts.
  */
