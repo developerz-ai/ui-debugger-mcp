@@ -14,7 +14,7 @@ for that app. Keyed by the current dir.
 │   ├── captions.vtt           subtitle per frame (planned; v1 burns captions in)
 │   ├── findings.json          structured report back to the smart agent
 │   └── logs/
-│       ├── console.log        browser / app console (web targets only)
+│       ├── console.log        browser / app console (web) + logcat rows (android, when the console is observed)
 │       ├── network.log        requests, responses, failures, timings (web targets only)
 │       └── agent.log          small agent's step-by-step trail
 ├── owner.lock                 exclusive ownership claim (one live owner)
@@ -31,9 +31,9 @@ for that app. Keyed by the current dir.
 | `replay.mp4`        | The run as a short captioned video — drop it in the PR (see below). |
 | `captions.vtt`      | One subtitle per frame (planned sidecar; v1 burns captions into `replay.mp4`). |
 | `findings.json`     | The structured verdict. Smart agent reads this, not prose. |
-| `sessions/<id>/logs/console.log` | JS errors a code-only agent can't see. **Web targets only** — the console/network capture sink is handed to the browser adapter alone (`src/adapters/factory.ts:76`), so a desktop or mobile run has no `console.log`. |
-| `sessions/<id>/logs/network.log` | The 500s / hangs / bad payloads behind a broken UI. Same sink, same web-only reach. |
-| `sessions/<id>/logs/agent.log`   | Why the small agent decided pass/fail. Auditable. Written for every target — the run-start breadcrumb alone lands here (`src/services/session-builder.ts:379`). |
+| `sessions/<id>/logs/console.log` | JS errors a code-only agent can't see — and, on a mobile run, the app's logcat rows (crashes, stack traces). **Web AND android targets**: the run's capture sink is handed to the browser adapter (CDP console) and to the android adapter (`src/adapters/factory.ts`). The web half is PUSH-based — the page's console streams as it happens; the android half is READ-driven — `AndroidAdapter.console()` streams the logcat rows it parses (`src/adapters/android/android-adapter.ts:433`) — so a mobile run writes this file only when the driver observes the console. A desktop run has no `console.log`. |
+| `sessions/<id>/logs/network.log` | The 500s / hangs / bad payloads behind a broken UI. Same sink, still web-only reach — ADB has no network channel, so a mobile run writes no `network.log`. |
+| `sessions/<id>/logs/agent.log`   | Why the small agent decided pass/fail. Auditable. Written for every target — the run-start breadcrumb alone lands here (`src/services/session-builder.ts`). |
 | `owner.lock`        | The **exclusive ownership lock** — the authoritative one-run gate. A kernel-held `flock(2)` (`LOCK_EX \| LOCK_NB`) taken by `FileStatePort.record` before any breadcrumb is published: the kernel grants it to exactly one process and refuses every rival, so a live foreign owner's start fails with `SessionBusyError` (naming the holder from the claim written on the file), and a crashed owner's lock dies with its process — the workspace is simply free, with nothing to reclaim. The claim file is a notice board, not the lock: never unlinked (unlinking would swap the inode under a live lock), emptied on release, and litter from older protocols (`.reclaiming-*`, `owner.lock.reclaim`) is inert. Exclusion is non-revocable — no recovery logic can restore one owner over another, because there is no recovery. |
 | `state.json`        | Resume / inspect the cwd-keyed session. |
 
@@ -43,10 +43,19 @@ project-level `logs/` directory. Path of record:
 → `src/session/findings-store.ts` `appendLog`, which writes
 `<channel>.log` into that dir (`src/session/findings-store.ts:127-130`, channels
 `console` / `network` / `agent` at `src/session/findings-store.ts:25`) → the
-writers in `src/services/session-builder.ts`: the console/network capture sink
-(`src/services/session-builder.ts:293-295`) and the agent sink
-(`src/services/session-builder.ts:323-324`). Which files exist depends on the
+writers in `src/services/session-builder.ts`: the capture sink
+(`createCaptureSink` there) and the agent sink. Which files exist depends on the
 target — see the table above.
+
+The session's capture sink is the **single** writer of `console.log` and
+`network.log`: it redacts the line FIRST, then appends it. Every captured row
+travels that one redacting path — the browser's CDP capture and the android
+logcat drain alike — because no adapter writes to disk and no adapter is given
+a sink of its own. Redaction covers the run's AUTH PERSONA values, in their
+plain, percent-encoded, `+`-for-space and JSON-escaped spellings — and only
+those: an android run has no persona, so its redactor is the identity. A
+credential that is NOT one of those values (a token the app logged itself)
+still reaches `logs/console.log` exactly as it was captured.
 
 ## PR replay video
 

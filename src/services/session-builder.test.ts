@@ -8,13 +8,16 @@ import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { chromium } from 'playwright-core';
 import { z } from 'zod';
+import { createSecretRedactor } from '../adapters/browser/log-format.js';
 import { DesktopAdapter } from '../adapters/desktop/desktop-adapter.js';
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import { AdapterError, AuthError, ConfigError, TargetNotFoundError } from '../errors.js';
+import { FindingsStore } from '../session/findings-store.js';
 import { sessionPaths, workspacePaths } from '../session/workspace.js';
 import {
   buildSession,
+  createCaptureSink,
   makeSessionBuilder,
   resolveRunTarget,
   type SessionBuilderDeps,
@@ -648,6 +651,45 @@ function serveLoginApp(credentials: { email: string; password: string }) {
   },
   STORY_TIMEOUT_MS,
 );
+
+// --- the run's capture sink (redaction before disk) --------------------------
+
+/**
+ * Read a log file once it carries `marker`, bounded: the sink writes
+ * fire-and-forget, so a sink that never writes must fail the assertion below
+ * rather than hang the suite.
+ */
+async function readWhenWritten(file: string, marker: string): Promise<string> {
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    const content = await readFile(file, 'utf8').catch(() => '');
+    if (content.includes(marker)) return content;
+    if (Date.now() >= deadline) return content;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test('the per-run capture sink redacts a persona value before it reaches the durable trail', async () => {
+  // A persona's password is typed into the app, so it comes back at us through
+  // whatever the target echoes — a CDP console row, an android logcat line. The
+  // session's capture sink is the ONE writer of `logs/*.log`, so its redaction is
+  // the last gate before a credential reaches disk: no adapter writes to disk, and
+  // there is no second, unredacted path into the trail.
+  const secret = 'p@ssw0rd-9';
+  const d = deps();
+  const paths = sessionPaths(d.workspace, 'sink1');
+  const store = new FindingsStore(paths);
+  const sink = createCaptureSink(store, createSecretRedactor([secret]));
+
+  sink('console', `2026-07-27T14:30:05.000Z ERROR login failed for ${secret}`);
+
+  const written = await readWhenWritten(join(paths.logs, 'console.log'), '<redacted, 10 chars>');
+  // Presence stays diagnostic (the length of the secret), the secret itself is gone.
+  expect(written).toContain('<redacted, 10 chars>');
+  expect(written).not.toContain(secret);
+  // …and the row around it survives: redaction replaces the value, not the line.
+  expect(written).toContain('login failed for');
+});
 
 test('makeSessionBuilder binds the deps into a per-run builder', async () => {
   const build = makeSessionBuilder(deps());

@@ -148,12 +148,18 @@ console, `network` the request/response trail, `agent` the small agent's step
 trail. Path pinned by `sessionPaths().logs` (`src/session/workspace.ts:150`),
 written by `appendLog` (`src/session/findings-store.ts:127`).
 
-Which files exist depends on the run: `console`/`network` come from the browser
-adapter's CDP capture sink (`src/adapters/browser/cdp.ts:154`, wired at
-`src/services/session-builder.ts:293`) — that sink is threaded to the browser
-adapter ONLY (`src/adapters/factory.ts:76`), so a desktop/mobile run writes no
-console or network trail. `agent` is the agent sink
-(`src/services/session-builder.ts:323`).
+Which files exist depends on the run: `console`/`network` come from the run's
+capture sink — `CaptureSink` declared in `src/adapters/contract.ts` (re-exported
+by `src/adapters/browser/cdp.ts`), written by `createCaptureSink`
+(`src/services/session-builder.ts`) — threaded to the browser adapter (CDP
+console + network) AND to the android adapter (logcat rows,
+`src/adapters/factory.ts`). The web half is PUSH-based: the page's console
+streams as it happens. The android half is READ-driven —
+`AndroidAdapter.console()` streams the logcat rows it parses
+(`src/adapters/android/android-adapter.ts:433`) — so a mobile run writes
+`logs/console.log` only when the driver observes the console, and never writes
+`logs/network.log` (ADB has no network channel). A desktop run writes neither.
+`agent` is the agent sink (`src/services/session-builder.ts`).
 
 Session id **is** a local timestamp: `YYYY-MM-DD_HH-MM-SS-NNNN`
 (`2026-07-27_14-30-05-0001`). Fixed-width, so byte order == time order.

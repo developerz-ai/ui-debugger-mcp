@@ -13,8 +13,8 @@
 import type { Config, Target } from '../config/schema.js';
 import { AdapterError, TargetNotFoundError } from '../errors.js';
 import { AndroidAdapter } from './android/android-adapter.js';
-import { BrowserAdapter, type BrowserAdapterInit } from './browser/browser-adapter.js';
-import type { Adapter } from './contract.js';
+import { BrowserAdapter } from './browser/browser-adapter.js';
+import type { Adapter, CaptureSink } from './contract.js';
 import { DesktopAdapter } from './desktop/desktop-adapter.js';
 
 /**
@@ -58,7 +58,7 @@ export async function createAdapter(
   targetName: string,
   config: Config,
   profileDir: string,
-  onLog?: BrowserAdapterInit['onLog'],
+  onLog?: CaptureSink,
   timeoutMs?: number,
 ): Promise<Adapter> {
   // `hasOwn`, never a plain index read: `targets` is a plain object, so
@@ -82,9 +82,10 @@ export async function createAdapter(
 
     case 'android':
       // Managed (boot `emulator @avd`) unless `adbSerial` attaches — `create` reads that
-      // off the config. No page profile or CDP log sink applies, so neither is threaded.
+      // off the config. No page profile applies, but the capture sink does: the logcat
+      // rows reach the same redacting durable trail the browser writes.
       // The emulator boots in `open`, which is where the run budget caps it.
-      return AndroidAdapter.create({ config: target });
+      return AndroidAdapter.create({ config: target, onLog });
 
     default: {
       const unreachable: never = target;

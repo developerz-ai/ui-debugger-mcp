@@ -26,6 +26,7 @@ import { capWait } from '../budget.js';
 import type {
   Adapter,
   Bounds,
+  CaptureSink,
   ConsoleEntry,
   Filters,
   LogQuery,
@@ -40,6 +41,7 @@ import type {
 // Both managed adapters kill a detached group the same way — one implementation, in the
 // subprocess plumbing module.
 import { terminateGroup } from '../desktop/proc.js';
+import { formatConsoleLine } from '../log-format.js';
 import { type Adb, AdbCli, pendingStateOrThrow } from './adb.js';
 import {
   expectOnScreen,
@@ -70,6 +72,15 @@ const BOOT_WAIT_MS = 120_000;
 
 /** Default logcat tail (lines) drained per `console` read. */
 const LOGCAT_TAIL = 500;
+
+/**
+ * How many streamed logcat rows are remembered for dedup.
+ *
+ * `logcat -t N` dumps the last N lines EVERY time, so consecutive drains overlap
+ * and the durable trail would repeat the same rows. Bounded, so a long run cannot
+ * grow the set without limit.
+ */
+const STREAMED_ROWS_CAP = 2000;
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -159,6 +170,10 @@ interface AndroidAdapterHandles {
   spawn: SpawnEmulator;
   bootWaitMs: number;
   pickPort: () => Promise<number>;
+  /** Where drained logcat rows are streamed — the run's durable capture sink. */
+  onLog: CaptureSink | undefined;
+  /** How many streamed rows the dedup set remembers before evicting the oldest. */
+  streamedRowsCap: number;
 }
 
 /** Launch the emulator process — the spawn seam tests replace with a fake child. */
@@ -181,6 +196,17 @@ export interface AndroidAdapterInit {
   bootWaitMs?: number;
   /** Override the managed console-port pick (defaults to {@link pickEmulatorPort}); a test seam. */
   pickPort?: () => Promise<number>;
+  /**
+   * Optional sink for streaming captured logcat rows to the run's durable console
+   * trail — the same seam the browser adapter writes to (the session layer binds
+   * it, redacting, to `logs/console.log`).
+   */
+  onLog?: CaptureSink;
+  /**
+   * Override the streamed-row dedup bound (defaults to {@link STREAMED_ROWS_CAP});
+   * a seam for tests.
+   */
+  streamedRowsCap?: number;
 }
 
 /**
@@ -201,6 +227,11 @@ export class AndroidAdapter implements Adapter {
   readonly #spawn: SpawnEmulator;
   readonly #bootWaitMs: number;
   readonly #pickPort: () => Promise<number>;
+  readonly #onLog: CaptureSink | undefined;
+  /** How many streamed rows the dedup set remembers before evicting the oldest. */
+  readonly #streamedRowsCap: number;
+  /** Rows already streamed to the sink — a row is streamed at most once. */
+  readonly #streamed = new Set<string>();
   #transport: Transport | null;
   /** The device every call is bound to (`emulator-<port>` once managed boot picks one). */
   #serial: string | null;
@@ -219,6 +250,8 @@ export class AndroidAdapter implements Adapter {
     this.#spawn = handles.spawn;
     this.#bootWaitMs = handles.bootWaitMs;
     this.#pickPort = handles.pickPort;
+    this.#onLog = handles.onLog;
+    this.#streamedRowsCap = handles.streamedRowsCap;
     // Attach mode targets an already-running device — treat it as booted from the start.
     this.#booted = handles.attach;
   }
@@ -252,6 +285,8 @@ export class AndroidAdapter implements Adapter {
       spawn: init.spawn ?? ((bin, args) => spawn(bin, args, { detached: true, stdio: 'ignore' })),
       bootWaitMs: init.bootWaitMs ?? BOOT_WAIT_MS,
       pickPort: init.pickPort ?? (() => pickEmulatorPort()),
+      onLog: init.onLog,
+      streamedRowsCap: init.streamedRowsCap ?? STREAMED_ROWS_CAP,
     });
   }
 
@@ -402,9 +437,46 @@ export class AndroidAdapter implements Adapter {
       const tail = Math.max(LOGCAT_TAIL, opts.limit ?? 0);
       // `-t N` dumps the most recent N lines and exits (implies `-d`); `-v epoch` → real timestamps.
       const raw = await this.#adb.shell(['logcat', '-v', 'epoch', '-t', String(tail)]);
-      const entries = applyLogFilters(parseLogcat(raw).reverse(), opts.filters);
+      const parsed = parseLogcat(raw);
+      // The durable trail is the RAW record: every drained row is streamed before
+      // filters/limit narrow the returned view — the browser's capture-then-filter
+      // posture, on the same sink.
+      this.#streamRows(parsed);
+      const entries = applyLogFilters([...parsed].reverse(), opts.filters);
       return opts.limit !== undefined ? entries.slice(0, opts.limit) : entries;
     });
+  }
+
+  /**
+   * Stream the drained logcat rows to the capture sink — one formatted line per row.
+   *
+   * The sink is the run's redacting durable writer (the session layer binds it);
+   * the adapter itself never writes to disk. A row already streamed is skipped:
+   * `logcat -t N` re-dumps the same tail on every read, so the durable trail would
+   * otherwise repeat it. A failing sink never fails the read.
+   */
+  #streamRows(rows: ConsoleEntry[]): void {
+    const sink = this.#onLog;
+    if (!sink) return;
+    for (const row of rows) {
+      const key = `${row.timestamp}|${row.level}|${row.location ?? ''}|${row.text}`;
+      if (this.#streamed.has(key)) continue;
+      // Marked BEFORE the emit: a row is streamed at most once, even when the sink
+      // fails half-way through.
+      this.#streamed.add(key);
+      if (this.#streamed.size > this.#streamedRowsCap) {
+        const oldest = this.#streamed.values().next().value;
+        if (oldest !== undefined) this.#streamed.delete(oldest);
+      }
+      try {
+        sink('console', formatConsoleLine(row));
+      } catch (error) {
+        // A sink failure must not crash the read — the entries still come back.
+        console.error(
+          `android capture sink failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
   }
 
   /** Android exposes no network channel over ADB — unsupported, surfaced loud. */

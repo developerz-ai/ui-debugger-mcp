@@ -146,6 +146,27 @@ export function withToolLog(name: string, t: Tool, log: (line: string) => void):
   };
 }
 
+/**
+ * The run's durable capture sink: redact, THEN append to the session's log channel.
+ *
+ * One writer for every captured row, whoever produced it — the browser's CDP
+ * capture (console + network) and the android logcat drain alike. The adapters
+ * never touch disk; they hand lines to this seam and the session decides what
+ * lands in `logs/*.log`. Redaction happens HERE, on the way in, so no second
+ * (unredacted) path to the trail can exist.
+ *
+ * Fire-and-forget by design: a capture burst must never block the adapter that
+ * produced it, and a failed write must never fail the read that produced it.
+ */
+export function createCaptureSink(
+  store: FindingsStore,
+  redact: (line: string) => string,
+): CaptureSink {
+  return (channel, line) => {
+    void store.appendLog(channel, redact(line)).catch(() => undefined);
+  };
+}
+
 /** Map a config adapter kind to its prompt addendum target — one per shipped adapter. */
 function addendumTarget(adapter: Target['adapter']): TargetName {
   if (adapter === 'browser') return 'web';
@@ -290,9 +311,9 @@ export async function buildSession(
   // in `network.log` and through anything an adapter error quotes — the same
   // posture `log-format.ts` already holds for credential headers and `?token=`.
   const redact = createSecretRedactor(auth ? Object.values(auth.persona.fields) : []);
-  const onLog: CaptureSink = (channel, line) => {
-    void store.appendLog(channel, redact(line)).catch(() => undefined);
-  };
+  // The run's ONE capture sink — the browser's CDP capture and the android logcat
+  // drain both stream into it, so every captured row is redacted on its way to disk.
+  const onLog = createCaptureSink(store, redact);
 
   // `profile` is a browser-target key — no other adapter has a profile dir. A managed
   // launch lives in it; attach ignores it (that browser keeps its own state).

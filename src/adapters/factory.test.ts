@@ -18,10 +18,12 @@
  * `browser-adapter.lifecycle.test.ts`'s header for the same finding.)
  */
 
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import type { Config } from '../config/schema.js';
 import { AdapterError, TargetNotFoundError } from '../errors.js';
-import { AndroidAdapter } from './android/android-adapter.js';
+import { AndroidAdapter, type AndroidAdapterInit } from './android/android-adapter.js';
+import { BrowserAdapter, type BrowserAdapterInit } from './browser/browser-adapter.js';
+import type { CaptureSink } from './contract.js';
 import { DesktopAdapter } from './desktop/desktop-adapter.js';
 import { createAdapter } from './factory.js';
 
@@ -91,4 +93,54 @@ test('createAdapter dispatches an `android` target to AndroidAdapter', async () 
   // Same contract, other grammar: uiautomator takes `role "name"` or a bare
   // `resource-id`, never a Playwright engine selector.
   expect(adapter.selectorDialect).toBe('native');
+});
+
+// --- capture sink --------------------------------------------------------------
+
+test('createAdapter hands the run capture sink to the android branch', async () => {
+  const sink: CaptureSink = () => undefined;
+  const target = { adapter: 'android' as const, headless: true, avd: 'pixel_7' };
+  const config = baseConfig({ mobile: target });
+  const original = AndroidAdapter.create;
+  const seen: AndroidAdapterInit[] = [];
+  // The static `create` is spied, not mocked away: the REAL adapter is still built
+  // (no device needed — it only wires closures), and the init it was handed is
+  // what the assertion is about.
+  const spy = spyOn(AndroidAdapter, 'create').mockImplementation((init) => {
+    seen.push(init);
+    return original(init);
+  });
+  try {
+    await createAdapter('mobile', config, '/tmp/unused-profile', sink);
+  } finally {
+    spy.mockRestore();
+  }
+  expect(seen[0]?.onLog).toBe(sink);
+});
+
+test('createAdapter still hands the run capture sink to the browser branch', async () => {
+  const sink: CaptureSink = () => undefined;
+  const target = { adapter: 'browser' as const, cdpUrl: 'http://127.0.0.1:1', headless: true };
+  const config = baseConfig({ web: target });
+  const seen: BrowserAdapterInit[] = [];
+  // The spy DELEGATES to the original instead of standing in for it. `bun test`
+  // does not fully serialize test files (same finding as
+  // `browser-adapter.lifecycle.test.ts`'s header), so a file running concurrently
+  // that constructs a BrowserAdapter inside the spy's window would receive the
+  // stub and break. The original is safe to call — it refuses the closed port
+  // immediately, so the assertion stays about the WIRING, not about CDP.
+  const original = BrowserAdapter.create;
+  const spy = spyOn(BrowserAdapter, 'create').mockImplementation(async (init) => {
+    seen.push(init);
+    return original(init);
+  });
+  try {
+    // The REAL attach failure is the expected outcome, and its wording proves the
+    // browser branch was reached (same proof as the dispatch test above).
+    const created = createAdapter('web', config, '/tmp/unused-profile', sink);
+    await expect(created).rejects.toThrow(/cannot attach to http:\/\/127\.0\.0\.1:1/);
+  } finally {
+    spy.mockRestore();
+  }
+  expect(seen[0]?.onLog).toBe(sink);
 });

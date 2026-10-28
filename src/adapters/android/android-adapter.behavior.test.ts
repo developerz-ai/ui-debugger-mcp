@@ -7,11 +7,11 @@
  * live in android-adapter.test.ts.
  */
 
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { AdapterError } from '../../errors.js';
-import type { Node } from '../contract.js';
+import type { CaptureSink, Node } from '../contract.js';
 import { AndroidAdapter } from './android-adapter.js';
-import { FakeAdb, makeAdapter, makeNode } from './android-adapter.test-helpers.js';
+import { FakeAdb, FakeUi, makeAdapter, makeNode } from './android-adapter.test-helpers.js';
 import type { AndroidNode, UiAutomatorSource } from './uiautomator.js';
 
 describe('AndroidAdapter.readState', () => {
@@ -365,6 +365,108 @@ describe('AndroidAdapter.console', () => {
     expect(entries.length).toBeGreaterThan(0);
     const call = adb.calls.find((c) => c.args[0] === 'logcat');
     expect(call?.args).toContain('900');
+  });
+
+  // --- capture sink -------------------------------------------------------------
+
+  /** An adapter over the fake seams with the run's capture sink wired in. */
+  function withSink(onLog: CaptureSink): AndroidAdapter {
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog,
+    });
+    adb.setResponse('logcat -v epoch -t 500', RAW_LOGCAT);
+    return adapter;
+  }
+
+  test('streams one formatted console line per logcat row (drain order)', async () => {
+    const lines: Array<[string, string]> = [];
+    const adapter = withSink((channel, line) => {
+      lines.push([channel, line]);
+    });
+    await adapter.console({});
+    expect(lines).toHaveLength(2);
+    expect(lines.every(([channel]) => channel === 'console')).toBe(true);
+    // Oldest first, one browser-style line per row: ISO stamp, level, text, @ tag.
+    expect(lines[0]?.[1]).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z INFO hello @ MyTag$/,
+    );
+    expect(lines[1]?.[1]).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z ERROR boom @ Crash$/,
+    );
+  });
+
+  test('a second drain of the same rows does not stream them twice', async () => {
+    const lines: string[] = [];
+    const adapter = withSink((_channel, line) => {
+      lines.push(line);
+    });
+    await adapter.console({});
+    await adapter.console({});
+    expect(lines).toHaveLength(2);
+  });
+
+  test('the streamed-row set stays bounded: an evicted row is streamed again', async () => {
+    // The dedup set must not grow without limit — a long run drains thousands of
+    // rows. With the cap at 2, the first of three drained rows is evicted, so the
+    // next drain streams it again: delete the eviction branch and the set keeps
+    // every row, nothing is re-streamed, and this fails.
+    const lines: string[] = [];
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog: (_channel, line) => {
+        lines.push(line);
+      },
+      streamedRowsCap: 2,
+    });
+    adb.setResponse(
+      'logcat -v epoch -t 500',
+      '1546300800.000  1000  1001 I Tag1: one\n' +
+        '1546300801.000  1000  1001 I Tag2: two\n' +
+        '1546300802.000  1000  1001 I Tag3: three\n',
+    );
+    await adapter.console({});
+    expect(lines).toHaveLength(3);
+    const earliest = lines[0] ?? '';
+
+    // The next drain re-reads the same tail: the earliest row was evicted (the set
+    // stays inside its bound), so it is streamed again.
+    lines.length = 0;
+    await adapter.console({});
+    expect(lines).toContain(earliest);
+  });
+
+  test('a throwing sink does not fail the read', async () => {
+    const quiet = spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const adapter = withSink(() => {
+        throw new Error('sink down');
+      });
+      const entries = await adapter.console({});
+      expect(entries).toHaveLength(2);
+      expect(entries[0]?.level).toBe('error');
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  test('filters and limit narrow the returned view, not the streamed trail', async () => {
+    const lines: string[] = [];
+    const adapter = withSink((_channel, line) => {
+      lines.push(line);
+    });
+    const entries = await adapter.console({ limit: 1, filters: { level_eq: 'error' } });
+    // Newest first: the error row is the newer one, and the only filter match.
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.level).toBe('error');
+    // Both rows still reached the durable trail.
+    expect(lines).toHaveLength(2);
   });
 });
 

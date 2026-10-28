@@ -2,13 +2,20 @@
  * Rendering + redaction for captured console/network entries.
  *
  * Split out of `cdp.ts` to keep that file under the 500-LOC cap — no behavior
- * change. Everything here is pure: level normalization, body truncation, the two
- * `logs/*.log` line renderers, and the two redactors that keep a credential out
- * of the model's context and out of the durable trail (a secret in a header
+ * change. Everything here is pure: level normalization, body truncation, the
+ * `logs/network.log` line renderer, and the two redactors that keep a credential
+ * out of the model's context and out of the durable trail (a secret in a header
  * VALUE, or in a query param of the URL itself).
+ *
+ * The console-line renderer is SHARED (the android logcat drain renders the
+ * same shape), so it lives in `src/adapters/log-format.ts` and is re-exported
+ * here — every existing reader keeps its import path.
  */
 
 import type { ConsoleEntry, NetworkEntry } from '../contract.js';
+import { stamp } from '../log-format.js';
+
+export { formatConsoleLine } from '../log-format.js';
 
 /**
  * Per-body character cap. Big enough for an error payload or a small collection,
@@ -140,17 +147,6 @@ export function normalizeConsoleLevel(type: string): ConsoleEntry['level'] {
 }
 
 // --- Line formatting (durable log trail) ------------------------------------
-
-/** ISO-8601 stamp from epoch ms; deterministic given the injected clock. */
-function stamp(ts: number): string {
-  return new Date(ts).toISOString();
-}
-
-/** Render a {@link ConsoleEntry} as one greppable `logs/console.log` line. */
-export function formatConsoleLine(entry: ConsoleEntry): string {
-  const where = entry.location ? ` @ ${entry.location}` : '';
-  return `${stamp(entry.timestamp)} ${entry.level.toUpperCase()} ${entry.text}${where}`;
-}
 
 /** One log line's worth of a captured body — single-line, hard-capped, never secret-bearing. */
 function bodySnippet(label: string, body: string | undefined): string {
