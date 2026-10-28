@@ -41,7 +41,7 @@ npx @developerz.ai/ui-debugger-mcp@latest init   # run in the project root
 
 `init` (idempotent — won't clobber existing files):
 1. creates the workspace dir `./tmp/ui-debugger-mcp/`
-2. writes a starter config — deepseek/glm model defaults + a `web` target stub
+2. writes a starter config — deepseek/qwen model defaults + a `web` target stub
    (`http://localhost:3000`) — only if absent, at `.dz/ui-debugger/ui-debugger-mcp.json`
    when the repo already has a `.dz/` dir, else at the root `.ui-debugger-mcp.json`
 3. adds `tmp/` to `.gitignore`
@@ -277,7 +277,7 @@ when both are set). No vendor lock-in (same posture as `../ai-task-master`).
 - **z.ai, DeepSeek, OpenAI, local (vLLM/Ollama), …** — point `OPENAI_BASE_URL`
   at their OpenAI-compatible URL and use that provider's model names.
 
-### Defaults (deepseek for text, glm for image)
+### Defaults (deepseek for text, qwen for image)
 
 | Role | Default | Why |
 |------|---------|-----|

@@ -305,12 +305,14 @@ export async function buildSession(
   const address = openAddress(targetConfig);
   const origin = runOrigin(targetConfig);
   await writeFile(paths.storyMd, renderStoryMd(target, address, goal, criteriaLines), 'utf8');
-  const store = new FindingsStore(paths);
-  // Bound once, applied to EVERY durable log line this run writes. A persona's
+  // Bound once, applied to findings text and EVERY durable log line. A persona's
   // values are typed into the app, so they come back at us through the form POST
   // in `network.log` and through anything an adapter error quotes — the same
   // posture `log-format.ts` already holds for credential headers and `?token=`.
   const redact = createSecretRedactor(auth ? Object.values(auth.persona.fields) : []);
+  // The store redacts findings TEXT on write; the sink redacts every captured
+  // row on its way in — one writer, one redaction gate.
+  const store = new FindingsStore(paths, redact);
   // The run's ONE capture sink — the browser's CDP capture and the android logcat
   // drain both stream into it, so every captured row is redacted on its way to disk.
   const onLog = createCaptureSink(store, redact);
@@ -439,7 +441,8 @@ export async function buildSession(
       // Out-of-band and BEFORE the loop: the driver never sees the credentials, and
       // a login that cannot complete fails `start_debug` outright instead of handing
       // back a run that will report every screen behind it as empty. See `login.ts`.
-      const steps = await signIn(adapter, auth, targetConfig, logAgent, timeoutMs);
+      // Login awaits this sink so open() returns with its auth trail durable.
+      const steps = await signIn(adapter, auth, targetConfig, flushAgentLog, timeoutMs);
       for (const step of steps) trail.record(step);
     },
     run,

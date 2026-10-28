@@ -21,7 +21,7 @@ treat/gate the call):
 | `get_findings` | `readOnlyHint: true` |
 | `end_session` | `idempotentHint: true` |
 
-Evidence paths (screenshots, `replay.mp4`, logs) in a result are additionally
+Evidence paths (screenshots, `replay.mp4`) in a result are additionally
 returned as `resource_link` content items (`file://` URIs), not just inline path
 strings — a client can act on them without parsing text. A run failure surfaces
 as `isError: true` on the result, never a protocol-level error.
