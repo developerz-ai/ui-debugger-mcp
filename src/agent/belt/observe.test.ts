@@ -1,5 +1,4 @@
 import { expect, test } from 'bun:test';
-import { createSecretRedactor } from '../../adapters/browser/log-format.js';
 import type {
   Adapter,
   ConsoleEntry,
@@ -11,6 +10,7 @@ import type {
 } from '../../adapters/contract.js';
 import { AdapterError, AgentError } from '../../errors.js';
 import type { Findings } from '../../findings/schema.js';
+import { createSecretRedactor } from '../../redact.js';
 import type { EvidenceRecorder } from './look.js';
 import { coerceWithin, createObserveTool, ObserveInputSchema, runObserve } from './observe.js';
 import { type FindingsWriter, runReport } from './report.js';

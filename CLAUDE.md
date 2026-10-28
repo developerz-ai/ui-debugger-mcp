@@ -188,9 +188,11 @@ unresolvable field/submit, or a submit that left the run still on `path`
 (AuthError). NEVER a silently signed-out run — that reports every screen behind
 the login as an empty page.
 
-**Redaction.** `createSecretRedactor` (`browser/log-format.ts`) is bound per run to
-the persona's values and wraps every `logs/*.log` sink — plain, percent-encoded,
-`+`-for-space and JSON-escaped spellings. `describe` exposes names only.
+**Redaction.** `createSecretRedactor` (`src/redact.ts` — the neutral home, a
+sibling of `errors.ts`) is bound per run to the persona's values and wraps every
+`logs/*.log` sink — plain, percent-encoded, `+`-for-space and JSON-escaped
+spellings. Its signature is the named `Redactor` type, `(text: string) => string`,
+which every redactor parameter is annotated with. `describe` exposes names only.
 
 ## Target `notes` — preconditions, not a goal
 `targets.<t>.notes` (any adapter) = what is EXPECTED of this app: "needs seeded

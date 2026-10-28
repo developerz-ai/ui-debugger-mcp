@@ -2,9 +2,9 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createSecretRedactor } from '../adapters/browser/log-format.js';
 import { FindingsError } from '../errors.js';
 import { type Findings, FindingsSchema } from '../findings/schema.js';
+import { createSecretRedactor } from '../redact.js';
 import { FindingsStore } from './findings-store.js';
 import { sessionPaths, workspacePaths } from './workspace.js';
 
