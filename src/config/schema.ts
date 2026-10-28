@@ -6,7 +6,7 @@
 
 import { z } from 'zod';
 
-/** Per-role model strings (OpenAI-compatible router; defaults: deepseek text, glm image). */
+/** Per-role model strings (OpenAI-compatible router; defaults: deepseek text, qwen image). */
 export const ModelsSchema = z.strictObject({
   driver: z.string(), // fast guy — controls the target (blind, text)
   vision: z.string(), // vision guy — describes screenshots, judges looks
