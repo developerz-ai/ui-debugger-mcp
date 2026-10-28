@@ -39,6 +39,24 @@ test('formatConsoleLine omits location when absent', () => {
   );
 });
 
+test('formatConsoleLine puts the tab marker between the timestamp and the level', () => {
+  expect(
+    formatConsoleLine({
+      level: 'error',
+      text: 'boom',
+      location: 'app.js:1:2',
+      timestamp: 0,
+      tab: 'tab-1',
+    }),
+  ).toBe('1970-01-01T00:00:00.000Z [tab-1] ERROR boom @ app.js:1:2');
+});
+
+test('formatConsoleLine keeps the marker last-but-one when there is no location', () => {
+  expect(formatConsoleLine({ level: 'log', text: 'hi', timestamp: 0, tab: 'tab-3' })).toBe(
+    '1970-01-01T00:00:00.000Z [tab-3] LOG hi',
+  );
+});
+
 test('formatNetworkLine renders status and resourceType', () => {
   expect(
     formatNetworkLine({
@@ -63,6 +81,34 @@ test('formatNetworkLine renders failures', () => {
       timestamp: 0,
     }),
   ).toBe('1970-01-01T00:00:00.000Z POST http://x/b → FAILED net::ERR');
+});
+
+test('formatNetworkLine puts the tab marker between the timestamp and the method', () => {
+  expect(
+    formatNetworkLine({
+      method: 'GET',
+      url: 'http://x/a',
+      status: 200,
+      ok: true,
+      resourceType: 'fetch',
+      timestamp: 0,
+      tab: 'tab-2',
+    }),
+  ).toBe('1970-01-01T00:00:00.000Z [tab-2] GET http://x/a → 200 [fetch]');
+});
+
+test('formatNetworkLine keeps the marker on a failed exchange too', () => {
+  expect(
+    formatNetworkLine({
+      method: 'POST',
+      url: 'http://x/b',
+      status: 0,
+      ok: false,
+      error: 'net::ERR',
+      timestamp: 0,
+      tab: 'tab-2',
+    }),
+  ).toBe('1970-01-01T00:00:00.000Z [tab-2] POST http://x/b → FAILED net::ERR');
 });
 
 test('formatNetworkLine carries duration + the payloads of a failure', () => {

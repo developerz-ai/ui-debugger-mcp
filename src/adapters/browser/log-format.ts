@@ -6,6 +6,12 @@
  * `logs/*.log` line renderers, and the two redactors that keep a credential out
  * of the model's context and out of the durable trail (a secret in a header
  * VALUE, or in a query param of the URL itself).
+ *
+ * Both renderers put the TAB MARKER between the timestamp and the row
+ * (`<ISO> [tab-1] LEVEL text @ location`, `<ISO> [tab-1] METHOD url → 200 …`),
+ * so a line says which tab produced it. The marker is an opaque label — no
+ * URL, no title, no secret — and a row without a tab renders exactly as it did
+ * before the marker existed.
  */
 
 import type { ConsoleEntry, NetworkEntry } from '../contract.js';
@@ -106,10 +112,21 @@ function stamp(ts: number): string {
   return new Date(ts).toISOString();
 }
 
+/**
+ * The tab marker, between the timestamp and the row — ` [tab-1]`.
+ *
+ * Empty when the entry carries no tab (a target without tabs — desktop,
+ * mobile): such a row renders byte-identically to the line it rendered before
+ * the marker existed.
+ */
+function tabMarker(tab: string | undefined): string {
+  return tab === undefined ? '' : ` [${tab}]`;
+}
+
 /** Render a {@link ConsoleEntry} as one greppable `logs/console.log` line. */
 export function formatConsoleLine(entry: ConsoleEntry): string {
   const where = entry.location ? ` @ ${entry.location}` : '';
-  return `${stamp(entry.timestamp)} ${entry.level.toUpperCase()} ${entry.text}${where}`;
+  return `${stamp(entry.timestamp)}${tabMarker(entry.tab)} ${entry.level.toUpperCase()} ${entry.text}${where}`;
 }
 
 /** One log line's worth of a captured body — single-line, hard-capped, never secret-bearing. */
@@ -126,7 +143,7 @@ function bodySnippet(label: string, body: string | undefined): string {
  * the exact dead end this log exists to prevent.
  */
 export function formatNetworkLine(entry: NetworkEntry): string {
-  const head = `${stamp(entry.timestamp)} ${entry.method} ${entry.url}`;
+  const head = `${stamp(entry.timestamp)}${tabMarker(entry.tab)} ${entry.method} ${entry.url}`;
   const sent = bodySnippet('req', entry.requestBody);
   if (entry.error !== undefined) return `${head} → FAILED ${entry.error}${sent}`;
   const type = entry.resourceType ? ` [${entry.resourceType}]` : '';

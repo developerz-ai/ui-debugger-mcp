@@ -7,6 +7,7 @@
 import { expect, test } from 'bun:test';
 import type { Page } from 'playwright-core';
 import { BODY_UNFINISHED, type CaptureSink, CdpCapture } from './cdp.js';
+import { TabContext } from './tab-context.js';
 
 // --- Fakes ------------------------------------------------------------------
 
@@ -107,15 +108,17 @@ function setup(opts?: {
   bodyWaitMs?: number;
 }) {
   const page = new FakeEmitter();
+  const tabs = new TabContext();
   const cap = new CdpCapture({
     page: page as unknown as Page,
+    tabs,
     now: opts?.now ?? (() => 1000),
     cap: opts?.cap,
     sink: opts?.sink,
     bodyWaitMs: opts?.bodyWaitMs,
   });
   cap.start();
-  return { page, cap };
+  return { page, cap, tabs };
 }
 
 // --- CdpCapture -------------------------------------------------------------
@@ -243,7 +246,11 @@ test('an unreadable body is not a capture failure — the exchange still lands',
 test('times a request from send to response', async () => {
   let clock = 1000;
   const page = new FakeEmitter();
-  const cap = new CdpCapture({ page: page as unknown as Page, now: () => clock });
+  const cap = new CdpCapture({
+    page: page as unknown as Page,
+    tabs: new TabContext(),
+    now: () => clock,
+  });
   cap.start();
   const response = fakeResponse({
     url: 'http://x/api/slow',
@@ -270,7 +277,11 @@ test('network() sorts newest-first by capture time, not by await order', async (
   // A slow body resolves after a later response's — insertion order lies.
   let clock = 1000;
   const page = new FakeEmitter();
-  const cap = new CdpCapture({ page: page as unknown as Page, now: () => clock });
+  const cap = new CdpCapture({
+    page: page as unknown as Page,
+    tabs: new TabContext(),
+    now: () => clock,
+  });
   cap.start();
   const slow = {
     ...fakeResponse({ url: 'http://x/api/slow', status: 200, ok: true, resourceType: 'fetch' }),
@@ -338,8 +349,8 @@ test('streams formatted lines to the sink as entries arrive', async () => {
   page.emit('response', fakeResponse({ url: 'http://x/a', status: 200, ok: true }));
   await flush();
   expect(lines).toEqual([
-    ['console', '1970-01-01T00:00:00.000Z WARN hi'],
-    ['network', '1970-01-01T00:00:00.000Z GET http://x/a → 200 [fetch]'],
+    ['console', '1970-01-01T00:00:00.000Z [tab-1] WARN hi'],
+    ['network', '1970-01-01T00:00:00.000Z [tab-1] GET http://x/a → 200 [fetch]'],
   ]);
 });
 
@@ -385,6 +396,110 @@ test('rebind on a stopped capture does not resubscribe', () => {
   const next = new FakeEmitter();
   cap.rebind(next as unknown as Page);
   expect(next.count()).toBe(0);
+});
+
+// --- tab attribution ---------------------------------------------------------
+
+test('a row captured before a rebind keeps the tab it was captured on', () => {
+  // The label rides on the ROW, not on the capture's current page: a switch
+  // after the fact must not relabel what already happened.
+  const lines: Array<[string, string]> = [];
+  const { page, cap } = setup({ now: () => 0, sink: (ch, line) => lines.push([ch, line]) });
+  page.emit('console', fakeConsole('error', 'from the first tab', '', 0, 0));
+
+  const next = new FakeEmitter();
+  cap.rebind(next as unknown as Page);
+  next.emit('console', fakeConsole('error', 'from the second tab', '', 0, 0));
+
+  expect(lines).toEqual([
+    ['console', '1970-01-01T00:00:00.000Z [tab-1] ERROR from the first tab'],
+    ['console', '1970-01-01T00:00:00.000Z [tab-2] ERROR from the second tab'],
+  ]);
+});
+
+test('a network row whose line lands after the switch still names its original tab', async () => {
+  // The row is buffered when the response arrives, but its LINE is written only
+  // after the body/header await resolves — by then the driver has switched tabs.
+  // Reading the tab at that moment would file the row under the new tab.
+  const lines: string[] = [];
+  const { page, cap } = setup({ now: () => 0, sink: (_ch, line) => lines.push(line) });
+  const slow = {
+    ...fakeResponse({ url: 'http://x/api/slow', status: 200, ok: true, resourceType: 'fetch' }),
+    text: async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      return '{}';
+    },
+  };
+  page.emit('response', slow);
+
+  const next = new FakeEmitter();
+  cap.rebind(next as unknown as Page);
+  // The new tab is seen NOW — so it owns a label of its own.
+  next.emit('console', fakeConsole('log', 'after the switch', '', 0, 0));
+
+  await new Promise((r) => setTimeout(r, 40));
+  expect(lines).toEqual([
+    '1970-01-01T00:00:00.000Z [tab-2] LOG after the switch',
+    '1970-01-01T00:00:00.000Z [tab-1] GET http://x/api/slow → 200 [fetch]',
+  ]);
+});
+
+test('rebinding to the SAME page keeps the same label', () => {
+  // A tab switch back to a page already seen must not mint a second name for
+  // it — the marker has to keep meaning the same tab for the whole run.
+  const lines: string[] = [];
+  const { page, cap } = setup({ now: () => 0, sink: (_ch, line) => lines.push(line) });
+  page.emit('console', fakeConsole('log', 'first sighting', '', 0, 0));
+  cap.rebind(page as unknown as Page);
+  page.emit('console', fakeConsole('log', 'second sighting', '', 0, 0));
+
+  expect(lines).toEqual([
+    '1970-01-01T00:00:00.000Z [tab-1] LOG first sighting',
+    '1970-01-01T00:00:00.000Z [tab-1] LOG second sighting',
+  ]);
+});
+
+test('an uncaught exception names the tab it happened on', () => {
+  // `pageerror` is a handler of its own: without a stamp its row reaches
+  // logs/console.log with no tab at all, and the trail cannot say which tab
+  // threw.
+  const lines: Array<[string, string]> = [];
+  const { page, cap } = setup({ now: () => 0, sink: (ch, line) => lines.push([ch, line]) });
+  page.emit('pageerror', new Error('first tab blew up'));
+
+  const next = new FakeEmitter();
+  cap.rebind(next as unknown as Page);
+  next.emit('pageerror', new Error('second tab blew up'));
+
+  expect(lines.map(([channel]) => channel)).toEqual(['console', 'console']);
+  // The `@ location` suffix carries a stack frame, so only the head is pinned.
+  expect(lines[0]?.[1]).toMatch(/^\S+ \[tab-1\] ERROR first tab blew up/);
+  expect(lines[1]?.[1]).toMatch(/^\S+ \[tab-2\] ERROR second tab blew up/);
+  expect(cap.console().map((e) => e.tab)).toEqual(['tab-2', 'tab-1']);
+});
+
+test('a failed request names the tab it failed on', () => {
+  // `requestfailed` is a handler of its own: a failed exchange that reaches
+  // logs/network.log without a marker cannot be traced back to a tab.
+  const lines: Array<[string, string]> = [];
+  const { page, cap } = setup({ now: () => 0, sink: (ch, line) => lines.push([ch, line]) });
+  page.emit('requestfailed', fakeFailed({ url: 'http://x/first', errorText: 'net::ERR_FAILED' }));
+
+  const next = new FakeEmitter();
+  cap.rebind(next as unknown as Page);
+  next.emit(
+    'requestfailed',
+    fakeFailed({ url: 'http://x/second', errorText: 'net::ERR_CONNECTION_RESET' }),
+  );
+
+  expect(lines.map(([channel]) => channel)).toEqual(['network', 'network']);
+  expect(lines[0]?.[1]).toBe(
+    '1970-01-01T00:00:00.000Z [tab-1] GET http://x/first → FAILED net::ERR_FAILED',
+  );
+  expect(lines[1]?.[1]).toBe(
+    '1970-01-01T00:00:00.000Z [tab-2] GET http://x/second → FAILED net::ERR_CONNECTION_RESET',
+  );
+  expect(cap.network().map((e) => e.tab)).toEqual(['tab-2', 'tab-1']);
 });
 
 test('an abort after a response is teardown, not a second failed request', async () => {

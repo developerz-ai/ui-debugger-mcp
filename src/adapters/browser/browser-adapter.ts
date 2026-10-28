@@ -59,6 +59,7 @@ import { openBrowserHandles } from './lifecycle.js';
 import { locateAcrossFrames, regionAcrossFrames, waitAcrossFrames } from './locate.js';
 import { redactUrl } from './log-format.js';
 import { normalizeQuery } from './query.js';
+import type { TabContext } from './tab-context.js';
 
 // The adapter stays the one import surface its callers (and tests) know: the
 // helpers it leans on live in `geometry.ts`/`launch.ts`, and the create/attach
@@ -113,6 +114,15 @@ export class BrowserAdapter implements Adapter {
   readonly #browser: Browser | null;
   readonly #mode: 'managed' | 'attach';
   readonly #capture: CdpCapture;
+  /**
+   * The run's tab registry — the same one the capture stamps rows with.
+   *
+   * It hands out a label per PAGE (`tab-1`, `tab-2`, …) that survives a tab
+   * switch and a closing tab shifting the positional indices, so the marker in
+   * `logs/console.log` / `logs/network.log` always names the tab the driver
+   * drove — never the index it happened to hold at the time.
+   */
+  readonly #tabs: TabContext;
 
   /**
    * Full-document loads the page performed on its own, oldest first — see
@@ -139,6 +149,11 @@ export class BrowserAdapter implements Adapter {
     this.#browser = handles.browser;
     this.#mode = handles.mode;
     this.#capture = handles.capture;
+    this.#tabs = handles.tabs;
+    // First sight of the run's first tab: it is `tab-1` from the start, even if
+    // it never logs anything — the label names the PAGE, it is not a reward for
+    // activity.
+    this.#tabs.label(handles.page);
     this.#page.on('load', this.#onLoad);
   }
 
@@ -368,6 +383,11 @@ export class BrowserAdapter implements Adapter {
       return Promise.all(
         pages.map(async (page, index) => ({
           index,
+          // The stable label of THIS page — the same marker the console/network
+          // rows carry, so a `[tab-2]` line in the log resolves to the tab that
+          // produced it. It follows the page, not this index: closing an earlier
+          // tab shifts the indices and the marker stays.
+          id: this.#tabs.label(page),
           // Tab URLs reach the driver verbatim via observe({kind:'tabs'}) and
           // act's multi-tab hint, so credential-bearing query values (?code=,
           // ?token=, ?signature=…) are redacted here at the source — the same
