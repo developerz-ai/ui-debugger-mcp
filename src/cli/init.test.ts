@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { dirname, join } from 'node:path';
 import { ConfigSchema } from '../config/schema.js';
 import { InitError } from '../errors.js';
-import { runInit } from './init.js';
+import { runInit, STARTER_CONFIG, validateStarterConfig } from './init.js';
 
 const TMP = join(import.meta.dir, '__test_init_tmp__');
 
@@ -337,4 +337,102 @@ test('only-if-absent honoured for the found candidate: an existing .dz/ copy is 
   writeCandidate(DZ_CONFIG, original);
   runInit(TMP);
   expect(readFileSync(join(TMP, DZ_CONFIG), 'utf8')).toBe(original);
+});
+
+// --- starter ↔ schema binding ------------------------------------------------
+//
+// `init` is the one place that HANDS OUT a config file, and the server parses
+// that file with `ConfigSchema`. The starter is therefore bound to the schema
+// twice: a compile-time link (`satisfies Config` in init.ts) and a runtime gate
+// on the write path (`validateStarterConfig`). The tests below are the
+// NEGATIVE control — delete the validation from init.ts and they fail.
+
+test('the starter validator accepts the shipped starter', () => {
+  // The happy path of the gate: a validator that rejected everything would
+  // pass the negative tests below and break every scaffold.
+  expect(validateStarterConfig(STARTER_CONFIG)).toBeDefined();
+});
+
+test('the starter validator rejects an unknown key with an InitError naming the issue', () => {
+  const candidate = { ...STARTER_CONFIG, bogus: true };
+  expect(() => validateStarterConfig(candidate)).toThrow(InitError);
+  expect(() => validateStarterConfig(candidate)).toThrow(/bogus/);
+});
+
+test('the starter validator rejects a non-URL url with an InitError naming the issue', () => {
+  const candidate = {
+    ...STARTER_CONFIG,
+    targets: { web: { ...STARTER_CONFIG.targets.web, url: 'not-a-url' } },
+  };
+  expect(() => validateStarterConfig(candidate)).toThrow(InitError);
+  // The error names the offending FIELD, not just "invalid".
+  expect(() => validateStarterConfig(candidate)).toThrow(/targets\.web\.url/);
+});
+
+test('runInit refuses to write a config file when the starter violates the schema', () => {
+  const invalid = { ...STARTER_CONFIG, bogus: true };
+  expect(() => runInit(TMP, { starter: invalid })).toThrow(InitError);
+  // Nothing lands on disk: no config file, no .gitignore line, no workspace.
+  expect(existsSync(join(TMP, '.ui-debugger-mcp.json'))).toBe(false);
+  expect(existsSync(join(TMP, DZ_CONFIG))).toBe(false);
+  expect(existsSync(join(TMP, '.gitignore'))).toBe(false);
+  expect(existsSync(join(TMP, 'tmp', 'ui-debugger-mcp'))).toBe(false);
+});
+
+test('runInit writes no .dz/ config either when the starter violates the schema', () => {
+  mkdirSync(join(TMP, '.dz'), { recursive: true });
+  const invalid = {
+    ...STARTER_CONFIG,
+    targets: { web: { ...STARTER_CONFIG.targets.web, url: 'not-a-url' } },
+  };
+  expect(() => runInit(TMP, { starter: invalid })).toThrow(InitError);
+  expect(existsSync(join(TMP, DZ_CONFIG))).toBe(false);
+  expect(existsSync(join(TMP, '.ui-debugger-mcp.json'))).toBe(false);
+});
+
+test('runInit rejects a null starter instead of falling back to the default', () => {
+  // `null` is a legal candidate for the `unknown`-typed `starter` option but
+  // invalid per ConfigSchema. Resolving the default with `??` would treat it
+  // as "no starter given" and scaffold the default config — the default must
+  // resolve for `undefined` only, so `null` has to throw and leave the
+  // project untouched.
+  expect(() => runInit(TMP, { starter: null })).toThrow(InitError);
+  expect(existsSync(join(TMP, '.ui-debugger-mcp.json'))).toBe(false);
+  expect(existsSync(join(TMP, DZ_CONFIG))).toBe(false);
+  expect(existsSync(join(TMP, '.gitignore'))).toBe(false);
+  expect(existsSync(join(TMP, 'tmp', 'ui-debugger-mcp'))).toBe(false);
+});
+
+test('an existing invalid config is never rejected — init still succeeds', () => {
+  // The read of an EXISTING config stays lenient: `init` only needs the
+  // `workspace` field, so a file the server would reject must not block
+  // re-running init. Only the starter this run WRITES is schema-checked.
+  const configPath = join(TMP, '.ui-debugger-mcp.json');
+  const original = '{"custom":true}\n';
+  writeFileSync(configPath, original, 'utf8');
+  expect(() => runInit(TMP)).not.toThrow();
+  expect(readFileSync(configPath, 'utf8')).toBe(original);
+});
+
+test('the emitted starter text is byte-identical to the documented defaults', () => {
+  // Pinned literally: models (driver/vision/summary), workspace and the single
+  // `web` target must stay exactly what init has always written.
+  const expected = `{
+  "models": {
+    "driver": "deepseek/deepseek-v4-flash",
+    "vision": "qwen/qwen3-vl-32b-instruct",
+    "summary": "deepseek/deepseek-v4-flash"
+  },
+  "workspace": "./tmp/ui-debugger-mcp",
+  "targets": {
+    "web": {
+      "adapter": "browser",
+      "url": "http://localhost:3000",
+      "headless": true
+    }
+  }
+}
+`;
+  runInit(TMP);
+  expect(readFileSync(join(TMP, '.ui-debugger-mcp.json'), 'utf8')).toBe(expected);
 });
