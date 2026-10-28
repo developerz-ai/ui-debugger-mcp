@@ -258,6 +258,24 @@ function arrayObjectBodies(value: string): readonly string[] {
   return bodies;
 }
 
+/**
+ * The object bodies of a nested collection — at least one, or the example is
+ * drift.
+ *
+ * An empty collection teaches the driver NO key and NO enum value, and a guard
+ * that iterates an empty collection checks nothing at all: it would pass the
+ * very drift it exists to catch (an example whose `bugs` array lost every bug
+ * object). One nonempty example per collection is what keeps the key/enum
+ * checks below reachable.
+ */
+function requiredObjectBodies(what: string, value: string): readonly string[] {
+  const bodies = arrayObjectBodies(value);
+  if (bodies.length === 0) {
+    throw new Error(`the report example never shows a ${what} — the collection is empty`);
+  }
+  return bodies;
+}
+
 /** The quoted strings of a raw value — the enum candidates it teaches. */
 function stringCandidates(value: string): readonly string[] {
   return [...value.matchAll(/"([^"]*)"/g)].map((match) => match[1] ?? '');
@@ -327,9 +345,11 @@ function extractReportExample(prompt: string): string {
  * Assert the report example teaches exactly what the `report` schemas accept.
  *
  * Throws on any drift: a key the schema does not have, a key the example never
- * shows, a value outside a field's enum, or an enum value the example never
- * teaches. The example text is a PARAMETER — the caller reads it out of the
- * prompt — so a test can feed this a mutated copy.
+ * shows, a value outside a field's enum, an enum value the example never
+ * teaches, or a nested collection that shows no object at all (an empty one
+ * teaches no key and no enum — and an empty one would leave the checks below
+ * with nothing to check). The example text is a PARAMETER — the caller reads it
+ * out of the prompt — so a test can feed this a mutated copy.
  */
 function assertReportExampleMatchesSchemas(example: string): void {
   const top = objectPairs(exampleBody(example));
@@ -357,13 +377,13 @@ function assertReportExampleMatchesSchemas(example: string): void {
   );
 
   const stepKeys = Object.keys(StepSchema.shape);
-  for (const body of arrayObjectBodies(requiredValue(top, 'steps'))) {
+  for (const body of requiredObjectBodies('step', requiredValue(top, 'steps'))) {
     assertExampleKeys('a step', stepKeys, objectPairs(body));
   }
 
   const bugKeys = Object.keys(BugSchema.shape);
   const bugKinds = BugSchema.shape.kind.options;
-  for (const body of arrayObjectBodies(requiredValue(top, 'bugs'))) {
+  for (const body of requiredObjectBodies('bug', requiredValue(top, 'bugs'))) {
     const bug = objectPairs(body);
     assertExampleKeys('a bug', bugKeys, bug);
     assertExampleEnum('a bug kind', bugKinds, requiredValue(bug, 'kind'));
@@ -371,7 +391,7 @@ function assertReportExampleMatchesSchemas(example: string): void {
 
   const visualKeys = Object.keys(VisualIssueSchema.shape);
   const severities = VisualIssueSchema.shape.severity.options;
-  for (const body of arrayObjectBodies(requiredValue(top, 'visual'))) {
+  for (const body of requiredObjectBodies('visual issue', requiredValue(top, 'visual'))) {
     const visual = objectPairs(body);
     assertExampleKeys('a visual issue', visualKeys, visual);
     assertExampleEnum('a visual severity', severities, requiredValue(visual, 'severity'));
@@ -435,6 +455,27 @@ test('the report-example guard rejects an enum value the example never teaches',
   );
   expect(halfTaught).not.toBe(example);
   expect(() => assertReportExampleMatchesSchemas(halfTaught)).toThrow(/never teaches "flow"/);
+});
+
+test('the report-example guard rejects an empty nested collection', () => {
+  const example = extractReportExample(debugAgentPrompt(false));
+
+  // An empty collection teaches the driver no key and no enum value — and a
+  // guard that iterated an empty collection would check nothing, so it would
+  // pass the very drift it exists to catch. Every nested collection must carry
+  // at least one object example.
+  const collections: readonly (readonly [string, string])[] = [
+    ['steps', 'step'],
+    ['bugs', 'bug'],
+    ['visual', 'visual issue'],
+  ];
+  for (const [key, what] of collections) {
+    const emptied = example.replace(new RegExp(`"${key}":\\s*\\[[\\s\\S]*?\\],`), `"${key}": [],`);
+    expect(emptied).not.toBe(example);
+    expect(() => assertReportExampleMatchesSchemas(emptied)).toThrow(
+      new RegExp(`never shows a ${what}`),
+    );
+  }
 });
 
 test('the report-example guard fails loud when the example cannot be read', () => {
