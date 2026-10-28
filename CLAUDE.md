@@ -140,8 +140,20 @@ managed vs attach: `cdpUrl` (web) / `adbSerial` (android) → attach, never star
 `./tmp/ui-debugger-mcp/<project>/`
 - `chrome-user-data/` — persistent profile (login, cookies, storage).
 - `sessions/<id>/` — `story.md`, `screenshots/`, `findings.json`, `logs/`.
-- `logs/` — `console.log`, `network.log`, `agent.log`.
 - `state.json` — session keyed by cwd.
+
+The three log trails live in the SESSION, never at the project level:
+`sessions/<id>/logs/{console,network,agent}.log` — `console` is the browser/app
+console, `network` the request/response trail, `agent` the small agent's step
+trail. Path pinned by `sessionPaths().logs` (`src/session/workspace.ts:150`),
+written by `appendLog` (`src/session/findings-store.ts:127`).
+
+Which files exist depends on the run: `console`/`network` come from the browser
+adapter's CDP capture sink (`src/adapters/browser/cdp.ts:154`, wired at
+`src/services/session-builder.ts:293`) — that sink is threaded to the browser
+adapter ONLY (`src/adapters/factory.ts:76`), so a desktop/mobile run writes no
+console or network trail. `agent` is the agent sink
+(`src/services/session-builder.ts:323`).
 
 Session id **is** a local timestamp: `YYYY-MM-DD_HH-MM-SS-NNNN`
 (`2026-07-27_14-30-05-0001`). Fixed-width, so byte order == time order.
