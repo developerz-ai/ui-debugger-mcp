@@ -238,8 +238,10 @@ export interface TabInfo {
   url: string;
   /** Document title, empty while a fresh tab is still loading. */
   title: string;
-  /** Whether this is the tab the adapter currently drives. */
+  /** Whether this is the tab the adapter currently drives, independent of visibility. */
   active: boolean;
+  /** Live document.visibilityState === 'visible', when measured; not OS-window focus. */
+  visible?: boolean;
 }
 
 /**

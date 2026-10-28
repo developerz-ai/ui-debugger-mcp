@@ -9,13 +9,13 @@ import { MockLanguageModelV3 } from 'ai/test';
 import { chromium } from 'playwright-core';
 import { z } from 'zod';
 import { BrowserAdapter } from '../adapters/browser/browser-adapter.js';
-import { createSecretRedactor } from '../adapters/browser/log-format.js';
 import type { Adapter } from '../adapters/contract.js';
 import { DesktopAdapter } from '../adapters/desktop/desktop-adapter.js';
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import { AdapterError, AuthError, ConfigError, TargetNotFoundError } from '../errors.js';
 import { FindingsSchema } from '../findings/schema.js';
+import { createSecretRedactor } from '../redact.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { sessionPaths, workspacePaths } from '../session/workspace.js';
 import {

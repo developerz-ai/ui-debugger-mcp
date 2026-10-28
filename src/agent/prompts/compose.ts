@@ -59,7 +59,7 @@ export interface ComposeOptions {
    * NAME AND PATH ONLY. The credentials are typed out-of-band before the first
    * step and never enter this prompt — the system prompt is resent to the
    * provider on EVERY step, and the repo's standing rule for a secret is that it
-   * never reaches the model's context (see `adapters/browser/log-format.ts`).
+   * never reaches the model's context (see `src/redact.ts`).
    * What the driver needs is not the recipe, it is knowing it is already inside.
    */
   auth?: { persona: string; loginPath: string };
