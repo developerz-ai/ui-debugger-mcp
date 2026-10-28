@@ -11,8 +11,8 @@ slices:
     status: not_started
     percent: 0
   - file: 02-findings-pipeline.md
-    status: not_started
-    percent: 0
+    status: done
+    percent: 100
   - file: 03-belt-prompts.md
     status: not_started
     percent: 0
@@ -38,5 +38,5 @@ slices:
     status: not_started
     percent: 0
 evidence: []
-notes: "Source: 6 parallel review agents + MCP ecosystem research, 2026-07-20. 4 high-severity findings (2 android, 2 findings-pipeline)."
+notes: "Source: 6 parallel review agents + MCP ecosystem research, 2026-07-20. 4 high-severity findings (2 android, 2 findings-pipeline). Slice 02 reconciled: all five findings-pipeline fixes verified already shipped in the tree — dispositions and anchors in 02-findings-pipeline.md; no open work remains."
 last_updated: 2026-07-20
