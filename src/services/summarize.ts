@@ -24,6 +24,7 @@ import type { LanguageModel } from 'ai';
 import { generateText } from 'ai';
 import { AgentError } from '../errors.js';
 import type { Findings } from '../findings/schema.js';
+import type { Redactor } from '../redact.js';
 import type { SummarizeStep } from '../session/session.js';
 
 /** What `summarize` asks the summary model: our system prompt + the findings digest. */
@@ -108,7 +109,7 @@ export async function summarize(
   generate: SummaryGenerate,
   findings: Findings,
   signal?: AbortSignal,
-  redact?: (line: string) => string,
+  redact?: Redactor,
 ): Promise<string> {
   const { text } = await generate({
     system: SUMMARY_SYSTEM_PROMPT,
@@ -129,10 +130,7 @@ export async function summarize(
  * (the run's secret redactor, identity when omitted) is forwarded so the digest
  * sent to the provider carries no raw persona value.
  */
-export function createSummarize(
-  model: LanguageModel,
-  redact?: (line: string) => string,
-): SummarizeStep {
+export function createSummarize(model: LanguageModel, redact?: Redactor): SummarizeStep {
   // Forward the session's teardown signal so an aborted close cancels the in-flight
   // summary call instead of leaving a stalled model request dangling.
   const generate: SummaryGenerate = async ({ system, prompt, abortSignal }) => {

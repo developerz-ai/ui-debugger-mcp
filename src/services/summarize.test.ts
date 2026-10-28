@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test';
 import { MockLanguageModelV3 } from 'ai/test';
-import { createSecretRedactor } from '../adapters/browser/log-format.js';
 import { AgentError } from '../errors.js';
 import type { Findings } from '../findings/schema.js';
+import { createSecretRedactor } from '../redact.js';
 import { createSummarize, findingsDigest, SUMMARY_SYSTEM_PROMPT, summarize } from './summarize.js';
 
 // --- findingsDigest ----------------------------------------------------------
