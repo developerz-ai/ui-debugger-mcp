@@ -10,10 +10,16 @@
  * The console-line renderer is SHARED (the android logcat drain renders the
  * same shape), so it lives in `src/adapters/log-format.ts` and is re-exported
  * here — every existing reader keeps its import path.
+ *
+ * Both renderers put the TAB MARKER between the timestamp and the row
+ * (`<ISO> [tab-1] LEVEL text @ location`, `<ISO> [tab-1] METHOD url → 200 …`),
+ * so a line says which tab produced it. The marker is an opaque label — no
+ * URL, no title, no secret — and a row without a tab renders exactly as it did
+ * before the marker existed.
  */
 
 import type { ConsoleEntry, NetworkEntry } from '../contract.js';
-import { stamp } from '../log-format.js';
+import { stamp, tabMarker } from '../log-format.js';
 
 export { formatConsoleLine } from '../log-format.js';
 
@@ -122,7 +128,7 @@ function bodySnippet(label: string, body: string | undefined): string {
  * the exact dead end this log exists to prevent.
  */
 export function formatNetworkLine(entry: NetworkEntry): string {
-  const head = `${stamp(entry.timestamp)} ${entry.method} ${entry.url}`;
+  const head = `${stamp(entry.timestamp)}${tabMarker(entry.tab)} ${entry.method} ${entry.url}`;
   const sent = bodySnippet('req', entry.requestBody);
   if (entry.error !== undefined) return `${head} → FAILED ${entry.error}${sent}`;
   const type = entry.resourceType ? ` [${entry.resourceType}]` : '';

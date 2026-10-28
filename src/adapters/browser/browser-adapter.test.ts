@@ -103,6 +103,9 @@ test('attachment controls a hidden page without foregrounding it; tab URLs stay 
     expect(await adapter.tabs()).toEqual([
       {
         index: 0,
+        // The stable label of the PAGE — the same marker the console/network
+        // rows carry, so a `[tab-2]` line in the log resolves to a tab.
+        id: 'tab-1',
         url: 'https://example.com/tab-0?code=<redacted, 6 chars>&view=details',
         title: 'Tab 0',
         active: true,
@@ -110,6 +113,7 @@ test('attachment controls a hidden page without foregrounding it; tab URLs stay 
       },
       {
         index: 1,
+        id: 'tab-2',
         url: 'https://example.com/tab-1?code=<redacted, 6 chars>&view=details',
         title: 'Tab 1',
         active: false,

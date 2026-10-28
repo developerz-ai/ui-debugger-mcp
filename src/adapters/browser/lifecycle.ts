@@ -25,6 +25,7 @@ import { capWait } from '../budget.js';
 import type { CaptureSink } from './cdp.js';
 import { CdpCapture } from './cdp.js';
 import { closeOnFailure, createFailure, LAUNCH_TIMEOUT_MS, resolveLaunchBinary } from './launch.js';
+import { TabContext } from './tab-context.js';
 
 export interface AdapterHandles {
   config: WebTarget;
@@ -33,6 +34,8 @@ export interface AdapterHandles {
   browser: Browser | null;
   mode: 'managed' | 'attach';
   capture: CdpCapture;
+  /** The run's tab registry — one naming scheme for the capture and the adapter. */
+  tabs: TabContext;
 }
 
 /** The slice of `chromium` this adapter actually calls — the test seam below overrides it. */
@@ -61,13 +64,18 @@ export interface BrowserAdapterInit {
 export async function openBrowserHandles(init: BrowserAdapterInit): Promise<AdapterHandles> {
   const { cdpUrl } = init.config;
   const launcher = init.chromium ?? chromium;
+  // ONE registry names every tab of this run: the capture stamps a row with the
+  // label of the page it fired on, and the adapter's `tabs()` listing reports
+  // the same label — so a `[tab-2]` marker in the durable log resolves to the
+  // tab the driver drove.
+  const tabs = new TabContext();
   // Nothing raw escapes: launch, connect and post-connect wiring all leave here as
   // AdapterError (header contract). Cleanup of a half-built adapter happens below.
   const wait = capWait(LAUNCH_TIMEOUT_MS, init.timeoutMs);
   try {
     return cdpUrl
-      ? await attachHandles(init.config, launcher, wait, init.onLog)
-      : await launchHandles(init.config, init.profileDir, launcher, wait, init.onLog);
+      ? await attachHandles(init.config, launcher, wait, init.onLog, tabs)
+      : await launchHandles(init.config, init.profileDir, launcher, wait, init.onLog, tabs);
   } catch (error) {
     throw createFailure(
       error,
@@ -81,7 +89,8 @@ async function launchHandles(
   profileDir: string,
   launcher: ChromiumLauncher,
   timeout: number,
-  onLog?: CaptureSink,
+  onLog: CaptureSink | undefined,
+  tabs: TabContext,
 ): Promise<AdapterHandles> {
   // Still CDP: Playwright drives Chromium exclusively over the DevTools Protocol
   // (here a CDP pipe; `attachHandles` uses a CDP WebSocket). A persistent context is the
@@ -106,8 +115,8 @@ async function launchHandles(
   // must close it, or every later run of this project fails to launch.
   return closeOnFailure(context, async () => {
     const page = context.pages()[0] ?? (await context.newPage());
-    const capture = startCapture(page, onLog);
-    return { config, context, page, browser: null, mode: 'managed', capture };
+    const capture = startCapture(page, onLog, tabs);
+    return { config, context, page, browser: null, mode: 'managed', capture, tabs };
   });
 }
 
@@ -115,7 +124,8 @@ async function attachHandles(
   config: WebTarget,
   launcher: ChromiumLauncher,
   timeout: number,
-  onLog?: CaptureSink,
+  onLog: CaptureSink | undefined,
+  tabs: TabContext,
 ): Promise<AdapterHandles> {
   if (!config.cdpUrl) {
     throw new AdapterError('attach mode requires `cdpUrl`');
@@ -126,14 +136,14 @@ async function attachHandles(
   return closeOnFailure(browser, async () => {
     const context = browser.contexts()[0] ?? (await browser.newContext());
     const page = context.pages()[0] ?? (await context.newPage());
-    const capture = startCapture(page, onLog);
-    return { config, context, page, browser, mode: 'attach', capture };
+    const capture = startCapture(page, onLog, tabs);
+    return { config, context, page, browser, mode: 'attach', capture, tabs };
   });
 }
 
 /** Wire console/network capture onto the live page before the first navigation. */
-function startCapture(page: Page, onLog?: CaptureSink): CdpCapture {
-  const capture = new CdpCapture({ page, sink: onLog });
+function startCapture(page: Page, onLog: CaptureSink | undefined, tabs: TabContext): CdpCapture {
+  const capture = new CdpCapture({ page, sink: onLog, tabs });
   capture.start();
   return capture;
 }

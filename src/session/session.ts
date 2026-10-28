@@ -26,7 +26,7 @@
 
 import type { LoopInbox, ProgressWriter } from '../agent/loop.js';
 import { AgentError } from '../errors.js';
-import type { Findings } from '../findings/schema.js';
+import type { Findings, TerminalStatus } from '../findings/schema.js';
 import type { FindingsStore } from './findings-store.js';
 
 /** Run lifecycle status — mirrors the findings verdict (`running` until concluded). */
@@ -436,7 +436,7 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
   }
 
   /** The terminal verdict the `report` step wrote; `failed` if the run ended without one. */
-  async #verdict(): Promise<'passed' | 'failed'> {
+  async #verdict(): Promise<TerminalStatus> {
     const findings = await this.#findingsStore.tryReadFindings();
     return findings && findings.status !== 'running' ? findings.status : 'failed';
   }

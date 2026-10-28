@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { EVIDENCE_FIELD_NAMES } from '../../findings/schema.js';
 import {
   EVIDENCE_KEYS,
   MAX_LIST_ITEMS,
@@ -12,7 +13,7 @@ test('MAX_LIST_ITEMS is 20', () => {
 });
 
 test('EVIDENCE_KEYS contains exactly screenshot and evidence', () => {
-  expect(EVIDENCE_KEYS).toEqual(new Set(['screenshot', 'evidence']));
+  expect(EVIDENCE_KEYS).toEqual(new Set(EVIDENCE_FIELD_NAMES));
 });
 
 test('mimeTypeFor returns the expected MIME for each known extension', () => {

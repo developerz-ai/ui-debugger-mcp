@@ -53,8 +53,8 @@ code, asks again. Loop until the UI works. No human clicking.
 | Target  | Adapter        | Protocol            | Reads              |
 |---------|----------------|---------------------|--------------------|
 | web     | browser        | CDP                 | DOM                |
-| desktop | desktop        | X11/Xvfb; Wayland: wlroots capture (`grim`) only, no native input | a11y tree / vision |
-| mobile  | android        | ADB (uiautomator)   | view hierarchy / vision |
+| desktop | desktop        | X11/Xvfb; Wayland: wlroots capture (`grim`) only, no native input | a11y tree         |
+| mobile  | android        | ADB (uiautomator)   | view hierarchy     |
 
 Three adapters, one shared contract. Story names the target. iOS out of scope on Linux.
 
@@ -268,7 +268,13 @@ a public CLI subcommand (`main.ts` dispatches only init/status/stop).
 One interface so the agent loop is adapter-blind:
 `open · find · click · type · readState · screenshot · waitFor · console · network`,
 plus optional `tabs · selectTab` (web only — the belt says "unsupported" elsewhere).
-Web → DOM. Desktop/mobile → a11y tree, fall back to vision/screenshots.
+Web → DOM. Desktop/mobile → a11y tree / view hierarchy — there is
+no automatic vision/OCR fallback: the adapter never switches to pixels. The
+only vision is the agent-level `look` (the vision model on a captured frame).
+
+A custom-drawn surface (canvas, game, custom widget) exposes no a11y node, so
+the adapter finds nothing there; Chromium/Electron need
+`--force-renderer-accessibility`.
 
 **Web reads cross document boundaries.** `readState` extracts from every frame,
 translating child-frame bounds into page coordinates and tagging nodes with `frame`;

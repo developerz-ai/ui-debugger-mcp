@@ -80,8 +80,15 @@ One project can expose several debug targets. A large app can have all three:
 | Target  | Protocol / how it's driven                       | Reads |
 |---------|--------------------------------------------------|-------|
 | web     | **CDP** (Chrome DevTools Protocol), headless by default | DOM |
-| desktop | **X11 / Wayland** input + AT-SPI                 | a11y tree / vision |
-| mobile  | **ADB** (uiautomator + screencap), Android, headless by default | view hierarchy / vision |
+| desktop | **X11 / Wayland** input + AT-SPI                 | a11y tree |
+| mobile  | **ADB** (uiautomator + screencap), Android, headless by default | view hierarchy |
+
+The desktop and android adapters read **structure only** — there is
+no automatic vision/OCR fallback: the adapter never switches to pixels. A
+custom-drawn surface (canvas, game, custom widget) exposes no nodes, so it is
+unreachable there; Chromium/Electron need `--force-renderer-accessibility`. The
+only vision is the agent-level `look` the driver calls when it needs a visual
+judgment.
 
 Three adapters, one shared contract. Each runs **managed** (server launches the
 target) or **attach** (connect to a running one via `cdpUrl` / `adbSerial`).

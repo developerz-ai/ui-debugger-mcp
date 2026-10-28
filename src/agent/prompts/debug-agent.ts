@@ -14,6 +14,8 @@
  * else is shared so the two variants can never drift.
  */
 
+import { BUG_KINDS, TERMINAL_STATUSES, VISUAL_SEVERITIES } from '../../findings/schema.js';
+
 /** The mode-specific paragraphs — what the driver's eyes are, and what that costs. */
 interface LookMode {
   /** Opening line: whether the driver sees pixels, and how. */
@@ -193,7 +195,7 @@ beats a long one padded with noise.
 
 ## Visual findings
 
-\`{ issue: "what", where: "which component/area", severity: "low|medium|high", screenshot?: "path" }\`
+\`{ issue: "what", where: "which component/area", severity: "${VISUAL_SEVERITIES.join('|')}", screenshot?: "path" }\`
 
 - \`high\` — broken layout, text overlap, invisible interactive elements.
 - \`medium\` — misalignment, bad spacing, contrast issue.
@@ -211,10 +213,10 @@ Goal complete (or step limit hit) → call \`report\` exactly once:
 
 \`\`\`json
 {
-  "status": "passed" | "failed",
+  "status": ${TERMINAL_STATUSES.map((s) => `"${s}"`).join(' | ')},
   "steps": [ { "step": "...", "ok": true, "note": "...", "screenshot": "..." } ],
-  "bugs":   [ { "kind": "console"|"network"|"flow", "detail": "...", "evidence": "..." } ],
-  "visual": [ { "issue": "...", "where": "...", "severity": "low"|"medium"|"high", "screenshot": "..." } ],
+  "bugs":   [ { "kind": ${BUG_KINDS.map((k) => `"${k}"`).join('|')}, "detail": "...", "evidence": "..." } ],
+  "visual": [ { "issue": "...", "where": "...", "severity": ${VISUAL_SEVERITIES.map((s) => `"${s}"`).join('|')}, "screenshot": "..." } ],
   "dismissStreamed": false,
   "summary": "One-paragraph verdict the smart agent can act on."
 }
