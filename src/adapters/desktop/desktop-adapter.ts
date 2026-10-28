@@ -71,6 +71,15 @@ const POLL_MS = 500;
 /** How long `open` waits for the launched window to appear before failing loud. */
 const WINDOW_WAIT_MS = 10_000;
 
+/**
+ * Appended to the early-exit diagnosis when the launch command itself exits (code
+ * or signal) before any window appears. A possibility, never a proof: the exit
+ * code alone cannot show the command daemonized, so the hint names the likely
+ * shape and the fix, not a cause.
+ */
+const EARLY_EXIT_HINT =
+  '. The command may have backgrounded or daemonized itself (e.g. a trailing &, nohup, or a wrapper that forks) — that exits before any window can appear. Use a foreground launch command that stays alive holding the window';
+
 /** Wheel-step calibration: pixels-per-click, and the default page-ish distance. */
 const SCROLL_STEP_PX = 120;
 const DEFAULT_SCROLL_AMOUNT = 360;
@@ -217,18 +226,20 @@ export class DesktopAdapter implements Adapter {
       stdio: 'ignore',
     });
     const died = new Promise<never>((_resolve, reject) => {
-      const down = (reason: string): void => {
+      const down = (reason: string, hint = ''): void => {
         // A dead app must not pin `#child`: clear it so a later `open` relaunches
         // and `close` never kills a recycled process group.
         if (this.#child?.proc === proc) this.#child = null;
         reject(
           new AdapterError(
-            `desktop: launch command exited (${reason}) before the window appeared: ${command}`,
+            `desktop: launch command exited (${reason}) before the window appeared: ${command}${hint}`,
           ),
         );
       };
+      // The daemonization hint rides the exit event only — on 'error' (spawn
+      // failed) the command never ran, so the hint would mislead there.
       proc.once('exit', (code, signal) =>
-        down(signal ? `killed by ${signal}` : `exit code ${code ?? 'unknown'}`),
+        down(signal ? `killed by ${signal}` : `exit code ${code ?? 'unknown'}`, EARLY_EXIT_HINT),
       );
       // 'error' fires async: unlistened, a missing `/bin/sh` would crash the server.
       proc.once('error', (error) => down(`spawn failed: ${error.message}`));

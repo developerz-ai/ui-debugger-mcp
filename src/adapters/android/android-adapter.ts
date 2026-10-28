@@ -68,7 +68,7 @@ const POLL_MS = 300;
 /** How long managed boot waits for `sys.boot_completed` before failing loud. */
 const BOOT_WAIT_MS = 120_000;
 
-/** Default logcat tail (lines) drained per `console` read. */
+/** Default logcat window (lines) read per `console` call — reading never clears the log. */
 const LOGCAT_TAIL = 500;
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -394,7 +394,7 @@ export class AndroidAdapter implements Adapter {
     }
   }
 
-  /** Drain recent logcat as normalized console entries (newest first), narrowed by {@link LogQuery}. */
+  /** Read recent logcat as normalized console entries (newest first), narrowed by {@link LogQuery}. Reads are non-destructive — the log is not cleared. */
   async console(opts: LogQuery = {}): Promise<ConsoleEntry[]> {
     return this.#run('console', async () => {
       // `limit` caps the *filtered result*, never the raw window — narrowing the

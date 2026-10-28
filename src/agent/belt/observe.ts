@@ -38,6 +38,7 @@ import type {
   TabInfo,
 } from '../../adapters/contract.js';
 import { AgentError } from '../../errors.js';
+import type { Redactor } from '../../redact.js';
 import type { EvidenceRecorder } from './look.js';
 import type { ActTrail } from './trail.js';
 
@@ -452,7 +453,7 @@ export async function runObserve(
   adapter: Adapter,
   recorder: EvidenceRecorder,
   input: ObserveInput,
-  redact: (line: string) => string = (line) => line,
+  redact: Redactor = (line) => line,
 ): Promise<ObserveResult> {
   const { kind, query, fields, filters, limit, within } = input;
 
@@ -553,7 +554,7 @@ export function createObserveTool(
   adapter: Adapter,
   recorder: EvidenceRecorder,
   trail?: ActTrail,
-  redact: (line: string) => string = (line) => line,
+  redact: Redactor = (line) => line,
 ) {
   return tool({
     description:

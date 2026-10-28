@@ -96,7 +96,7 @@ the root file is NOT read in that case.
     },
     "desktop": {
       "adapter": "desktop",
-      "launch": "my-desktop-app",                  // command the server runs (managed)
+      "launch": "my-desktop-app",                  // foreground command; stays alive while the app window is open (managed)
       "window": { "title": "My Desktop App" },     // which window to drive (WM_NAME/WM_CLASS); omit → launched window
       "display": null                              // X11 DISPLAY, e.g. ":99" for Xvfb; null = inherit env
     },
@@ -113,6 +113,10 @@ the root file is NOT read in that case.
   }
 }
 ```
+
+For managed desktop targets, `launch` must run in the foreground and stay alive
+while the app window is open. Do not use `app &`, `nohup`, or backgrounding or
+daemonizing wrappers: the server must track the live app process throughout the run.
 
 ## `notes` — what is EXPECTED of this app (any adapter)
 
