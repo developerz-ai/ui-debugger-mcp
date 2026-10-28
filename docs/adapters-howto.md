@@ -242,7 +242,7 @@ For non-trivial backends, add a `docs/idea/<name>-adapter.md` documenting:
 
 - Protocol / toolchain (e.g. `busctl` D-Bus walk for AT-SPI2)
 - Managed vs attach decision
-- Known limitations and vision fallback trigger
+- Known limitations — accessibility-only reads: no automatic vision/OCR fallback; `screenshot()` still captures frames for evidence, and the agent-level `look` belt call is the only path by which a frame reaches a model
 - External dependencies / system packages needed
 
 Reference it from `docs/idea/adapters.md`.

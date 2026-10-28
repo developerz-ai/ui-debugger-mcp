@@ -5,8 +5,13 @@
  * same small interface, so the debug agent's loop is **adapter-blind**: the
  * inner tool belt (`observe`/`act`/`look`) hits these methods and never learns
  * which protocol is underneath. Web reads the DOM, desktop the a11y tree, mobile
- * the view hierarchy — but all three normalize to the {@link Node} shape below,
- * falling back to vision (screenshot + coordinates) when no tree exists.
+ * the view hierarchy — all three normalize to the {@link Node} shape below, and
+ * each adapter exposes exactly ONE structured tree (DOM / AT-SPI / uiautomator).
+ * There is no automatic vision/OCR fallback in this contract, and the adapter
+ * never switches to pixels: a read yields tree nodes or nothing. `screenshot`
+ * only captures a frame — for evidence, and for the agent-level `look` belt
+ * call, the one path by which pixels reach a model. `look` describes and judges
+ * a frame; it never yields elements an adapter could find, click or type into.
  *
  * Reads are **SQL-like**, not RPC: a handful of verbs with composable params
  * (`query`/`fields`/`filters`/`limit`/`within`) — see {@link Query}. The belt's

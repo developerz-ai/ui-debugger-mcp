@@ -11,8 +11,12 @@
  *
  * One busctl process per call makes this spawn-heavy; the walk is bounded by
  * `maxNodes`/`maxDepth` to stay sane. Chromium/Electron need
- * `--force-renderer-accessibility`; canvas/games expose nothing → vision fallback
- * (future). Fails loud — a malformed reply or unreachable bus throws {@link AdapterError}.
+ * `--force-renderer-accessibility`; a custom-drawn surface (a canvas, a game, a
+ * custom widget) exposes no AT-SPI node, so it is simply absent from the tree —
+ * and there is no automatic vision/OCR fallback here: this adapter has no
+ * OCR/pixel path, so `find`/`click`/`type` cannot reach such content. Only the
+ * agent-level `look` can describe the frame. Fails loud — a malformed reply or
+ * unreachable bus throws {@link AdapterError}.
  *
  * The wire-shape parsers (busctl JSON, extents, state bitfield, role map, query)
  * live in `atspi-parse.ts` (pure, unit-tested); {@link BusctlAtspi} lives in

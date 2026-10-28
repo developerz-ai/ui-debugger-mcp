@@ -9,7 +9,12 @@
  *
  * **Managed only**: the desktop target has no attach handle (unlike web `cdpUrl` /
  * android `adbSerial`), so `open` launches the configured command and `close` stops
- * it. Reads/clicks key off AT-SPI screen extents; vision fallback is future work.
+ * it. Reads/clicks/type key off the AT-SPI tree — its screen extents give the
+ * click coordinates. A custom-drawn surface (a canvas, a game, a custom widget)
+ * exposes no a11y node, so it is simply absent from the tree: `find`, `click` and
+ * `type` cannot reach it. There is no automatic vision/OCR fallback: this adapter
+ * has no OCR/pixel path, so the adapter never switches to pixels — a read yields
+ * tree nodes or nothing. Only the agent-level `look` can describe a frame.
  *
  * **Every read is scoped to one window.** The AT-SPI tree spans every application
  * on the desktop, so an unscoped lookup for "Save" can resolve to another app's
