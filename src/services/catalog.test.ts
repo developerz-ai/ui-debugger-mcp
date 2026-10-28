@@ -12,7 +12,7 @@
  *     tell "this target has no notes" from "the notes are empty".
  *
  * The service-level view of the same catalog (on a live run) is covered in
- * `debug-service.test.ts`.
+ * `debug-service.describe.test.ts`.
  */
 
 import { expect, test } from 'bun:test';

@@ -7,11 +7,11 @@ a mobile emulator. One **shared contract**; each adapter implements it.
 
 A big project can expose several:
 
-| Target  | Adapter            | Protocol / drives              | Reads state |
-|---------|--------------------|--------------------------------|-------------|
-| web     | browser            | CDP — a Chrome page            | DOM         |
-| desktop | desktop (x11/wl)   | the desktop app window         | a11y tree / vision |
-| mobile  | android            | ADB — uiautomator + screencap | view hierarchy / vision |
+| Target  | Adapter            | Protocol / drives              | Reads state  |
+|---------|--------------------|--------------------------------|--------------|
+| web     | browser            | CDP — a Chrome page            | DOM          |
+| desktop | desktop (x11/wl)   | the desktop app window         | a11y tree    |
+| mobile  | android            | ADB — uiautomator + screencap | view hierarchy |
 
 **Three adapters, three targets.** Each target speaks its own real protocol:
 web = CDP, desktop = X11/Wayland input, mobile = ADB. They share one contract
@@ -31,22 +31,27 @@ adapter-blind:
 | Op          | Web (CDP)            | Desktop (X11/XWayland)       | Mobile (ADB)            |
 |-------------|----------------------|------------------------------|-------------------------|
 | `open`      | navigate to url      | launch / focus the window    | launch activity / app   |
-| `find`      | DOM selector         | a11y node, else vision       | uiautomator node, else vision |
+| `find`      | DOM selector         | a11y node                    | uiautomator node        |
 | `click`     | CDP input            | synthesized pointer event    | `input tap`             |
 | `type`      | CDP input            | synthesized key event        | `input text`            |
-| `readState` | DOM snapshot         | AT-SPI a11y tree, else OCR   | uiautomator dump, else OCR |
+| `readState` | DOM snapshot         | AT-SPI a11y tree             | uiautomator dump         |
 | `screenshot`| CDP capture          | X11/Xvfb or grim (Wayland)   | `screencap`             |
-| `waitFor`   | DOM / network idle   | poll a11y / pixels           | poll hierarchy / pixels |
+| `waitFor`   | DOM / network idle   | poll a11y                    | poll hierarchy          |
 
-Web is precise (DOM). Desktop prefers the **accessibility tree**; mobile the
-**view hierarchy**. When a target exposes neither, the adapter **falls back to
-vision** (screenshot + coordinates).
+Web is precise (DOM). Desktop reads the **accessibility tree**; mobile the
+**view hierarchy**. There is **no automatic vision/OCR fallback** — the adapter
+never switches to pixels. A custom-drawn surface (canvas, game, custom widget)
+exposes no nodes at all, so the adapter finds nothing there; Chromium/Electron
+need `--force-renderer-accessibility`, Qt needs its bridge. The only vision
+today is the agent-level `look`: the driver captures a frame and hands it to
+the vision model for a visual judgment.
 
 > Linux tooling per adapter (X11 vs Wayland capture, screenshots, AT-SPI) is
 > worked out in [`desktop-control.md`](desktop-control.md). Short version:
-> a11y-tree-first everywhere it exists, vision as the universal fallback,
-> X11/Xvfb container as the low-friction default. Wayland capture via `grim`
-> (wlroots) is supported; native-Wayland input via libei/ydotool is future work.
+> a11y-tree-first everywhere it exists, no automatic vision/OCR fallback, the
+> adapter never switches to pixels, X11/Xvfb container as the low-friction
+> default. Wayland capture via `grim` (wlroots) is supported; native-Wayland
+> input via libei/ydotool is future work.
 
 ## Why this matters
 
@@ -104,5 +109,8 @@ the same managed/attach split applies:
   or a network `host:port`) is configured, the adapter talks to that already-running
   device over ADB and **does not start/stop it**. For a physical phone or a
   shared emulator.
+- **Canvas / Compose surfaces** expose no view hierarchy, so they are simply
+  absent from the tree — no automatic vision/OCR fallback. The only vision is
+  the agent-level `look`.
 - iOS stays out of scope on Linux (XCUITest is macOS-only) — see
   [`desktop-control.md`](desktop-control.md).

@@ -1,135 +1,36 @@
 /**
- * The conversational surface: start / send / get_findings / describe / end.
+ * The conversational surface: start / send / get_findings / end.
  *
- * The wall-clock cap, auto-end retention, the `state.json` breadcrumb and the
- * cross-process gate live in `debug-service.lifecycle.test.ts`.
+ * The describe projection, the wall-clock cap, the `state.json` breadcrumb and
+ * the cross-process gate live in their own suites:
+ * `debug-service.describe.test.ts`, `debug-service.timeout.test.ts`,
+ * `debug-service.breadcrumb.test.ts`, `debug-service.cross-process.test.ts`
+ * and `debug-service.ownership.test.ts`.
+ *
+ * The doubles they share live in `debug-service.test-helpers.ts`.
  */
 
-import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import type { ResolvedConfig } from '../config/load.js';
-import type { Target } from '../config/schema.js';
+import { expect, test } from 'bun:test';
 import {
   AdapterError,
   SessionBusyError,
   SessionNotFoundError,
   SessionSettledError,
-  TargetNotFoundError,
 } from '../errors.js';
-import { FindingsStore } from '../session/findings-store.js';
-import { SessionManager } from '../session/manager.js';
-import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
-import { _resetCounter, sessionPaths, workspacePaths } from '../session/workspace.js';
-import { DEFAULT_SESSION_TIMEOUT_MS, DebugService } from './debug-service.js';
-import type { BuiltSession, SessionBuilder } from './session-builder.js';
+import type { LoopRunner } from '../session/session.js';
+import { DEFAULT_SESSION_TIMEOUT_MS } from './debug-service.js';
+import {
+  CWD,
+  fakeBuilder,
+  makeService,
+  manager,
+  NOW,
+  tick,
+  useTempWorkspace,
+} from './debug-service.test-helpers.js';
+import type { SessionBuilder } from './session-builder.js';
 
-const CWD = '/project/app';
-const NOW = 1_700_000_000_000;
-
-const CONFIG: ResolvedConfig = {
-  models: { driver: 'deepseek/x', vision: 'glm/y', summary: 'deepseek/z' },
-  workspace: './tmp/ui-debugger-mcp',
-  targets: {
-    web: { adapter: 'browser', url: 'http://localhost:3000', headless: true },
-    screen: { adapter: 'desktop', launch: 'myapp' },
-    phone: { adapter: 'android', headless: true, avd: 'pixel', adbSerial: 'emulator-5554' },
-  },
-  provider: { apiKey: 'sk-test', baseUrl: 'https://openrouter.ai/api/v1' },
-};
-
-/** Adapter stub that records how many times it was closed (optionally failing). */
-class FakeAdapter implements SessionAdapter {
-  closeCalls = 0;
-  constructor(readonly closeFails = false) {}
-  async close(): Promise<void> {
-    this.closeCalls += 1;
-    if (this.closeFails) throw new AdapterError('close failed');
-  }
-}
-
-/** A run that idles until aborted, then resolves — so `close()` settles cleanly. */
-const idleRun: LoopRunner = ({ signal }) =>
-  new Promise<void>((resolve) => {
-    if (signal.aborted) resolve();
-    else signal.addEventListener('abort', () => resolve(), { once: true });
-  });
-
-interface BuildLog {
-  params: Array<{
-    id: string;
-    target: string;
-    goal: string;
-    criteria?: string;
-    url?: string;
-    as?: string;
-    timeoutMs?: number;
-  }>;
-  adapters: FakeAdapter[];
-  openCalls: number;
-}
-
-let tmpDir: string;
-let manager: SessionManager<Session>;
-
-beforeEach(async () => {
-  _resetCounter();
-  tmpDir = await mkdtemp(join(tmpdir(), 'ui-dbg-svc-test-'));
-  manager = new SessionManager<Session>();
-});
-
-afterEach(async () => {
-  if (manager.has(CWD)) await manager.end(CWD);
-  await rm(tmpDir, { recursive: true, force: true });
-});
-
-/** A fake session builder backed by a real `Session` (FakeAdapter + temp store). */
-function fakeBuilder(opts: { openFails?: boolean; run?: LoopRunner } = {}): {
-  build: SessionBuilder;
-  log: BuildLog;
-} {
-  const log: BuildLog = { params: [], adapters: [], openCalls: 0 };
-  const build: SessionBuilder = async (params) => {
-    log.params.push({ ...params });
-    const adapter = new FakeAdapter();
-    log.adapters.push(adapter);
-    const store = new FindingsStore(sessionPaths(workspacePaths(CWD, tmpDir), params.id));
-    const session = new Session<SessionAdapter>({
-      id: params.id,
-      story: params.goal,
-      criteria: params.criteria,
-      adapter,
-      findingsStore: store,
-    });
-    const built: BuiltSession = {
-      session,
-      open: async () => {
-        log.openCalls += 1;
-        if (opts.openFails) throw new AdapterError('open failed');
-      },
-      run: opts.run ?? idleRun,
-    };
-    return built;
-  };
-  return { build, log };
-}
-
-function makeService(build: SessionBuilder): DebugService {
-  // The platform is PINNED: `operational` is derived from the host platform, so
-  // the expectations must not depend on the OS the test happens to run on.
-  return new DebugService({
-    manager,
-    config: CONFIG,
-    cwd: CWD,
-    build,
-    now: () => NOW,
-    platform: 'linux',
-  });
-}
-
-/** Resolve after `ms` — let an armed wall-clock timer fire. */
-const tick = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+useTempWorkspace();
 
 // --- start ------------------------------------------------------------------
 
@@ -350,167 +251,7 @@ test('getFindings passes `wait` through to the session, long-polling for the set
   expect(findings.status).toBe('failed'); // settled by the time the long-poll returns
 });
 
-// --- describe ---------------------------------------------------------------
-
-test('describe lists every configured target with mode + operational flags', () => {
-  const svc = makeService(fakeBuilder().build);
-  const result = svc.describe({});
-
-  expect(result.models).toEqual(CONFIG.models);
-  // The RESOLVED per-project root, not the raw './tmp/ui-debugger-mcp' config
-  // string — a caller joining evidence paths to that would look one dir short.
-  expect(result.workspace).toBe(workspacePaths(CWD, CONFIG.workspace).root);
-  expect(result.workspace).toBe('/project/app/tmp/ui-debugger-mcp/app');
-  expect(result.targets.find((t) => t.name === 'web')).toEqual({
-    name: 'web',
-    adapter: 'browser',
-    mode: 'managed',
-    operational: true,
-    url: 'http://localhost:3000',
-    headless: true,
-  });
-  expect(result.targets.find((t) => t.name === 'screen')).toEqual({
-    name: 'screen',
-    adapter: 'desktop',
-    mode: 'managed',
-    operational: true,
-  });
-  expect(result.targets.find((t) => t.name === 'phone')).toEqual({
-    name: 'phone',
-    adapter: 'android',
-    mode: 'attach',
-    operational: true, // wired AND supported on the pinned linux host
-  });
-});
-
-test('describe reports operational=false for a wired kind on an unsupported platform', () => {
-  // Desktop is Linux tooling (X11/Wayland + AT-SPI): wired in this build, but
-  // the darwin host cannot run it — the flag must say so instead of promising.
-  const { build, log } = fakeBuilder();
-  const svc = new DebugService({
-    manager,
-    config: CONFIG,
-    cwd: CWD,
-    build,
-    now: () => NOW,
-    platform: 'darwin',
-  });
-
-  const targets = svc.describe({}).targets;
-  expect(targets.find((t) => t.name === 'screen')?.operational).toBe(false); // desktop
-  expect(targets.find((t) => t.name === 'web')?.operational).toBe(true); // browser
-  expect(targets.find((t) => t.name === 'phone')?.operational).toBe(true); // android
-  // Describing never starts anything — no browser, no emulator, no session.
-  expect(log.params).toHaveLength(0);
-});
-
-test('describe reports operational=false for an adapter kind this build does not wire', () => {
-  // Off-schema on purpose: the config schema is a closed union, so `loadConfig`
-  // rejects an unknown `adapter` — the unwired case is only reachable through a
-  // cast config (or a direct call to the availability rule).
-  const unwiredConfig: ResolvedConfig = {
-    ...CONFIG,
-    targets: { ...CONFIG.targets, gadget: { adapter: 'sensors' } as unknown as Target },
-  };
-  const { build, log } = fakeBuilder();
-  const svc = new DebugService({
-    manager,
-    config: unwiredConfig,
-    cwd: CWD,
-    build,
-    now: () => NOW,
-    platform: 'linux',
-  });
-
-  const gadget = svc.describe({ target: 'gadget' }).targets[0];
-  expect(gadget?.name).toBe('gadget');
-  expect(gadget?.adapter as string).toBe('sensors');
-  expect(gadget?.operational).toBe(false);
-  // Still nothing launched: no adapter, no session.
-  expect(log.params).toHaveLength(0);
-});
-
-test('describe derives operational from the HOST platform when none is injected', () => {
-  // The service's own default (`deps.platform ?? process.platform`): with no
-  // injected platform the flag must follow THIS host — browser is supported on
-  // every platform this project ships for, desktop is Linux tooling only.
-  const { build, log } = fakeBuilder();
-  const svc = new DebugService({ manager, config: CONFIG, cwd: CWD, build, now: () => NOW });
-
-  const targets = svc.describe({}).targets;
-  expect(targets.find((t) => t.name === 'web')?.operational).toBe(true); // browser
-  // Desktop follows the host: true on linux, false on darwin/win32 — a default
-  // that ignored the host would answer the wrong thing off linux.
-  const desktop = targets.find((t) => t.name === 'screen')?.operational;
-  expect(desktop).toBe(process.platform === 'linux');
-  // Describing launches nothing — the fake builder is never called.
-  expect(log.params).toHaveLength(0);
-});
-
-test('describe reports a browser attach target (cdpUrl set) as mode "attach"', () => {
-  const attachConfig: ResolvedConfig = {
-    ...CONFIG,
-    targets: {
-      ...CONFIG.targets,
-      web: { adapter: 'browser', cdpUrl: 'http://127.0.0.1:9222', headless: true },
-    },
-  };
-  const svc = new DebugService({
-    manager,
-    config: attachConfig,
-    cwd: CWD,
-    build: fakeBuilder().build,
-    now: () => NOW,
-    platform: 'linux',
-  });
-
-  expect(svc.describe({ target: 'web' }).targets[0]).toEqual({
-    name: 'web',
-    adapter: 'browser',
-    mode: 'attach',
-    operational: true,
-    url: undefined,
-    headless: true,
-  });
-});
-
-test("describe surfaces a target's persona NAMES, and nothing else about them", () => {
-  // A caller must be able to pick a valid `as` without opening the config file —
-  // and must never receive the credentials while doing it.
-  const withAuth: ResolvedConfig = {
-    ...CONFIG,
-    targets: {
-      dashboard: {
-        adapter: 'browser',
-        url: 'http://localhost:5173',
-        headless: true,
-        auth: {
-          admin: {
-            path: '/login',
-            fields: { email: 'a@dev.local', password: 'hunter2' },
-            submit: 'Sign in',
-          },
-          user: {
-            path: '/login',
-            fields: { email: 'u@dev.local', password: 'u' },
-            submit: 'Sign in',
-          },
-        },
-      },
-      screen: { adapter: 'desktop', launch: 'myapp' },
-    },
-  };
-  const svc = new DebugService({ manager, config: withAuth, cwd: CWD, build: fakeBuilder().build });
-
-  const [dashboard, screen] = svc.describe({}).targets;
-  expect(dashboard?.personas).toEqual(['admin', 'user']);
-  expect(JSON.stringify(dashboard)).not.toContain('hunter2');
-  // A target with no `auth` block carries no key at all — absent, not empty.
-  expect(screen).not.toHaveProperty('personas');
-  expect(
-    makeService(fakeBuilder().build).describe({ target: 'web' }).targets[0],
-  ).not.toHaveProperty('personas');
-});
+// --- the auth persona --------------------------------------------------------
 
 test('start forwards the auth persona to the builder', () => {
   const { build, log } = fakeBuilder();
@@ -518,50 +259,6 @@ test('start forwards the auth persona to the builder', () => {
   return svc.start({ target: 'web', goal: 'open audit', as: 'admin' }).then(() => {
     expect(log.params[0]?.as).toBe('admin');
   });
-});
-
-test("describe surfaces a target's standing notes verbatim", () => {
-  const notes = 'needs seeded data — empty tables are expected on /new';
-  const withNotes: ResolvedConfig = {
-    ...CONFIG,
-    targets: { web: { adapter: 'browser', url: 'http://x.test', headless: true, notes } },
-  };
-  const svc = new DebugService({
-    manager,
-    config: withNotes,
-    cwd: CWD,
-    build: fakeBuilder().build,
-  });
-
-  expect(svc.describe({ target: 'web' }).targets[0]?.notes).toBe(notes);
-  // A target that declares none carries no key at all — absent, not empty.
-  expect(
-    makeService(fakeBuilder().build).describe({ target: 'web' }).targets[0],
-  ).not.toHaveProperty('notes');
-});
-
-test('describe reports the run this project holds — the way back to a lost session id', async () => {
-  const svc = makeService(fakeBuilder().build);
-  expect(svc.describe({})).not.toHaveProperty('session'); // nothing running: no key at all
-
-  const { session_id } = await svc.start({ target: 'web', goal: 'open Audit' });
-
-  expect(svc.describe({}).session).toEqual({
-    id: session_id,
-    status: 'running',
-    goal: 'open Audit',
-  });
-  // Narrowing to one target must not hide the run — the id is the point of the call.
-  expect(svc.describe({ target: 'web' }).session?.id).toBe(session_id);
-
-  await svc.end({ session_id });
-  expect(svc.describe({})).not.toHaveProperty('session');
-});
-
-test('describe narrows to one named target, and rejects an unknown one', () => {
-  const svc = makeService(fakeBuilder().build);
-  expect(svc.describe({ target: 'web' }).targets).toHaveLength(1);
-  expect(() => svc.describe({ target: 'nope' })).toThrow(TargetNotFoundError);
 });
 
 // --- end --------------------------------------------------------------------

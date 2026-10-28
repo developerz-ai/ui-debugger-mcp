@@ -11,9 +11,13 @@
  * The dump is read robustly as **dump-to-file then `cat`** — uiautomator interleaves a
  * status line on `/dev/tty`, so a file round-trip keeps the XML clean. The stale file is
  * removed first and the dump's success line asserted (it exits 0 even when it fails), so
- * a read is always the live screen or a loud error — never last screen's hierarchy. Canvas/Compose
- * surfaces that expose no hierarchy fall back to vision (future). Fails loud — a missing
- * `<hierarchy>` or a malformed `bounds` throws {@link AdapterError}, never a silent guess.
+ * a read is always the live screen or a loud error — never last screen's hierarchy. A
+ * surface that exposes no hierarchy (a canvas or Compose drawing that publishes no
+ * nodes) is simply absent from the tree — and there is no automatic vision/OCR
+ * fallback here: this adapter has no OCR/pixel path, so `find`/`click`/`type`
+ * cannot reach such content; only the agent-level `look` can describe the frame.
+ * Fails loud — a missing `<hierarchy>` or a malformed `bounds` throws
+ * {@link AdapterError}, never a silent guess.
  *
  * The parsers + filters here are pure and unit-tested; {@link AdbUiAutomator} is the
  * integration-validated runner over the {@link Adb} seam.
