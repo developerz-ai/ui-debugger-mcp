@@ -366,6 +366,24 @@ test('open reports a launch killed by a signal', async () => {
   await expect(stuck('kill -TERM $$').open('Ghost')).rejects.toThrow(/killed by SIGTERM/);
 });
 
+test('open hints at daemonization when the launch exits cleanly before any window', async () => {
+  // Exit code 0 with no window is the classic backgrounded-launch symptom — the
+  // message keeps the command + code context and only HINTS at the possibility;
+  // an exit code alone never proves the cause.
+  let message = '';
+  try {
+    await stuck('exit 0').open('Ghost');
+  } catch (error) {
+    expect(error).toBeInstanceOf(AdapterError);
+    message = (error as AdapterError).message;
+  }
+  expect(message).toMatch(/launch command exited \(exit code 0\)/); // context kept
+  expect(message).toContain('exit 0'); // the command itself
+  expect(message).toMatch(/may have (backgrounded|daemonized)/); // possibility, not proof
+  expect(message).toMatch(/nohup/);
+  expect(message).toMatch(/foreground/);
+});
+
 test('open resolves once the window activates while the app stays up', async () => {
   const input = new FakePointer();
   const adapter = DesktopAdapter.create({
