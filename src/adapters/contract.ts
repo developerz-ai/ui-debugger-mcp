@@ -166,6 +166,15 @@ export interface ConsoleEntry {
   location?: string;
   /** Capture time, ms since epoch. */
   timestamp: number;
+  /**
+   * Stable label of the tab that produced the row (`tab-1`, `tab-2`, …).
+   *
+   * The label follows the PAGE for the whole run: it survives a tab switch and
+   * a closing tab shifting the positional indices, so the index a driver passes
+   * to `switch_tab` never has to name a tab. Absent on targets that have no
+   * tabs (desktop, mobile).
+   */
+  tab?: string;
 }
 
 /** One network exchange captured from the target (CDP responses + failures). */
@@ -211,6 +220,14 @@ export interface NetworkEntry {
    * (and from there, logs, findings, and the caller's transcript).
    */
   responseHeaders?: Record<string, string>;
+  /**
+   * Stable label of the tab that produced the exchange (`tab-1`, `tab-2`, …).
+   *
+   * Stamped when the response FIRED, not when its log line is written: the line
+   * lands only after the body/header await resolves, and by then the driver may
+   * have switched tabs. Same rationale as {@link ConsoleEntry.tab}.
+   */
+  tab?: string;
 }
 
 /** One open tab/window of a multi-tab target (web). */
@@ -227,6 +244,14 @@ export interface TabInfo {
   url: string;
   /** Document title, empty while a fresh tab is still loading. */
   title: string;
+  /**
+   * Stable label of this tab (`tab-1`, `tab-2`, …) — the same marker the
+   * console/network rows carry, so a `[tab-2]` line in the durable log resolves
+   * to the tab that produced it. The label follows the PAGE, so it stays valid
+   * after an earlier tab closes and the indices shift. Absent when the target
+   * has no tab registry.
+   */
+  id?: string;
   /** Whether this is the tab the adapter currently drives, independent of visibility. */
   active: boolean;
   /** Live document.visibilityState === 'visible', when measured; not OS-window focus. */
