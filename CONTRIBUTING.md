@@ -62,11 +62,21 @@ Key rules (all error-level):
 |------|-----------|
 | Formatting | 2-space indent, lineWidth 100, LF, semicolons, trailing commas, arrow parens |
 | Quotes | single in TS/JS, double in JSX |
-| Imports | named exports only (`noDefaultExport`); `import type` for types; `.js` extension on relative ESM imports |
+| Imports | named exports only (`noDefaultExport`); `import type` for types |
 | Types | `noExplicitAny`, `noNonNullAssertion`, `strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax` |
-| Errors | custom error classes only — never `throw new Error(...)` |
-| Files | ≤ 500 LOC, one responsibility each |
-| Boundaries | Zod validation at every boundary (config, MCP input, findings) |
+
+House requirements, not tool-enforced — neither Biome nor `tsconfig.json`
+defines a rule for any of these, so `bin/check` cannot catch a violation; a
+reviewer does. They still apply to every contribution:
+
+- Custom error classes only — never `throw new Error(...)`.
+- Zod validation at every boundary (config, MCP input, findings).
+- `.js` extension on relative ESM imports.
+
+Files stay ≤ 500 LOC with one responsibility each — a contributor requirement,
+not tool-enforced (neither Biome nor `tsconfig.json` nor `bin/check` measures
+it). When a file outgrows the cap, split it into a sibling module — the pattern
+`src/adapters/browser/` already uses per `extractor.ts`/`filters.ts`/`geometry.ts`.
 
 ## Tests
 
@@ -118,6 +128,6 @@ dummy/web          — React test fixture with planted bugs (manual + e2e)
 
 - **Forgetting `.js` on relative imports** — ESM requires it even for `.ts` source files.
 - **Default exports** — banned. Use named exports everywhere.
-- **Generic errors** — `throw new Error(...)` fails Biome. Import and throw the right custom class from `src/errors.ts`.
+- **Generic errors** — a house requirement, not Biome-checked: never `throw new Error(...)`. Import and throw the right custom class from `src/errors.ts`.
 - **Silent fallbacks** — fail fast and loud. No `catch (() => {})`.
 - **Drive-by refactors** — touch only what the task needs.
