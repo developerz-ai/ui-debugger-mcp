@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { FindingsError } from '../errors.js';
 import type { Findings } from '../findings/schema.js';
 import { FindingsSchema } from '../findings/schema.js';
+import type { Redactor } from '../redact.js';
 import { writeFileAtomic } from './atomic-write.js';
 import type { SessionPaths } from './workspace.js';
 
@@ -54,7 +55,7 @@ function slug(label: string): string {
 
 export class FindingsStore {
   readonly #paths: SessionPaths;
-  readonly #redact: (text: string) => string;
+  readonly #redact: Redactor;
   /** Cached mkdir promise — directories are ensured once per instance. */
   #dirsReady: Promise<void> | null = null;
   /** Cached seed scan — the disk is scanned once per instance (resume-safe). */
@@ -62,7 +63,7 @@ export class FindingsStore {
   /** Highest screenshot sequence handed out; valid once `#seqReady` settles. */
   #screenshotSeq = 0;
 
-  constructor(paths: SessionPaths, redact: (text: string) => string = (text) => text) {
+  constructor(paths: SessionPaths, redact: Redactor = (text) => text) {
     this.#paths = paths;
     this.#redact = redact;
   }
