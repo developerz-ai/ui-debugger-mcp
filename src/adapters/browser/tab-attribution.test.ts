@@ -187,6 +187,24 @@ test('closing an earlier tab shifts the indices — the same page keeps its mark
   try {
     first.emit('console', fakeConsole('log', 'before the close'));
 
+    // Drive `second` and RECORD its marker BEFORE the close. A marker handed
+    // out only at the rebound afterwards would be indistinguishable from a
+    // fresh one — `second` would take the next free number either way — so a
+    // registry that renumbers a tab on every rebind would still pass this
+    // test. Naming it now spends `tab-2`; a re-mint at the rebound would
+    // read `tab-3`, and the assertions below would catch it.
+    await adapter.selectTab(1);
+    second.emit('console', fakeConsole('log', 'from the second tab'));
+    expect((await adapter.tabs()).map(({ index, id }) => ({ index, id }))).toEqual([
+      { index: 0, id: 'tab-1' },
+      { index: 1, id: 'tab-2' },
+    ]);
+
+    // Back to the first tab — the one that closes. The rebound after the close
+    // lands on a DIFFERENT page than the one the capture is bound to, so a
+    // registry that renumbers on the switch cannot slip through here.
+    await adapter.selectTab(0);
+
     // The first tab closes: `second` is now index 0. A label built from the
     // index would now read `tab-1` — the CLOSED tab's marker, pointing at the
     // wrong tab for the rest of the run.
@@ -194,11 +212,13 @@ test('closing an earlier tab shifts the indices — the same page keeps its mark
     await adapter.selectTab(0);
     second.emit('console', fakeConsole('log', 'after the close'));
 
+    // Same page, same marker, new index.
     expect((await adapter.tabs()).map(({ index, id }) => ({ index, id }))).toEqual([
       { index: 0, id: 'tab-2' },
     ]);
     expect(lines[0]).toMatch(/^\S+ \[tab-1\] LOG before the close$/);
-    expect(lines[1]).toMatch(/^\S+ \[tab-2\] LOG after the close$/);
+    expect(lines[1]).toMatch(/^\S+ \[tab-2\] LOG from the second tab$/);
+    expect(lines[2]).toMatch(/^\S+ \[tab-2\] LOG after the close$/);
   } finally {
     await adapter.close();
   }
