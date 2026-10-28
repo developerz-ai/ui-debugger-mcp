@@ -13,7 +13,7 @@
  *    retrieval that returns it whole. Never capped without both — a dropped entry
  *    the caller cannot ask for again is silent data loss, and prose alone lets a
  *    caller that skips the note conclude there were exactly 20 findings.
- *  - **`resource_link`s**: evidence paths (screenshots, `replay.mp4`, logs) ride
+ *  - **`resource_link`s**: evidence paths (screenshots, `replay.mp4`) ride
  *    as `resource_link` content items (file:// URIs) alongside the text block —
  *    the spec-blessed form, not inline path strings the caller has to notice.
  */

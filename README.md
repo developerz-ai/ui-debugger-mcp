@@ -292,8 +292,8 @@ Every tool result carries **both** a pretty-printed text block and a typed
 `structuredContent` payload validated against a declared `outputSchema` — parse
 the structured half, don't scrape the text. Tools also declare MCP annotations
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) so clients
-can render/gate them correctly, and evidence paths (screenshots, `replay.mp4`,
-logs) ride as `resource_link` content items, not inline strings. Full shapes in
+can render/gate them correctly, and evidence paths (screenshots, `replay.mp4`)
+ride as `resource_link` content items, not inline strings. Full shapes in
 [`docs/reference.md`](docs/reference.md).
 
 Typical loop from a smart agent:
