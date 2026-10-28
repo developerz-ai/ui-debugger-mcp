@@ -15,7 +15,8 @@
  *   - any other id is a hard miss: a stale id must never drive the wrong run.
  *
  * The service-level lifecycle (auto-end → retained → describe → end_session) is
- * covered in `debug-service.lifecycle.test.ts`.
+ * covered in `debug-service.timeout.test.ts`; the cross-process read of another
+ * server's run in `debug-service.cross-process.test.ts`.
  */
 
 import { expect, test } from 'bun:test';
@@ -23,14 +24,10 @@ import { SessionNotFoundError } from '../errors.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { Session, type SessionAdapter } from '../session/session.js';
 import { sessionPaths, workspacePaths } from '../session/workspace.js';
+import { FakeAdapter } from './debug-service.test-helpers.js';
 import { RetainedSnapshot } from './retained-snapshot.js';
 
 const CWD = '/project/app';
-
-/** Adapter stub — the retained snapshot never touches a target. */
-class FakeAdapter implements SessionAdapter {
-  async close(): Promise<void> {}
-}
 
 /** A real session, standing in for a run that auto-ended (settled, closed). */
 function makeSession(id: string, goal = 'check the audit table'): Session {
