@@ -14,8 +14,10 @@ desktop does **not**.
 | mobile  | yes — view hierarchy   | ADB / uiautomator |
 | desktop | **uneven** — AT-SPI2 when present, else nothing | D-Bus |
 
-So: **a11y-tree-first everywhere it exists, vision (screenshot + coordinates) as
-the universal fallback.** That's the whole strategy.
+So: **a11y-tree-first everywhere it exists.** That is the whole strategy — and
+it is what the shipped desktop/android adapters do: **accessibility-only** —
+no automatic vision/OCR fallback: the adapter never switches to pixels. The
+pixel routes below are **research, not shipped**.
 
 ## What other AI agents use
 
@@ -58,13 +60,18 @@ The Linux a11y tree over **D-Bus** (`org.a11y.atspi`). **Display-agnostic** —
 same on X11 and Wayland (the one Wayland-robust piece).
 
 - Nodes: role, name, states; `Component.GetExtents(SCREEN)` → screen `(x,y,w,h)`
-  for set-of-marks overlays + click mapping.
+  for click mapping.
 - Actions via `Action` / `Text` / `Value` interfaces.
 - Binding: **`from gi.repository import Atspi`** (GI), not legacy `pyatspi`.
   **Accerciser** to inspect coverage.
-- **Gaps (why vision is still needed):** Qt needs its bridge; **Chromium/Electron
+- **Gaps (why the tree can be empty):** Qt needs its bridge; **Chromium/Electron
   need `--force-renderer-accessibility`**; canvas/games/custom-drawn expose nothing.
-- Vision fallback: **OmniParser**-style detector + OCR → set-of-marks.
+- **Pixel route (research, not implemented):** an OmniParser-style set-of-marks —
+  pixel detection and OCR into a set-of-marks. The shipped desktop/android
+  adapters are accessibility-only: no automatic vision/OCR fallback, no OCR, no
+  pixel detection. A canvas/game/custom-drawn surface is simply absent from the
+  tree, and the only vision today is the agent-level `look` — the driver hands a
+  captured frame to the vision model.
 
 ## Screenshots on Wayland
 
@@ -88,7 +95,8 @@ Android is **fully framework-driven on Linux** — no vision required:
 
 - **ADB + uiautomator** — `uiautomator dump` → hierarchy XML; `input tap/swipe`; `screencap`.
 - **Appium UiAutomator2** — richer, XPath, runs on Linux via ADB.
-- **scrcpy** — mirror + control; window-driving / vision fallback only (no tree).
+- **scrcpy** — mirror + control; window-driving only (no tree) — the shipped
+  adapters are accessibility-only, no automatic vision/OCR fallback.
 - **iOS = out of scope on Linux** (XCUITest/WDA is macOS-only). Gate behind an optional remote-macOS adapter.
 
 ## Web
@@ -99,9 +107,9 @@ Lift **playwright-mcp**'s design: a11y-snapshot-first, stable refs, vision optio
 ## Recommendation for our adapters
 
 - **Web adapter** — Playwright + CDP, a11y-first. Build this first.
-- **Mobile adapter** — Android via ADB/uiautomator (structured). scrcpy for fallback. iOS out of scope on Linux.
+- **Mobile adapter** — Android via ADB/uiautomator (structured). scrcpy for a mirror, not for reads. iOS out of scope on Linux.
 - **Desktop adapter — compositor-aware:**
-  - **Read state:** AT-SPI2 (`Atspi` GI), `GetExtents(SCREEN)`. `--force-renderer-accessibility` for Chromium/Electron. Vision SoM (OmniParser-style) when the tree is empty.
+  - **Read state:** AT-SPI2 (`Atspi` GI), `GetExtents(SCREEN)`. `--force-renderer-accessibility` for Chromium/Electron. Accessibility-only: a canvas/game/custom-drawn surface exposes no node, so the adapter finds nothing there — the OmniParser-style set-of-marks route is research, not implemented.
   - **Input:** X11/XWayland → `xdotool`. Wayland future-proof → libei + portal (GNOME/KDE). Wayland lowest-common-denominator → `ydotool`/`dotool` via uinput, driven by AT-SPI coords.
   - **Screenshots:** detect compositor → grim / GNOME-DBus / KDE-DBus / portal+PipeWire.
   - **Window mgmt:** xdotool (X11), kdotool (KWin), wlrctl (wlroots).

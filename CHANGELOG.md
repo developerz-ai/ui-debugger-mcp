@@ -504,7 +504,7 @@ below is a defect that consumer actually hit.
 
 ### Added
 
-- **Android adapter** — full ADB + uiautomator support for mobile app automation with view hierarchy reading and vision fallback.
+- **Android adapter** — full ADB + uiautomator support for mobile app automation with view hierarchy reading only; there is no automatic vision/OCR fallback.
 - **Desktop adapter** — X11/Wayland input control for Linux desktop apps with AT-SPI accessibility tree reading.
 - **Video replay** — automatic stitching of screenshots into captioned `replay.mp4` for evidence and debugging.
 - **CLI tools** — `init` (scaffold projects), `status` (check active runs), `stop` (graceful cleanup).
