@@ -14,8 +14,8 @@ for that app. Keyed by the current dir.
 │   ├── captions.vtt           subtitle per frame (planned; v1 burns captions in)
 │   ├── findings.json          structured report back to the smart agent
 │   └── logs/
-│       ├── console.log        browser / app console
-│       ├── network.log        requests, responses, failures, timings
+│       ├── console.log        browser / app console (web targets only)
+│       ├── network.log        requests, responses, failures, timings (web targets only)
 │       └── agent.log          small agent's step-by-step trail
 ├── owner.lock                 exclusive ownership claim (one live owner)
 └── state.json                 session state, keyed by cwd
@@ -31,11 +31,22 @@ for that app. Keyed by the current dir.
 | `replay.mp4`        | The run as a short captioned video — drop it in the PR (see below). |
 | `captions.vtt`      | One subtitle per frame (planned sidecar; v1 burns captions into `replay.mp4`). |
 | `findings.json`     | The structured verdict. Smart agent reads this, not prose. |
-| `console.log`       | JS errors a code-only agent can't see. |
-| `network.log`       | The 500s / hangs / bad payloads behind a broken UI. |
-| `agent.log`         | Why the small agent decided pass/fail. Auditable. |
+| `sessions/<id>/logs/console.log` | JS errors a code-only agent can't see. **Web targets only** — the console/network capture sink is handed to the browser adapter alone (`src/adapters/factory.ts:76`), so a desktop or mobile run has no `console.log`. |
+| `sessions/<id>/logs/network.log` | The 500s / hangs / bad payloads behind a broken UI. Same sink, same web-only reach. |
+| `sessions/<id>/logs/agent.log`   | Why the small agent decided pass/fail. Auditable. Written for every target — the run-start breadcrumb alone lands here (`src/services/session-builder.ts:379`). |
 | `owner.lock`        | The **exclusive ownership lock** — the authoritative one-run gate. A kernel-held `flock(2)` (`LOCK_EX \| LOCK_NB`) taken by `FileStatePort.record` before any breadcrumb is published: the kernel grants it to exactly one process and refuses every rival, so a live foreign owner's start fails with `SessionBusyError` (naming the holder from the claim written on the file), and a crashed owner's lock dies with its process — the workspace is simply free, with nothing to reclaim. The claim file is a notice board, not the lock: never unlinked (unlinking would swap the inode under a live lock), emptied on release, and litter from older protocols (`.reclaiming-*`, `owner.lock.reclaim`) is inert. Exclusion is non-revocable — no recovery logic can restore one owner over another, because there is no recovery. |
 | `state.json`        | Resume / inspect the cwd-keyed session. |
+
+The logs live **per session**, under `sessions/<id>/logs/` — there is no
+project-level `logs/` directory. Path of record:
+`src/session/workspace.ts` `sessionPaths().logs` (`src/session/workspace.ts:150`)
+→ `src/session/findings-store.ts` `appendLog`, which writes
+`<channel>.log` into that dir (`src/session/findings-store.ts:127-130`, channels
+`console` / `network` / `agent` at `src/session/findings-store.ts:25`) → the
+writers in `src/services/session-builder.ts`: the console/network capture sink
+(`src/services/session-builder.ts:293-295`) and the agent sink
+(`src/services/session-builder.ts:323-324`). Which files exist depends on the
+target — see the table above.
 
 ## PR replay video
 
@@ -90,7 +101,7 @@ Two properties, both load-bearing:
 
 ## Retention: the newest 5
 
-Every run leaves `story.md`, `findings.json`, the whole `logs/` trail, every
+Every run leaves `story.md`, `findings.json`, its `logs/` trail, every
 screenshot and a `replay.mp4`. Nothing used to remove them, so the workspace only
 grew — an afternoon of dogfooding is hundreds of megabytes.
 
