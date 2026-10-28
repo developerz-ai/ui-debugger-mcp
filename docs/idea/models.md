@@ -61,7 +61,7 @@ one does the moving and asks — *"is the cup to my left?"* — and acts on the 
 - **Swappable.** Both come from any **OpenAI-compatible router**, set **per
   role** — pick a tiny fast model to drive, a strong multimodal one to see.
 
-## Config — model roles (defaults: deepseek text, glm image)
+## Config — model roles (defaults: deepseek text, qwen image)
 
 `.ui-debugger-mcp.json`:
 ```jsonc
@@ -71,7 +71,7 @@ one does the moving and asks — *"is the cup to my left?"* — and acts on the 
   "summary": "deepseek/deepseek-v4-flash"          // optional — compress findings
 }
 ```
-Defaults if omitted: **deepseek for text** (driver + summary), **glm for image**
+Defaults if omitted: **deepseek for text** (driver + summary), **qwen for image**
 (vision). Capability-based assignment, same idea as `../ai-task-master`'s roles.
 Provider = any OpenAI-compatible endpoint (`OPENAI_BASE_URL` + an API key in
 `OPENAI_API_KEY` or `OPENROUTER_API_KEY`, `OPENAI_API_KEY` first when both are
