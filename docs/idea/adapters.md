@@ -69,8 +69,21 @@ The browser adapter runs Chrome one of two ways:
   (else auto-detect).
 - **Attach** — if a **`cdpUrl`** is configured, the adapter connects to an
   already-running browser over CDP and **never starts/stops it** (not its
-  process) and doesn't touch its profile. For live/staging/containerised or
-  remote Chrome.
+  process). Teardown disconnects without closing its context. For
+  live/staging/containerised or remote Chrome.
+
+Attach adopts the **first tab in the first available browser context**, creating
+a context or tab only if missing. This is **not active-tab or URL-based
+selection**. `start_debug` navigates that tab to the effective target URL (the
+per-run `url` override, otherwise the configured target URL). When `as` selects a
+configured persona, the same tab then navigates to the persona's login URL,
+resolved against the run URL, and the login flow enters and submits its configured
+fields before the agent starts.
+
+**Lifecycle non-ownership does not preserve tab contents or browser state.**
+Navigation replaces the adopted tab's contents; login and agent actions can change
+cookies, storage, and other session state. Use a **dedicated browser for attach
+runs**, not a browser holding unrelated work or personal sessions.
 
 `cdpUrl` set → attach. Unset → managed. See [`config.md`](config.md).
 
