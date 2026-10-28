@@ -376,6 +376,8 @@ export class BrowserAdapter implements Adapter {
           // A tab opened a moment ago may not have a document yet.
           title: await page.title().catch(() => ''),
           active: page === this.#page,
+          // Measure each live document; control identity is not visibility or OS focus.
+          visible: await page.evaluate("document.visibilityState === 'visible'"),
         })),
       );
     });
