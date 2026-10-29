@@ -104,7 +104,7 @@ the root file is NOT read in that case.
       "adapter": "android",                        // ADB-driven (uiautomator + screencap)
       // --- managed mode (default): server boots the emulator ---
       "avd": "my-avd",                             // emulator @my-avd
-      "emulatorPath": null,                        // null = auto-detect from SDK
+      "emulatorPath": null,                        // null = auto-detect: $ANDROID_HOME → $ANDROID_SDK_ROOT → ~/Android/Sdk → ~/Library/Android/sdk → PATH
       "headless": true,                            // default; -no-window + software GL + -no-audio
       "emulatorArgs": [],                          // appended verbatim, e.g. ["-http-proxy", "…"]
       // --- attach mode: talk to an already-running device/emulator ---

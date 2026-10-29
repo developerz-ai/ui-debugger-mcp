@@ -128,6 +128,18 @@ export function makeFakeEmulator(pid: number | undefined = 4242): ChildProcess {
   return child;
 }
 
+/**
+ * Pin emulator resolution so managed-boot tests are hermetic: the default seam
+ * consults the host's SDK layout and PATH, so the spawned binary — and even
+ * whether managed boot succeeds at all — would otherwise vary by machine.
+ * The stub is a structural literal typed through
+ * {@link AndroidAdapterInit}['resolveBin']; this module deliberately never
+ * imports `sdk.js`.
+ */
+export function stubResolveBin(bin = 'emulator'): NonNullable<AndroidAdapterInit['resolveBin']> {
+  return () => ({ bin, origin: 'path', where: 'PATH (test stub)' });
+}
+
 /** Fake UiAutomatorSource seam. */
 export class FakeUi implements UiAutomatorSource {
   private nodes: AndroidNode[];

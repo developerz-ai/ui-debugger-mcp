@@ -58,6 +58,7 @@ import {
 } from './commands.js';
 import { emulatorLaunchArgs } from './launch.js';
 import { emulatorSerial, pickEmulatorPort } from './ports.js';
+import { type EmulatorBin, resolveEmulatorBin } from './sdk.js';
 import { AdbUiAutomator, shapeNodes, type UiAutomatorSource } from './uiautomator.js';
 
 /** Default cap on `readState` so the tree stays small (overridable via `limit`). */
@@ -283,6 +284,8 @@ interface AndroidAdapterHandles {
   spawn: SpawnEmulator;
   bootWaitMs: number;
   pickPort: () => Promise<number>;
+  /** Managed-boot emulator-binary resolution — the seam behind `AndroidAdapterInit.resolveBin`. */
+  resolveBin: (explicit: string | null | undefined) => EmulatorBin;
   /** Where drained logcat rows are streamed — the run's durable capture sink. */
   onLog: CaptureSink | undefined;
 }
@@ -307,6 +310,13 @@ export interface AndroidAdapterInit {
   bootWaitMs?: number;
   /** Override the managed console-port pick (defaults to {@link pickEmulatorPort}); a test seam. */
   pickPort?: () => Promise<number>;
+  /**
+   * Override managed-boot emulator-binary resolution (defaults to
+   * {@link resolveEmulatorBin}: a configured `emulatorPath` verbatim, else the
+   * Android SDK install, else PATH); a seam for tests. Managed boot only — attach
+   * never resolves.
+   */
+  resolveBin?: (explicit: string | null | undefined) => EmulatorBin;
   /**
    * Optional sink for streaming captured logcat rows to the run's durable console
    * trail — the same seam the browser adapter writes to (the session layer binds
@@ -333,6 +343,7 @@ export class AndroidAdapter implements Adapter {
   readonly #spawn: SpawnEmulator;
   readonly #bootWaitMs: number;
   readonly #pickPort: () => Promise<number>;
+  readonly #resolveBin: (explicit: string | null | undefined) => EmulatorBin;
   readonly #onLog: CaptureSink | undefined;
   /**
    * The covered runs: disjoint spans of raw keys — every row the durable trail
@@ -359,6 +370,7 @@ export class AndroidAdapter implements Adapter {
     this.#spawn = handles.spawn;
     this.#bootWaitMs = handles.bootWaitMs;
     this.#pickPort = handles.pickPort;
+    this.#resolveBin = handles.resolveBin;
     this.#onLog = handles.onLog;
     // Attach mode targets an already-running device — treat it as booted from the start.
     this.#booted = handles.attach;
@@ -393,6 +405,7 @@ export class AndroidAdapter implements Adapter {
       spawn: init.spawn ?? ((bin, args) => spawn(bin, args, { detached: true, stdio: 'ignore' })),
       bootWaitMs: init.bootWaitMs ?? BOOT_WAIT_MS,
       pickPort: init.pickPort ?? (() => pickEmulatorPort()),
+      resolveBin: init.resolveBin ?? ((explicit) => resolveEmulatorBin(explicit)),
       onLog: init.onLog,
     });
   }
@@ -788,7 +801,9 @@ export class AndroidAdapter implements Adapter {
   }
 
   /**
-   * Managed boot: launch `emulator @avd -port <p>` (once), poll `sys.boot_completed`. The port
+   * Managed boot: resolve the emulator binary first (`emulatorPath`, else SDK/PATH
+   * auto-detect — a miss fails loud before anything is picked, bound or spawned), then
+   * launch `emulator @avd -port <p>` (once) and poll `sys.boot_completed`. The port
    * is picked free and bound **before** the spawn, so every later call (and the `close` kill)
    * targets the emulator we started, never a pre-existing one. No-op when attached; `deadline`
    * (the absolute instant the open's budget runs out) bounds both the device poll and the
@@ -805,7 +820,17 @@ export class AndroidAdapter implements Adapter {
             'to a running device/emulator)',
         );
       }
-      const bin = this.#config.emulatorPath ?? 'emulator';
+      // Honor `null = auto-detect from SDK` (config schema): resolve BEFORE the
+      // port pick so a missing binary fails loud before anything is picked, bound
+      // or spawned. Attach never reaches here (it starts out already booted).
+      const resolved = this.#resolveBin(this.#config.emulatorPath);
+      if (resolved.origin === 'missing') {
+        throw new AdapterError(
+          'android: no emulator binary found for managed boot — set `emulatorPath` on the ' +
+            `target; searched: ${(resolved.searched ?? []).join(', ')}`,
+        );
+      }
+      const bin = resolved.bin;
       const port = await this.#pickPort();
       this.#serial = emulatorSerial(port);
       if (this.#bind) this.#transport = this.#bind(this.#serial);
