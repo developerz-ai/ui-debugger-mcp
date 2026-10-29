@@ -35,6 +35,15 @@ const DEFAULT_CHANNEL = 'chrome';
 export const LAUNCH_TIMEOUT_MS = 30_000;
 export const NAV_TIMEOUT_MS = 30_000;
 
+/**
+ * The fixed cap for the attach-teardown restore navigation (returning an adopted
+ * tab to its pre-run URL). Teardown has no run budget left to shorten it — the
+ * run is already over — so this constant IS the bound: it caps how long
+ * `end_session` can hang on a wedged `goto` before the best-effort restore
+ * gives up and the disconnect proceeds.
+ */
+export const RESTORE_TIMEOUT_MS = 10_000;
+
 /** Detect the Playwright-managed Chromium binary; null if it isn't installed. */
 function detectManagedChromium(): string | null {
   try {

@@ -58,7 +58,8 @@ compacted) may not have. Two in-band ways back:
   with `end_session`, or decide it is stale.
 - **`start_debug({ replace: true })`** — take the project over: the active run is
   ended first (the `end_session` path — managed Chrome stopped, an attached
-  browser only disconnected, profile lock freed), then the new run starts.
+  browser only disconnected, web attach first restoring the adopted tab's
+  pre-run URL best-effort, profile lock freed), then the new run starts.
 
 The refusal stays the default, and it names the id plus each of those calls. A
 silent takeover is the wrong default: it kills a healthy run whose own caller is

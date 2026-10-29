@@ -42,7 +42,7 @@ adapter-blind:
 | `waitFor`   | DOM / network idle             | poll a11y (networkIdle unsupported) | poll hierarchy (networkIdle unsupported)            |
 | `console`   | CDP capture                    | unsupported — fails loud            | logcat tail                                         |
 | `network`   | CDP exchanges (bodies/headers) | unsupported — fails loud            | unsupported over ADB — fails loud                   |
-| `close`     | managed: stop Chrome · attach: disconnect | managed: stop the launched app · else no-op | managed: kill our emulator · attach: disconnect |
+| `close`     | managed: stop Chrome · attach: restore the adopted tab's pre-run URL (best-effort), then disconnect | managed: stop the launched app · else no-op | managed: kill our emulator · attach: disconnect |
 | `tabs` — optional (web) | list open tabs | — | — |
 | `selectTab` — optional (web) | drive another tab | — | — |
 | `takeUnrequestedLoads` — optional (web) | drained surprise full-document loads | — | — |
@@ -83,7 +83,9 @@ The browser adapter runs Chrome one of two ways:
   (else auto-detect).
 - **Attach** — if a **`cdpUrl`** is configured, the adapter connects to an
   already-running browser over CDP and **never starts/stops it** (not its
-  process). Teardown disconnects without closing its context. For
+  process). Teardown first navigates the adopted tab back to its pre-run URL
+  (best-effort, skipped when the run never moved it), then disconnects without
+  closing its context. For
   live/staging/containerised or remote Chrome.
 
 Attach adopts the **first tab in the first available browser context**, creating
@@ -94,10 +96,12 @@ configured persona, the same tab then navigates to the persona's login URL,
 resolved against the run URL, and the login flow enters and submits its configured
 fields before the agent starts.
 
-**Lifecycle non-ownership does not preserve tab contents or browser state.**
-Navigation replaces the adopted tab's contents; login and agent actions can change
-cookies, storage, and other session state. Use a **dedicated browser for attach
-runs**, not a browser holding unrelated work or personal sessions.
+**URL restoration is not state restoration.** Teardown returns the adopted tab
+to the URL it held before the run (the snapshot taken at attach, before the run's
+first navigation and any persona sign-in), but it does not undo what the run did
+to the browser state: login and agent actions can change cookies, storage, and
+other session state, and that is never reverted. Use a **dedicated browser for
+attach runs**, not a browser holding unrelated work or personal sessions.
 
 `cdpUrl` set → attach. Unset → managed. See [`config.md`](config.md).
 
