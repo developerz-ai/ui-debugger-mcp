@@ -13,12 +13,17 @@
  *      `~/Android/Sdk/emulator/` (Linux), `~/Library/Android/sdk/emulator/` (macOS);
  *   3. a bare `emulator` on PATH — the old behaviour, kept as the last resort.
  *
+ * An auto-detected hit is accepted only if it is an **executable file**: a
+ * non-executable candidate (a data file, a directory, a stub without +x)
+ * falls through to the next source instead of masking a runnable one behind
+ * it — existence alone would let `/a/emulator` shadow `/b/emulator`.
+ *
  * A miss is a **result**, not a throw: `origin: 'missing'` plus every searched
  * location, so the caller fails loud with where it looked. Env values and PATH
  * entries are trimmed; an empty one counts as unset.
  */
 
-import { existsSync } from 'node:fs';
+import { accessSync, constants, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { posix, win32 } from 'node:path';
 
@@ -45,7 +50,12 @@ export interface EmulatorBin {
  */
 export interface EmulatorSeams {
   env: Readonly<Record<string, string | undefined>>;
-  exists: (path: string) => boolean;
+  /**
+   * Eligibility of an auto-detected candidate: a regular file this process may
+   * execute. Existence alone is not enough — an ineligible first hit must fall
+   * through, or it masks the runnable candidate behind it.
+   */
+  isExecutableFile: (path: string) => boolean;
   home: string;
   platform: NodeJS.Platform;
 }
@@ -54,7 +64,17 @@ export interface EmulatorSeams {
 export function realEmulatorSeams(): EmulatorSeams {
   return {
     env: process.env,
-    exists: (path) => existsSync(path),
+    isExecutableFile: (path) => {
+      try {
+        // A directory passes `X_OK` (search permission), so the file check
+        // comes first; `statSync` follows symlinks, which is what we want.
+        if (!statSync(path).isFile()) return false;
+        accessSync(path, constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    },
     home: homedir(),
     platform: process.platform,
   };
@@ -101,7 +121,7 @@ function detectEmulatorBin(seams: EmulatorSeams): EmulatorBin {
     const dir = base?.trim();
     if (dir === undefined || dir === '') continue;
     const bin = paths.join(dir, 'emulator', binName);
-    if (seams.exists(bin)) {
+    if (seams.isExecutableFile(bin)) {
       return { bin, origin: 'sdk', where: label };
     }
   }
@@ -115,7 +135,8 @@ function detectEmulatorBin(seams: EmulatorSeams): EmulatorBin {
       const bin = paths.join(dir, binName);
       // The probed path itself is the label — `missing` reports every sweep.
       searched.push(bin);
-      if (seams.exists(bin)) {
+      // Not executable → skipped, and a later PATH entry can still win.
+      if (seams.isExecutableFile(bin)) {
         return { bin, origin: 'path', where: 'PATH' };
       }
     }
