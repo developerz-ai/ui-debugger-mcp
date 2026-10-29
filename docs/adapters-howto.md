@@ -16,6 +16,11 @@ for Linux tooling (X11/Wayland input, AT-SPI2, scrot/grim, ADB).
 
 **`src/adapters/contract.ts`** — read this first. Every adapter implements `Adapter`.
 
+**Verification status:** This shared-contract walkthrough is prose-only, not
+machine-checked by the documentation guards. The [`Adapter` interface](../src/adapters/contract.ts)
+is authoritative. The existing contract-table guard checks member names and
+optionality in `docs/idea/adapters.md`, not signatures or behavioral semantics.
+
 ```
 open(target)           navigate / launch / start activity
 find(opts)             resolve first matching node (null if none)
