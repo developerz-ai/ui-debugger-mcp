@@ -65,8 +65,8 @@ export type Exec = (cmd: string, args: string[], opts?: ExecOptions) => Promise<
 /**
  * A child env with `DISPLAY` overridden when a target display is configured (else inherit).
  * An explicit display also drops any inherited `WAYLAND_DISPLAY` — the user pointed us at
- * an X11 display (e.g. Xvfb `:99`), so capture/input must not dispatch to the live
- * Wayland session ({@link chooseCaptureTool} checks `WAYLAND_DISPLAY` first).
+ * an X11 display (e.g. Xvfb `:99`), so capture/input must not dispatch or fall back
+ * to the live Wayland session.
  */
 export function desktopEnv(display?: string): NodeJS.ProcessEnv {
   const env = { ...process.env };
