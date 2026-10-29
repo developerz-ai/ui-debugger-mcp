@@ -29,7 +29,8 @@ code, asks again. Loop until the UI works. No human clicking.
 - `../../sebyx07/claude-code-bible/docs` — deeper handbook. `?debug-ai=true` login bypass pattern.
 
 ## Architecture
-- `src/main.ts` — boot stdio MCP server.
+- `src/main.ts` — CLI entry (help/version/init/status/stop).
+- `src/boot.ts` — server boot: owner-lock gate → config → workspace → provider/models → stdio MCP server.
 - `src/mcp/` — MCP server, tool defs (few fat tools, NOT one-per-action).
 - `src/agent/` — debug agent (Vercel AI SDK loop). The **fast guy** (driver) +
   the **vision guy** (eyes via `look`). Models per role via OpenAI-compatible
