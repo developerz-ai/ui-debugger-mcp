@@ -88,8 +88,9 @@ The browser adapter runs Chrome one of two ways:
   closing its context. For
   live/staging/containerised or remote Chrome.
 
-Attach adopts the **first tab in the first available browser context**, creating
-a context or tab only if missing. This is **not active-tab or URL-based
+Attach adopts the **first tab in the first available browser context** —
+`attachHandles` in `src/adapters/browser/lifecycle.ts:138-139` — creating a
+context or tab only if missing. This is **not active-tab or URL-based
 selection**. `start_debug` navigates that tab to the effective target URL (the
 per-run `url` override, otherwise the configured target URL). When `as` selects a
 configured persona, the same tab then navigates to the persona's login URL,

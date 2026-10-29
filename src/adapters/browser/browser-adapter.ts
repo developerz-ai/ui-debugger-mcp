@@ -446,7 +446,19 @@ export class BrowserAdapter implements Adapter {
           title: await page.title().catch(() => ''),
           active: page === this.#page,
           // Measure each live document; control identity is not visibility or OS focus.
-          visible: await page.evaluate("document.visibilityState === 'visible'"),
+          // A page mid-navigation has no execution context to evaluate in, and the
+          // login's URL proof polls `tabs()` every 250 ms — it walks straight into
+          // that window on every sign-in that redirects. Same no-document state the
+          // `title` read above absorbs: one vanished document is one unmeasurable
+          // tab, not a failed listing (readState skips a vanished frame the same
+          // way). The race reads `false` — a vanished document is not a visible one,
+          // never a cached answer — and any other probe failure stays loud.
+          visible: await page
+            .evaluate<boolean>("document.visibilityState === 'visible'")
+            .catch((error: unknown): boolean => {
+              if (!isFrameGone(error, false)) throw error;
+              return false;
+            }),
         })),
       );
     });

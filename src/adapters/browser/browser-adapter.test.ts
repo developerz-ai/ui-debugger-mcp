@@ -185,6 +185,31 @@ test('a failed visibility probe rejects the listing as AdapterError, never cache
   }
 });
 
+test('a frame-gone visibility probe resolves the listing, reading that tab as invisible', async () => {
+  const { adapter, states } = await attachedTabs();
+  try {
+    await adapter.selectTab(0);
+    expect((await adapter.tabs())[0]?.visible).toBe(true);
+    // The page mid-navigation race (a vanished document has no execution context
+    // to probe) must not fail the listing: it resolves, the vanished document
+    // reads `visible: false` — never the `true` it was a moment ago, never a
+    // cached answer — while an UNRELATED probe failure stays loud (test above).
+    for (const [index, state] of states.entries()) {
+      state.probeError = new Error('Execution context was destroyed');
+      const visibility = (await adapter.tabs()).map((tab) => tab.visible);
+      // The frame-gone document reads invisible; the OTHER tab still reports its
+      // own live state — asserted as whole arrays.
+      const expected = states.map((other) => other.visibilityState === 'visible');
+      expected[index] = false;
+      expect(visibility).toEqual(expected);
+      state.probeError = null;
+    }
+    expect(states.map((state) => state.fronts)).toEqual([1, 0]);
+  } finally {
+    await adapter.close();
+  }
+});
+
 // --- resolveTargetUrl -------------------------------------------------------
 
 test('resolveTargetUrl anchors a relative path to the base', () => {
