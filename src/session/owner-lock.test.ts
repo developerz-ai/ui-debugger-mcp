@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { existsSync } from 'node:fs';
+import { closeSync, constants, existsSync, openSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -9,6 +9,7 @@ import {
   assertOwnerLockBackend,
   type FlockOpener,
   LIBC_CANDIDATES,
+  nodeFlockBackend,
   type OwnerLock,
   openFlockInLibc,
   ownerLockPath,
@@ -402,6 +403,40 @@ test('an empty claim file is litter, not an in-progress publish', async () => {
   const current = owner(process.pid, 'first');
   expect(await acquireOwnerLock(lockPath, current)).toEqual({ acquired: true, created: true });
   expect(JSON.parse(await readFile(lockPath, 'utf8'))).toEqual(current);
+});
+
+test('the Node-side backend takes the same kernel lock: a rival is refused until it is released', async () => {
+  // The suite runs under Bun, so the shipped artifact's Node path — the one
+  // the packed-artifact smoke drives on the node floor — is exercised here
+  // directly. It is the SAME kernel flock: a rival that opens the file for
+  // itself is refused, and the lock is free again once the holder lets it go.
+  const flock = await nodeFlockBackend();
+  const fd = openSync(lockPath, constants.O_RDWR | constants.O_CREAT, 0o644);
+  expect(await flock.tryLock(fd)).toBe(true);
+
+  // A rival opens the same file for itself: an independent open file
+  // description, so the kernel refuses it — no judgment, just the lock.
+  const rivalFd = openSync(lockPath, constants.O_RDWR | constants.O_CREAT, 0o644);
+  expect(await flock.tryLock(rivalFd)).toBe(false);
+  closeSync(rivalFd);
+
+  // Released: the next holder gets it. The release closes the descriptor,
+  // which is what drops the flock — the kernel releases it when the last
+  // descriptor referring to it is gone.
+  flock.release(fd);
+  const nextFd = openSync(lockPath, constants.O_RDWR | constants.O_CREAT, 0o644);
+  expect(await flock.tryLock(nextFd)).toBe(true);
+  flock.release(nextFd);
+});
+
+test('the Node-side backend fails loud when the platform has no flock(1)', async () => {
+  // A missing binary must never read as "nobody holds this lock": that would
+  // hand the same workspace to a second server.
+  const flock = await nodeFlockBackend('flock-does-not-exist');
+  const fd = openSync(lockPath, constants.O_RDWR | constants.O_CREAT, 0o644);
+  await expect(flock.tryLock(fd)).rejects.toThrow(WorkspaceError);
+  await expect(flock.tryLock(fd)).rejects.toThrow(/flock-does-not-exist/);
+  closeSync(fd);
 });
 
 /**
