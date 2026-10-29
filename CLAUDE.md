@@ -146,7 +146,7 @@ The three log trails live in the SESSION, never at the project level:
 `sessions/<id>/logs/{console,network,agent}.log` — `console` is the browser/app
 console, `network` the request/response trail, `agent` the small agent's step
 trail. Path pinned by `sessionPaths().logs` (`src/session/workspace.ts:150`),
-written by `appendLog` (`src/session/findings-store.ts:127`).
+written by `appendLog` (`src/session/findings-store.ts:157`).
 
 Which files exist depends on the run: `console`/`network` come from the run's
 capture sink — `CaptureSink` declared in `src/adapters/contract.ts` (re-exported
@@ -156,7 +156,7 @@ console + network) AND to the android adapter (logcat rows,
 `src/adapters/factory.ts`). The web half is PUSH-based: the page's console
 streams as it happens. The android half is READ-driven —
 `AndroidAdapter.console()` streams the logcat rows it parses
-(`src/adapters/android/android-adapter.ts:459`) — so a mobile run writes
+(`src/adapters/android/android-adapter.ts:553`) — so a mobile run writes
 `logs/console.log` only when the driver observes the console, and never writes
 `logs/network.log` (ADB has no network channel). A desktop run writes neither.
 `agent` is the agent sink (`src/services/session-builder.ts`).
@@ -265,9 +265,13 @@ a public CLI subcommand (`main.ts` dispatches only init/status/stop).
 - Fail fast. Surface errors loud. No silent fallback.
 
 ## Adapter contract (the one real seam)
-One interface so the agent loop is adapter-blind:
-`open · find · click · type · readState · screenshot · waitFor · console · network`,
-plus optional `tabs · selectTab` (web only — the belt says "unsupported" elsewhere).
+One interface so the agent loop is adapter-blind (`src/adapters/contract.ts`):
+required — `selectorDialect · open · find · click · type · pressKey · scroll ·
+readState · screenshot · waitFor · console · network · close`;
+optional — `tabs · selectTab · takeUnrequestedLoads` (web only: the belt says
+"unsupported" for `tabs`/`switch_tab` off web, and skips the load queue
+silently). `selectorDialect` is a readonly PROPERTY (`'web' | 'native'`), never
+a method. `close()` stops a managed target; for attach it disconnects only.
 Web → DOM. Desktop/mobile → a11y tree / view hierarchy — there is
 no automatic vision/OCR fallback: the adapter never switches to pixels. The
 only vision is the agent-level `look` (the vision model on a captured frame).
