@@ -31,7 +31,7 @@ for that app. Keyed by the current dir.
 | `replay.mp4`        | The run as a short captioned video — drop it in the PR (see below). |
 | `captions.vtt`      | One subtitle per frame (planned sidecar; v1 burns captions into `replay.mp4`). |
 | `findings.json`     | The structured verdict. Smart agent reads this, not prose. |
-| `sessions/<id>/logs/console.log` | JS errors a code-only agent can't see — and, on a mobile run, the app's logcat rows (crashes, stack traces). **Web AND android targets**: the run's capture sink is handed to the browser adapter (CDP console) and to the android adapter (`src/adapters/factory.ts`). The web half is PUSH-based — the page's console streams as it happens; the android half is READ-driven — `AndroidAdapter.console()` streams the logcat rows it parses (`src/adapters/android/android-adapter.ts:459`) — so a mobile run writes this file only when the driver observes the console. A desktop run has no `console.log`. |
+| `sessions/<id>/logs/console.log` | JS errors a code-only agent can't see — and, on a mobile run, the app's logcat rows (crashes, stack traces). **Web AND android targets**: the run's capture sink is handed to the browser adapter (CDP console) and to the android adapter (`src/adapters/factory.ts`). The web half is PUSH-based — the page's console streams as it happens; the android half is READ-driven — `AndroidAdapter.console()` streams the logcat rows it parses (`src/adapters/android/android-adapter.ts:553`) — so a mobile run writes this file only when the driver observes the console. A desktop run has no `console.log`. |
 | `sessions/<id>/logs/network.log` | The 500s / hangs / bad payloads behind a broken UI. Same sink, still web-only reach — ADB has no network channel, so a mobile run writes no `network.log`. |
 | `sessions/<id>/logs/agent.log`   | Why the small agent decided pass/fail. Auditable. Written for every target — the run-start breadcrumb alone lands here (`src/services/session-builder.ts`). |
 | `owner.lock`        | The **exclusive ownership lock** — the authoritative one-run gate. A kernel-held `flock(2)` (`LOCK_EX \| LOCK_NB`) taken by `FileStatePort.record` before any breadcrumb is published: the kernel grants it to exactly one process and refuses every rival, so a live foreign owner's start fails with `SessionBusyError` (naming the holder from the claim written on the file), and a crashed owner's lock dies with its process — the workspace is simply free, with nothing to reclaim. The claim file is a notice board, not the lock: never unlinked (unlinking would swap the inode under a live lock), emptied on release, and litter from older protocols (`.reclaiming-*`, `owner.lock.reclaim`) is inert. Exclusion is non-revocable — no recovery logic can restore one owner over another, because there is no recovery. |
@@ -41,9 +41,10 @@ The logs live **per session**, under `sessions/<id>/logs/` — there is no
 project-level `logs/` directory. Path of record:
 `src/session/workspace.ts` `sessionPaths().logs` (`src/session/workspace.ts:150`)
 → `src/session/findings-store.ts` `appendLog`, which writes
-`<channel>.log` into that dir (`src/session/findings-store.ts:127-130`, channels
-`console` / `network` / `agent` at `src/session/findings-store.ts:25`) → the
-writers in `src/services/session-builder.ts`: the capture sink
+`<channel>.log` into that dir (`src/session/findings-store.ts:157-162`); the
+`LogChannel` union it takes — `console` / `network` / `agent` — is declared at
+`src/session/findings-store.ts:26` → the writers in
+`src/services/session-builder.ts`: the capture sink
 (`createCaptureSink` there) and the agent sink. Which files exist depends on the
 target — see the table above.
 
