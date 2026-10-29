@@ -9,15 +9,26 @@
  * would be exactly the drift this guard exists to kill.
  *
  * Every check is anchored to one exact table header, so an unrelated table (the
- * inner-belt table in docs/idea/mcp-tools.md, the findings tables in
- * docs/reference.md) can never pass itself off as the outer catalog. Sets are
- * compared, not sequences — the documents order their tables differently.
+ * findings tables in docs/reference.md) can never pass itself off as a checked
+ * one. Sets are compared, not sequences — the documents order their tables
+ * differently.
+ *
+ * The same discipline covers the INNER belt and the adapter contract:
+ * `lintBelt` checks docs/idea/mcp-tools.md's belt table against the four
+ * imported input schemas (plus their OBSERVE_KINDS/ACT_ACTIONS enums), and
+ * `lintAdapterContract` checks docs/idea/adapters.md's contract table against
+ * the members parsed live out of `interface Adapter` — required and optional
+ * alike.
  */
 
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { ACT_ACTIONS, ActInputSchema } from '../../agent/belt/act.js';
+import { LookInputSchema } from '../../agent/belt/look.js';
+import { OBSERVE_KINDS, ObserveInputSchema } from '../../agent/belt/observe.js';
+import { ReportInputSchema } from '../../agent/belt/report.js';
 import type { DebugApi } from '../../services/debug-service.js';
 import { outerTools } from './index.js';
 
@@ -60,6 +71,8 @@ const CATALOG = liveCatalog();
 const REFERENCE_TEXT = readFileSync(join(ROOT, 'docs/reference.md'), 'utf8');
 const README_TEXT = readFileSync(join(ROOT, 'README.md'), 'utf8');
 const IDEA_TEXT = readFileSync(join(ROOT, 'docs/idea/mcp-tools.md'), 'utf8');
+const ADAPTERS_TEXT = readFileSync(join(ROOT, 'docs/idea/adapters.md'), 'utf8');
+const CONTRACT_SOURCE = readFileSync(join(ROOT, 'src/adapters/contract.ts'), 'utf8');
 
 // --- markdown parsing --------------------------------------------------------
 
@@ -149,6 +162,11 @@ function parseAnnotations(cell: string): Record<string, boolean> {
 /** The first inline code span in a cell, or '' when the cell has none. */
 function firstCodeSpan(cell: string): string {
   return cell.match(/`([^`]+)`/)?.[1] ?? '';
+}
+
+/** Every inline code span in a text, in order. */
+function codeSpans(text: string): string[] {
+  return [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1] ?? '');
 }
 
 /** Every `{ … }` group in a cell, in order. */
@@ -334,6 +352,152 @@ function lintIdea(text: string, catalog: readonly CatalogTool[]): string[] {
         tool.params,
       ),
     );
+  }
+  return problems;
+}
+
+// --- the inner belt and the adapter contract ---------------------------------
+
+/** One live inner-belt tool: its name, its input params and its row's enum spans. */
+interface BeltTool {
+  readonly name: string;
+  readonly params: readonly string[];
+  /** Values that must each appear as a code span somewhere in the tool's row. */
+  readonly enumSpans: readonly string[];
+}
+
+/**
+ * The live belt catalog, keyed off the imported input schemas — the schemas are
+ * the only authority, so a renamed or added shape param surfaces here without
+ * this file restating it.
+ */
+function liveBelt(): BeltTool[] {
+  const tools = [
+    ['observe', ObserveInputSchema, OBSERVE_KINDS],
+    ['act', ActInputSchema, ACT_ACTIONS],
+    ['look', LookInputSchema, []],
+    ['report', ReportInputSchema, []],
+  ] as const;
+  return tools.map(([name, schema, enumSpans]) => ({
+    name,
+    params: Object.keys(schema.shape),
+    enumSpans,
+  }));
+}
+
+/** One member of `interface Adapter`, as the contract source declares it. */
+interface ContractMember {
+  readonly name: string;
+  readonly optional: boolean;
+}
+
+/** A member declaration inside `interface Adapter` — 2-space indent, `?` marks optional. */
+const CONTRACT_MEMBER = /^ {2}(?:readonly )?([A-Za-z][A-Za-z0-9]*)(\?)?[:(]/gm;
+
+/**
+ * Parse the members of `interface Adapter` out of its source. A member is a
+ * 2-space-indented declaration inside the interface body; the `?` before its
+ * `(` or `:` marks it optional. Returns [] when the interface is absent or
+ * unclosed — the caller reports that loud.
+ */
+function adapterMembers(source: string): ContractMember[] {
+  const start = source.indexOf('interface Adapter');
+  if (start === -1) return [];
+  const end = source.indexOf('\n}', start);
+  if (end === -1) return [];
+  const members: ContractMember[] = [];
+  for (const match of source.slice(start, end).matchAll(CONTRACT_MEMBER)) {
+    members.push({ name: match[1] ?? '', optional: match[2] === '?' });
+  }
+  return members;
+}
+
+/** The contract table header in docs/idea/adapters.md. */
+const CONTRACT_HEADER = ['Op', 'Web (CDP)', 'Desktop (X11/XWayland)', 'Mobile (ADB)'] as const;
+
+/**
+ * Problems in docs/idea/mcp-tools.md's inner belt table: one row per live belt
+ * tool, its Shape cell leading with a brace group of exactly the schema's
+ * params, and — for observe/act — a code span per OBSERVE_KINDS/ACT_ACTIONS
+ * value.
+ */
+function lintBelt(text: string, belt: readonly BeltTool[] = liveBelt()): string[] {
+  const problems: string[] = [];
+  const rows = tableRows(text, ['Tool', 'Shape', 'Maps to / routes']);
+  if (rows.length !== belt.length) {
+    problems.push(
+      `docs/idea/mcp-tools.md: inner belt table has ${rows.length} rows, expected ${belt.length}`,
+    );
+  }
+  const live = new Map(belt.map((tool) => [tool.name, tool]));
+  const documented = new Set<string>();
+  for (const row of rows) {
+    const name = unquote(firstCodeSpan(row[0] ?? ''));
+    if (name.length === 0) continue;
+    documented.add(name);
+    const tool = live.get(name);
+    if (tool === undefined) continue;
+    const shape = braceGroups(row[1] ?? '')[0] ?? null;
+    if (shape === null) {
+      problems.push(`docs/idea/mcp-tools.md: "${name}" documents no input shape`);
+      continue;
+    }
+    // Prose writes an array param as `steps[]` — the [] marks the type, not the name.
+    const docNames = shapeNames(shape).map((param) => param.replace(/\[\]$/, ''));
+    problems.push(
+      ...setDrift(`docs/idea/mcp-tools.md belt shape of "${name}"`, docNames, tool.params),
+    );
+    const spans = new Set(codeSpans(row.join(' ')));
+    for (const value of tool.enumSpans) {
+      if (!spans.has(value)) {
+        problems.push(`docs/idea/mcp-tools.md: "${name}" row has no \`${value}\` code span`);
+      }
+    }
+  }
+  problems.push(...setDrift('docs/idea/mcp-tools.md inner belt table', documented, live.keys()));
+  return problems;
+}
+
+/**
+ * Problems in docs/idea/adapters.md's contract table: every `interface Adapter`
+ * member gets exactly one row, and the Op cell carries "optional" precisely
+ * when the member is optional (`tabs`, `selectTab`, `takeUnrequestedLoads`).
+ */
+function lintAdapterContract(contractSource: string, docText: string): string[] {
+  const members = adapterMembers(contractSource);
+  if (members.length === 0) {
+    return ['src/adapters/contract.ts: could not parse `interface Adapter` members'];
+  }
+  const problems: string[] = [];
+  const rows = tableRows(docText, CONTRACT_HEADER);
+  if (rows.length !== members.length) {
+    problems.push(
+      `docs/idea/adapters.md: contract table has ${rows.length} rows, expected ${members.length}`,
+    );
+  }
+  const live = new Map(members.map((member) => [member.name, member]));
+  const documented = new Map<string, boolean>();
+  for (const row of rows) {
+    const cell = row[0] ?? '';
+    const name = unquote(firstCodeSpan(cell));
+    if (name.length === 0) continue;
+    documented.set(name, /\boptional\b/.test(cell));
+  }
+  problems.push(
+    ...setDrift('docs/idea/adapters.md contract table', documented.keys(), live.keys()),
+  );
+  for (const [name, markedOptional] of documented) {
+    const member = live.get(name);
+    if (!member) continue;
+    if (member.optional && !markedOptional) {
+      problems.push(
+        `docs/idea/adapters.md: "${name}" is optional in the contract but its row is not marked optional`,
+      );
+    } else if (!member.optional && markedOptional) {
+      problems.push(
+        `docs/idea/adapters.md: "${name}" is required in the contract but its row is marked optional`,
+      );
+    }
   }
   return problems;
 }
@@ -524,4 +688,141 @@ test('a README without MCP annotation names is reported (mutation)', () => {
   const problems = lintReadme(mutated, CATALOG);
   expect(problems.length).toBeGreaterThan(0);
   expect(problems.join('\n')).toContain('no MCP annotation names found');
+});
+
+// --- the inner belt table and the adapter contract table ---------------------
+
+test('the belt and contract guards parsed their anchors: 4 belt rows, 16 members', () => {
+  expect(tableRows(IDEA_TEXT, ['Tool', 'Shape', 'Maps to / routes'])).toHaveLength(4);
+  expect(tableRows(ADAPTERS_TEXT, CONTRACT_HEADER)).toHaveLength(16);
+
+  const members = adapterMembers(CONTRACT_SOURCE);
+  expect(members.filter((member) => !member.optional)).toHaveLength(13);
+  expect(members.filter((member) => member.optional)).toHaveLength(3);
+});
+
+test('the inner belt table matches the live belt', () => {
+  expect(lintBelt(IDEA_TEXT)).toEqual([]);
+});
+
+test('the adapter contract table matches the live contract', () => {
+  expect(lintAdapterContract(CONTRACT_SOURCE, ADAPTERS_TEXT)).toEqual([]);
+});
+
+test('a renamed parameter in the belt Shape cell is reported (mutation)', () => {
+  const mutated = IDEA_TEXT.replace('within? }', 'scope? }');
+  expect(mutated).not.toBe(IDEA_TEXT);
+
+  const problems = lintBelt(mutated);
+  expect(problems.length).toBeGreaterThan(0);
+  expect(problems.join('\n')).toContain('scope');
+  expect(problems.join('\n')).toContain('within');
+});
+
+test('a live belt parameter the Shape cell omits is reported (belt mutation)', () => {
+  const belt = liveBelt().map((tool) =>
+    tool.name === 'look' ? { ...tool, params: ['question'] } : tool,
+  );
+
+  const problems = lintBelt(IDEA_TEXT, belt);
+  expect(problems.length).toBeGreaterThan(0);
+  expect(problems.join('\n')).toContain('expect');
+});
+
+test('a renamed tool row in the belt table is reported (mutation)', () => {
+  const mutated = IDEA_TEXT.replace('| `observe` | `{ kind', '| `watch` | `{ kind');
+  expect(mutated).not.toBe(IDEA_TEXT);
+
+  const problems = lintBelt(mutated);
+  expect(problems.length).toBeGreaterThan(0);
+  expect(problems.join('\n')).toContain('watch');
+});
+
+test('a missing act action span in its row is reported (mutation)', () => {
+  const mutated = IDEA_TEXT.replace('`navigate`, `wait`, `switch_tab`)', '`navigate`, `wait`)');
+  expect(mutated).not.toBe(IDEA_TEXT);
+
+  const problems = lintBelt(mutated);
+  expect(problems.length).toBeGreaterThan(0);
+  expect(problems.join('\n')).toContain('switch_tab');
+});
+
+test('a missing observe kind span in its row is reported (mutation)', () => {
+  const mutated = IDEA_TEXT.replace(' · `tabs` → `tabs` (optional)', '');
+  expect(mutated).not.toBe(IDEA_TEXT);
+
+  const problems = lintBelt(mutated);
+  expect(problems.length).toBeGreaterThan(0);
+  expect(problems.join('\n')).toContain('tabs');
+});
+
+test('a belt row whose Shape cell documents no brace group is reported (mutation)', () => {
+  const mutated = IDEA_TEXT.replace(
+    '`{ status, steps[], bugs[], visual[], dismissStreamed?, summary? }` (Zod)',
+    'the Zod findings shape',
+  );
+  expect(mutated).not.toBe(IDEA_TEXT);
+
+  const problems = lintBelt(mutated);
+  expect(problems.length).toBeGreaterThan(0);
+  expect(problems.join('\n')).toContain('documents no input shape');
+});
+
+test('a renamed contract row is reported (mutation)', () => {
+  const mutated = ADAPTERS_TEXT.replace('| `pressKey`', '| `press_key`');
+  expect(mutated).not.toBe(ADAPTERS_TEXT);
+
+  const problems = lintAdapterContract(CONTRACT_SOURCE, mutated);
+  expect(problems.length).toBeGreaterThan(0);
+  expect(problems.join('\n')).toContain('press_key');
+});
+
+test('a deleted contract row is reported (mutation)', () => {
+  const mutated = ADAPTERS_TEXT.replace(/\n\| `close`[^\n]*\|/, '');
+  expect(mutated).not.toBe(ADAPTERS_TEXT);
+
+  const problems = lintAdapterContract(CONTRACT_SOURCE, mutated);
+  expect(problems.join('\n')).toContain('15 rows, expected 16');
+  expect(problems.join('\n')).toContain('close');
+});
+
+test('a required contract op marked optional is reported (mutation)', () => {
+  const mutated = ADAPTERS_TEXT.replace(/\| `find`(\s+)\|/, '| `find` — optional (web)$1|');
+  expect(mutated).not.toBe(ADAPTERS_TEXT);
+
+  const problems = lintAdapterContract(CONTRACT_SOURCE, mutated);
+  expect(problems.length).toBeGreaterThan(0);
+  expect(problems.join('\n')).toContain(
+    '"find" is required in the contract but its row is marked optional',
+  );
+});
+
+test('an optional contract op left unmarked is reported (mutation)', () => {
+  const mutated = ADAPTERS_TEXT.replace('| `tabs` — optional (web)', '| `tabs`');
+  expect(mutated).not.toBe(ADAPTERS_TEXT);
+
+  const problems = lintAdapterContract(CONTRACT_SOURCE, mutated);
+  expect(problems.length).toBeGreaterThan(0);
+  expect(problems.join('\n')).toContain(
+    '"tabs" is optional in the contract but its row is not marked optional',
+  );
+});
+
+test('a renamed contract member is reported (contract mutation)', () => {
+  const mutated = CONTRACT_SOURCE.replace(
+    '  open(target: string, timeoutMs?: number): Promise<void>;',
+    '  goto(target: string, timeoutMs?: number): Promise<void>;',
+  );
+  expect(mutated).not.toBe(CONTRACT_SOURCE);
+
+  const problems = lintAdapterContract(mutated, ADAPTERS_TEXT);
+  expect(problems.length).toBeGreaterThan(0);
+  expect(problems.join('\n')).toContain('goto');
+});
+
+test('a contract source without the interface is reported', () => {
+  const problems = lintAdapterContract('export interface Thing { a(): void }', ADAPTERS_TEXT);
+  expect(problems).toEqual([
+    'src/adapters/contract.ts: could not parse `interface Adapter` members',
+  ]);
 });

@@ -109,10 +109,10 @@ shape MCP tools should have."* So: a handful of verbs, lots of composable params
 
 | Tool | Shape | Maps to / routes |
 |------|-------|------------------|
-| `observe` | `{ kind, query?, fields?, filters?, limit?, within? }` | `readState` / `screenshot` |
-| `act`     | flat object: `{ action: enum, target?, text?, key?, ... }` | `find` + `click`/`type`/`waitFor`/`open` |
+| `observe` | `{ kind, query?, fields?, filters?, limit?, within? }` | `tree` → `readState` · `screenshot` → `screenshot` · `console` → `console` · `network` → `network` · `tabs` → `tabs` (optional) |
+| `act` | flat object: `{ action, target?, text?, clear?, key?, direction?, amount?, networkIdle?, timeout? }` | `find`, then `click`/`type`/`pressKey`/`scroll`/`open`/`waitFor`/`selectTab` (optional) — picked by the `action` enum (`click`, `type`, `key`, `scroll`, `navigate`, `wait`, `switch_tab`) |
 | `look`    | `{ question?, expect? }` → `{ description, matches?, issues[] }` | **vision model** (see [`models.md`](models.md)) |
-| `report`  | `{ bugs[], visual[], steps[], summary }` (Zod) | → surfaced via `get_findings` |
+| `report` | `{ status, steps[], bugs[], visual[], dismissStreamed?, summary? }` (Zod) | → surfaced via `get_findings` |
 
 - **One `act`, not six tools.** `act({action:"click", target})` beats
   `click_element` / `fill_input` / `press_key` — one flat object with an enum discriminant.
