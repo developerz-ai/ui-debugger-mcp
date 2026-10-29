@@ -56,8 +56,8 @@ function fakePage(url: string, events: string[]) {
       return state.url;
     },
     goto: async (target: string, opts?: { timeout?: number }) => {
-      if (target === state.failGoto) throw new Error('net::ERR_ABORTED');
       state.gotos.push({ url: target, timeout: opts?.timeout });
+      if (target === state.failGoto) throw new Error('net::ERR_ABORTED');
       state.url = target; // a real `goto` changes the address
       events.push(`goto:${target}`);
     },
@@ -236,11 +236,18 @@ test('a failing restore navigation is swallowed — close() resolves and the dis
   await adapter.open('/inbox'); // move the tab, so the restore is NOT skipped
   await expect(adapter.close()).resolves.toBeUndefined(); // the failure never surfaces
   expect(closes()).toBe(1); // the disconnect still ran
-  expect(state.gotos).toHaveLength(1); // the failed restore left no navigation behind
+  expect(state.url).toBe('http://localhost:5173/inbox'); // failed restore did not move the tab
+  expect(state.gotos.filter((goto) => goto.url === PRE_RUN_URL)).toEqual([
+    { url: PRE_RUN_URL, timeout: 10_000 },
+  ]);
 
   await adapter.close(); // and it is not retried on a second close
   expect(closes()).toBe(2);
-  expect(state.gotos).toHaveLength(1);
+  // Count attempts, not successful navigations: the URL still differs, so a
+  // missing once-only guard would attempt the failed restore again here.
+  expect(state.gotos.filter((goto) => goto.url === PRE_RUN_URL)).toEqual([
+    { url: PRE_RUN_URL, timeout: 10_000 },
+  ]);
 });
 
 test('a tab the owner closed mid-run throws from url() — close() still resolves and disconnects', async () => {
@@ -256,8 +263,7 @@ test('a tab the owner closed mid-run throws from url() — close() still resolve
   expect(events).toEqual(['goto:http://localhost:5173/inbox', 'browser.close']);
   expect(closes()).toBe(1);
 
-  // The once-guard holds: a retried restore would throw from url() again —
-  // this resolving proves the second close never touches the dead tab.
+  // Repeated teardown still resolves and disconnects with the dead tab.
   await expect(adapter.close()).resolves.toBeUndefined();
   expect(closes()).toBe(2);
   expect(events.filter((event) => event === 'browser.close')).toHaveLength(2);
