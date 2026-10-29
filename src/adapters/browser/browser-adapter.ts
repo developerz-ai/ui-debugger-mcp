@@ -6,7 +6,8 @@
  *     profile; we OWN start/stop. `executablePath` picks the binary, else system
  *     Chrome (`channel`) — `playwright-core` ships no bundled browser.
  *   - **attach**: connect to an already-running browser over CDP (`cdpUrl`) and
- *     NEVER start/stop it — `close()` only disconnects.
+ *     NEVER start/stop it — `close()` returns the adopted tab to its pre-run
+ *     URL (best-effort) and then disconnects.
  *
  * Implements the shared {@link Adapter} contract over the DOM/a11y: every element
  * normalizes to a {@link Node} (role/name/bounds/enabled) via one batched in-page
@@ -51,6 +52,7 @@ import {
 import {
   appendDebugLogin,
   NAV_TIMEOUT_MS,
+  RESTORE_TIMEOUT_MS,
   resolveTargetUrl,
   unreachableFailure,
 } from './launch.js';
@@ -125,6 +127,17 @@ export class BrowserAdapter implements Adapter {
   readonly #tabs: TabContext;
 
   /**
+   * The adopted tab and the URL it carried when we ATTACHED, or `null` for a
+   * managed context (whose profile we own — nothing to hand back).
+   *
+   * Snapshotted in the constructor, which runs BEFORE `open()`, the persona
+   * login and every driver step: that is the one moment that predates everything
+   * the run navigates, so `close()` can return an adopted tab to where its
+   * owner left it instead of on the last screen the driver happened to reach.
+   */
+  #restore: { page: Page; url: string } | null = null;
+
+  /**
    * Full-document loads the page performed on its own, oldest first — see
    * {@link Adapter.takeUnrequestedLoads}. `load` fires once per new document and
    * never for a same-document history change, which is the distinction that
@@ -150,6 +163,12 @@ export class BrowserAdapter implements Adapter {
     this.#mode = handles.mode;
     this.#capture = handles.capture;
     this.#tabs = handles.tabs;
+    // Attach adopted a tab we did not create: remember its address BEFORE the
+    // run moves it (open(), persona login, driver steps) so close() can hand
+    // the tab back. Managed owns its profile — there is nothing to restore.
+    if (handles.mode === 'attach') {
+      this.#restore = { page: handles.page, url: handles.page.url() };
+    }
     // First sight of the run's first tab: it is `tab-1` from the start, even if
     // it never logs anything — the label names the PAGE, it is not a reward for
     // activity.
@@ -327,13 +346,43 @@ export class BrowserAdapter implements Adapter {
     this.#capture.stop();
     await this.#run('close', async () => {
       if (this.#mode === 'attach') {
-        // Attach: disconnect only — never stop a browser we did not start.
+        // Attach: return the adopted tab to its pre-run URL (best-effort), then
+        // disconnect — never stop a browser we did not start.
+        await this.#restoreAdoptedTab();
         if (this.#browser) await this.#browser.close();
         return;
       }
       // Managed: close the persistent context we own (stops the browser).
       await this.#context.close();
     });
+  }
+
+  /**
+   * Return the adopted tab to the URL it carried when we attached (attach only).
+   *
+   * Runs ONCE: `close()` may be called twice, and the second call must not
+   * re-navigate. A tab the run never moved already sits on the snapshot, so it
+   * is not reloaded — navigating it again would only flash the owner's screen.
+   * A failure is swallowed on purpose: the browser was never ours, the run is
+   * already over, and neither a wedged `goto` nor a tab the owner closed
+   * mid-run — reading a dead handle's address throws — must fail the teardown
+   * or skip the disconnect (same best-effort posture as `closeOnFailure` in
+   * `launch.ts`).
+   * `RESTORE_TIMEOUT_MS` caps the wait — teardown has no run budget to shorten.
+   */
+  async #restoreAdoptedTab(): Promise<void> {
+    const restore = this.#restore;
+    this.#restore = null;
+    try {
+      // The `url()` read lives inside the swallow: on a live attached browser
+      // the tab can already be gone (the owner closed it, Chrome quit) and
+      // reading a dead handle's address throws — which would reject close()
+      // AND skip the disconnect below, leaking the CDP connection.
+      if (!restore || restore.page.url() === restore.url) return;
+      await restore.page.goto(restore.url, { timeout: RESTORE_TIMEOUT_MS });
+    } catch {
+      // Best-effort only — the disconnect below must still happen.
+    }
   }
 
   /**

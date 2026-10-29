@@ -68,11 +68,13 @@ export function startDebugTool(service: DebugApi): McpTool {
               .boolean()
               .optional()
               .describe(
-                'Take the project over when a run is already active: end that run (closing its ' +
-                  'browser and freeing the profile) and start yours. Default false — the start is ' +
-                  'refused instead, naming the active session_id. Use this when the active run is ' +
-                  'yours and you lost its id, or it is stuck; it kills a run that may still be ' +
-                  'working. A run held by another ui-debugger-mcp server is never replaced.',
+                'Take the project over when a run is already active: end that run via the end_session ' +
+                  'teardown (managed Chrome stopped; an attached browser only disconnected, its adopted ' +
+                  'tab first returned to its pre-run URL best-effort; profile lock freed) and start ' +
+                  'yours. Default false — the start is refused instead, naming the active session_id. ' +
+                  'Use this when the active run is yours and you lost its id, or it is stuck; it kills ' +
+                  'a run that may still be working. A run held by another ui-debugger-mcp server is ' +
+                  'never replaced.',
               ),
             criteria: z
               .string()

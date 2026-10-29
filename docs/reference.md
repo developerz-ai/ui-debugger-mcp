@@ -69,7 +69,7 @@ Open a debug session: hand the driver agent a goal for a configured target. One 
 | `criteria` | `string` | no | Explicit pass/fail rules, one per line. Omit to let the agent judge. |
 | `url` | `string` (URL) | no | Where to point the driver for this run (web targets) — e.g. a local dev server, a preview, or production. Overrides the target's configured url; required when the target has none. |
 | `as` | `string` | no | Sign in as this configured auth persona before the run starts (a key in the target's `auth` map — see `describe`). The login runs out-of-band: it costs the driver no steps and the credentials never enter its context. Omit to run signed out; an unknown name fails loud listing the valid ones. |
-| `replace` | `boolean` | no | Take the project over when a run is already active: end it first (closing its browser, freeing the profile), then start. Default `false` — the start is refused instead. |
+| `replace` | `boolean` | no | Take the project over when a run is already active: end it first (the `end_session` teardown — managed Chrome stopped, an attached browser only disconnected, the profile lock freed), then start. Default `false` — the start is refused instead. |
 | `timeout` | `number` (int, seconds) | no | Wall-clock cap before the run auto-ends and frees the browser/profile. Default: 300 s. Max: 2 147 483 s. |
 
 **Returns** — `{ session_id: string }`.
@@ -123,7 +123,7 @@ whole-object read additionally carries `truncated: Record<field, { returned, tot
 
 ### `end_session`
 
-Stop and tear down the active run. Aborts the agent loop, releases the target (managed Chrome is stopped; attached browser is only disconnected), and frees the project lock.
+Stop and tear down the active run. Aborts the agent loop, releases the target (managed Chrome is stopped; an attached browser is only disconnected — web attach first returns its adopted tab to its pre-run URL, best-effort: skipped when the run never moved the tab and a failed navigation is swallowed), and frees the project lock.
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|

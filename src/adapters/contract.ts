@@ -402,6 +402,10 @@ export interface Adapter {
    */
   takeUnrequestedLoads?(): Promise<string[]>;
 
-  /** Release the target: stop a **managed** process; for **attach**, disconnect only — never stop it. */
+  /**
+   * Release the target: stop a **managed** process; for **attach**, disconnect
+   * only — never stop it. The web adapter first returns an adopted tab to its
+   * pre-run URL (best-effort).
+   */
   close(): Promise<void>;
 }

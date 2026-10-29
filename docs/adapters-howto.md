@@ -28,7 +28,7 @@ screenshot()           capture PNG bytes
 waitFor(opts)          block until a condition holds or time out
 console(opts?)         read captured log messages (newest first, narrowed by LogQuery, non-destructive)
 network(opts?)         read captured network exchanges (newest first, narrowed by LogQuery, non-destructive)
-close()                release the target (managed: stop; attach: disconnect only)
+close()                release the target (managed: stop; attach: disconnect only; web attach first returns its adopted tab to its pre-run URL — best-effort, skipped when the run never moved it)
 ```
 
 Tree reads (`find`/`readState`) take `Query` (SQL-like `query/filters/limit/within`), while the
@@ -144,7 +144,8 @@ async console(): Promise<ConsoleEntry[]> {
 If the adapter supports both modes (like browser/android), gate on a config flag:
 
 - **attach** (`cdpUrl` / `adbSerial` set) → `close()` disconnects only; never
-  starts/stops the target.
+  starts/stops the target. Web attach first returns the adopted tab to its
+  pre-run URL (best-effort, skipped when the run never moved it).
 - **managed** (default) → adapter owns the lifecycle: launch in `open`, stop in
   `close`.
 
