@@ -1,53 +1,36 @@
 import { expect, test } from 'bun:test';
 import { access, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { AdapterError } from '../../errors.js';
+import { AdapterError, ExecTimeoutError } from '../../errors.js';
 import { type CaptureTool, captureArgs, chooseCaptureTool, Screenshot } from './capture.js';
 import { desktopEnv, type Exec } from './proc.js';
 
-// --- chooseCaptureTool ------------------------------------------------------
-
-test('chooseCaptureTool picks grim on Wayland', () => {
-  expect(chooseCaptureTool({ WAYLAND_DISPLAY: 'wayland-0' })).toBe('grim');
-});
-
-test('chooseCaptureTool prefers Wayland over X11 when both are set', () => {
-  expect(chooseCaptureTool({ WAYLAND_DISPLAY: 'wayland-0', DISPLAY: ':0' })).toBe('grim');
-});
-
-test('chooseCaptureTool picks scrot on X11', () => {
-  expect(chooseCaptureTool({ DISPLAY: ':99' })).toBe('scrot');
-});
-
-test('chooseCaptureTool throws when neither display is set', () => {
-  expect(() => chooseCaptureTool({})).toThrow(AdapterError);
-});
-
-test('chooseCaptureTool picks scrot for an explicit X11 display on a Wayland desktop', () => {
-  // Regression: a configured `display: ':99'` (e.g. Xvfb) must capture that X11
-  // display, not the inherited live Wayland session.
-  const saved = process.env.WAYLAND_DISPLAY;
-  process.env.WAYLAND_DISPLAY = 'wayland-0';
+// Set only capture-related environment keys; never depend on the host session.
+async function withEnv(env: NodeJS.ProcessEnv, run: () => void | Promise<void>) {
+  const keys = [
+    'DISPLAY',
+    'WAYLAND_DISPLAY',
+    'XDG_CURRENT_DESKTOP',
+    'XDG_SESSION_DESKTOP',
+    'DESKTOP_SESSION',
+  ];
+  const saved = keys.map((key) => process.env[key]);
   try {
-    expect(chooseCaptureTool(desktopEnv(':99'))).toBe('scrot');
+    for (const key of keys) {
+      if (env[key] === undefined) delete process.env[key];
+      else process.env[key] = env[key];
+    }
+    await run();
   } finally {
-    if (saved === undefined) delete process.env.WAYLAND_DISPLAY;
-    else process.env.WAYLAND_DISPLAY = saved;
+    keys.forEach((key, index) => {
+      if (saved[index] === undefined) delete process.env[key];
+      else process.env[key] = saved[index];
+    });
   }
-});
+}
 
-// --- captureArgs ------------------------------------------------------------
-
-test('captureArgs writes the PNG to the given file per tool', () => {
-  expect(captureArgs('grim', '/tmp/shot.png')).toEqual(['/tmp/shot.png']);
-  expect(captureArgs('scrot', '/tmp/shot.png')).toEqual(['--overwrite', '/tmp/shot.png']);
-});
-
-test('captureArgs throws on an unknown tool', () => {
-  expect(() => captureArgs('snap' as CaptureTool, '/tmp/x.png')).toThrow(AdapterError);
-});
-
-// --- Screenshot.capture (temp-file flow) ------------------------------------
+const mixed = { DISPLAY: ':0', WAYLAND_DISPLAY: 'wayland-0', XDG_CURRENT_DESKTOP: 'GNOME' };
+const png = Uint8Array.from([137, 80, 78, 71]);
 
 async function exists(path: string): Promise<boolean> {
   return access(path).then(
@@ -56,82 +39,204 @@ async function exists(path: string): Promise<boolean> {
   );
 }
 
-test('Screenshot.capture writes the tool output to a temp file, reads it back, then cleans up', async () => {
-  const bytes = Uint8Array.from([9, 9, 3]);
-  const seen: { file?: string } = {};
-  const exec: Exec = async (_cmd, args) => {
+function fakeCapture(action: (cmd: string, file: string) => Promise<void>) {
+  const calls: { cmd: string; file: string; deadline: number | undefined }[] = [];
+  const exec: Exec = async (cmd, args, opts) => {
     const file = args.at(-1);
-    if (!file) throw new Error('capture args missing the output file');
-    seen.file = file;
-    await writeFile(file, bytes);
+    if (!file) throw new AdapterError('test capture output file missing');
+    expect(args).toEqual(captureArgs(cmd as CaptureTool, file));
+    calls.push({ cmd, file, deadline: opts?.deadline });
+    await action(cmd, file);
     return '';
   };
-  const capture = new Screenshot({ display: ':99', exec }); // DISPLAY → scrot
-  expect(await capture.capture()).toEqual(bytes);
-  // The temp dir (and the file inside it) is gone once capture() returns.
-  expect(seen.file).toBeDefined();
-  expect(await exists(seen.file as string)).toBe(false);
-  expect(await exists(dirname(seen.file as string))).toBe(false);
+  return { calls, exec };
+}
+
+async function expectClean(calls: { file: string }[]) {
+  expect(calls.length).toBeGreaterThan(0);
+  for (const { file } of calls) {
+    expect(await exists(file)).toBe(false);
+    expect(await exists(dirname(file))).toBe(false);
+  }
+}
+
+test('picker tries X11 first, Wayland only when X11 is absent', () => {
+  expect(chooseCaptureTool(mixed)).toBe('scrot');
+  expect(chooseCaptureTool({ DISPLAY: ':99' })).toBe('scrot');
+  expect(chooseCaptureTool({ WAYLAND_DISPLAY: 'wayland-0' })).toBe('grim');
+  expect(() => chooseCaptureTool({})).toThrow(AdapterError);
 });
 
-test('Screenshot.capture cleans up the temp dir even when the tool fails', async () => {
-  const seen: { file?: string } = {};
-  const exec: Exec = async (_cmd, args) => {
-    seen.file = args.at(-1);
-    throw new Error('scrot: cannot open display');
-  };
-  const capture = new Screenshot({ display: ':99', exec });
-  await expect(capture.capture()).rejects.toThrow(AdapterError);
-  await expect(capture.capture()).rejects.toThrow(/desktop\.screenshot failed \(scrot\)/);
-  expect(seen.file).toBeDefined();
-  expect(await exists(dirname(seen.file as string))).toBe(false);
+test('captureArgs writes PNG per backend and rejects unknown tools', () => {
+  expect(captureArgs('grim', '/tmp/shot.png')).toEqual(['/tmp/shot.png']);
+  expect(captureArgs('scrot', '/tmp/shot.png')).toEqual(['--overwrite', '/tmp/shot.png']);
+  expect(() => captureArgs('snap' as CaptureTool, '/tmp/x.png')).toThrow(AdapterError);
 });
 
-test("Screenshot.capture surfaces a missing capture binary's message, not a swallowed failure", async () => {
-  const exec: Exec = async () => {
-    const error = new Error('spawn scrot ENOENT') as NodeJS.ErrnoException;
-    error.code = 'ENOENT';
-    throw error;
-  };
-  const capture = new Screenshot({ display: ':99', exec }); // DISPLAY → scrot
-  await expect(capture.capture()).rejects.toThrow(/desktop\.screenshot failed \(scrot\).*ENOENT/);
+test('mixed session returns working X11 bytes without invoking unsupported Wayland', async () => {
+  await withEnv(mixed, async () => {
+    const { exec, calls } = fakeCapture(async (cmd, file) => {
+      expect(cmd).toBe('scrot');
+      await writeFile(file, png);
+    });
+    expect(await new Screenshot({ exec }).capture()).toEqual(png);
+    expect(calls.map(({ cmd }) => cmd)).toEqual(['scrot']);
+    await expectClean(calls);
+  });
 });
 
-test('Screenshot.capture hands its deadline to the capture tool', async () => {
-  // The grim/scrot invocation must be capped by the time left until the deadline,
-  // not by its own 30s default — otherwise a wedged capture outlives the budget.
-  const seen: (number | undefined)[] = [];
-  const exec: Exec = async (_cmd, _args, opts) => {
-    seen.push(opts?.deadline);
-    return '';
-  };
-  const capture = new Screenshot({ display: ':99', exec });
-  const deadline = Date.now() + 5_000;
-  await capture.capture(deadline).catch(() => undefined); // the fake writes no PNG
-  expect(seen).toEqual([deadline]);
+test('failed X11 falls back to grim bytes under the same bounded default deadline', async () => {
+  await withEnv(mixed, async () => {
+    let now = 1000;
+    const { exec, calls } = fakeCapture(async (cmd, file) => {
+      if (cmd === 'scrot') {
+        await writeFile(file, Uint8Array.from([1, 2, 3]));
+        now += 2000;
+        throw new AdapterError('scrot: cannot open display');
+      }
+      await writeFile(file, png);
+    });
+    expect(await new Screenshot({ exec, now: () => now }).capture()).toEqual(png);
+    expect(calls.map(({ cmd }) => cmd)).toEqual(['scrot', 'grim']);
+    expect(calls.map(({ deadline }) => deadline)).toEqual([31_000, 31_000]);
+    expect(calls[0]?.file).not.toBe(calls[1]?.file);
+    await expectClean(calls);
+  });
 });
 
-test('Screenshot.capture rejects a capture that resolves after its deadline', async () => {
-  // A frame produced past the deadline is stale — it must not resolve as a success.
-  const bytes = Uint8Array.from([1, 2, 3]);
-  const exec: Exec = async (_cmd, args) => {
-    const file = args.at(-1);
-    if (file) await writeFile(file, bytes);
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    return '';
-  };
-  const capture = new Screenshot({ display: ':99', exec });
-  await expect(capture.capture(Date.now() + 10)).rejects.toThrow(AdapterError);
-  await expect(capture.capture(Date.now() + 10)).rejects.toThrow(/after its deadline/);
+test('Wayland-only capture invokes grim even with a non-wlroots desktop hint', async () => {
+  await withEnv({ WAYLAND_DISPLAY: 'wayland-1', XDG_CURRENT_DESKTOP: 'KDE' }, async () => {
+    const { exec, calls } = fakeCapture(async (_cmd, file) => {
+      await writeFile(file, png);
+    });
+    expect(await new Screenshot({ exec }).capture()).toEqual(png);
+    expect(calls.map(({ cmd }) => cmd)).toEqual(['grim']);
+    await expectClean(calls);
+  });
 });
 
-test('Screenshot.capture still returns the bytes when it lands before the deadline', async () => {
-  const bytes = Uint8Array.from([4, 5, 6]);
-  const exec: Exec = async (_cmd, args) => {
-    const file = args.at(-1);
-    if (file) await writeFile(file, bytes);
-    return '';
-  };
-  const capture = new Screenshot({ display: ':99', exec });
-  expect(await capture.capture(Date.now() + 5_000)).toEqual(bytes);
+test('unsupported Wayland is diagnosed as compositor capture infrastructure, not an app bug', async () => {
+  await withEnv({ WAYLAND_DISPLAY: 'wayland-0', XDG_CURRENT_DESKTOP: 'GNOME' }, async () => {
+    const { exec, calls } = fakeCapture(async () => {
+      throw new AdapterError('compositor does not support wlr-screencopy-unstable-v1');
+    });
+    const error = await new Screenshot({ exec }).capture().catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(AdapterError);
+    expect(String(error)).toContain('capture infrastructure');
+    expect(String(error)).toContain('not an application defect');
+    expect(String(error)).toContain('XDG_CURRENT_DESKTOP=GNOME');
+    expect(String(error)).toContain('DISPLAY is not set');
+    expect(String(error)).toContain(
+      'grim failed: compositor does not support wlr-screencopy-unstable-v1',
+    );
+    expect(String(error)).toContain('portal/D-Bus capture is not implemented');
+    expect(calls.map(({ cmd }) => cmd)).toEqual(['grim']);
+    await expectClean(calls);
+  });
+});
+
+test('exhausted routes retain missing binary and unsupported protocol reasons plus desktop hint', async () => {
+  await withEnv({ ...mixed, XDG_CURRENT_DESKTOP: '', DESKTOP_SESSION: 'plasma' }, async () => {
+    const { exec, calls } = fakeCapture(async (cmd) => {
+      throw new AdapterError(
+        cmd === 'scrot' ? 'spawn scrot ENOENT' : 'unsupported screencopy protocol',
+      );
+    });
+    const error = await new Screenshot({ exec }).capture().catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(AdapterError);
+    expect(String(error)).toContain('DESKTOP_SESSION=plasma');
+    expect(String(error)).toContain('scrot failed: spawn scrot ENOENT');
+    expect(String(error)).toContain('grim failed: unsupported screencopy protocol');
+    expect(calls.map(({ cmd }) => cmd)).toEqual(['scrot', 'grim']);
+    await expectClean(calls);
+  });
+});
+
+test('no displays explains both unavailable routes without executing anything', async () => {
+  await withEnv({}, async () => {
+    const { exec, calls } = fakeCapture(async () => {});
+    const error = await new Screenshot({ exec }).capture().catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(AdapterError);
+    expect(String(error)).toContain('DISPLAY is not set');
+    expect(String(error)).toContain('WAYLAND_DISPLAY is not set');
+    expect(String(error)).toContain('compositor/desktop unknown');
+    expect(calls).toEqual([]);
+  });
+});
+
+test('explicit target DISPLAY isolates capture from inherited Wayland even on failure', async () => {
+  await withEnv(mixed, async () => {
+    expect(desktopEnv(':99').WAYLAND_DISPLAY).toBeUndefined();
+    expect(desktopEnv(':99').DISPLAY).toBe(':99');
+    const { exec, calls } = fakeCapture(async () => {
+      throw new AdapterError('spawn scrot ENOENT');
+    });
+    await expect(new Screenshot({ display: ':99', exec }).capture()).rejects.toThrow(
+      'WAYLAND_DISPLAY is not set',
+    );
+    expect(calls.map(({ cmd }) => cmd)).toEqual(['scrot']);
+    await expectClean(calls);
+  });
+});
+
+test('caller deadline is shared across fallback and bytes arrive within budget', async () => {
+  await withEnv(mixed, async () => {
+    let now = 1000;
+    const { exec, calls } = fakeCapture(async (cmd, file) => {
+      now += 100;
+      if (cmd === 'scrot') throw new AdapterError('X11 failed');
+      await writeFile(file, png);
+    });
+    expect(await new Screenshot({ exec, now: () => now }).capture(1500)).toEqual(png);
+    expect(calls.map(({ deadline }) => deadline)).toEqual([1500, 1500]);
+    await expectClean(calls);
+  });
+});
+
+for (const result of ['failure', 'late PNG', 'timeout'] as const) {
+  test(`no fallback after ${result} exhausts the deadline`, async () => {
+    await withEnv(mixed, async () => {
+      let now = 1000;
+      const timeout = new ExecTimeoutError('scrot timed out');
+      const { exec, calls } = fakeCapture(async (_cmd, file) => {
+        now = 1500;
+        if (result === 'timeout') throw timeout;
+        if (result === 'failure') throw new AdapterError('X11 failed');
+        await writeFile(file, png);
+      });
+      const error = await new Screenshot({ exec, now: () => now })
+        .capture(1500)
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(ExecTimeoutError);
+      if (result === 'timeout') expect(error).toBe(timeout);
+      else expect(String(error)).toContain('after its deadline');
+      expect(calls.map(({ cmd }) => cmd)).toEqual(['scrot']);
+      await expectClean(calls);
+    });
+  });
+}
+
+test('an already exhausted budget starts no route', async () => {
+  await withEnv(mixed, async () => {
+    const { exec, calls } = fakeCapture(async () => {});
+    await expect(new Screenshot({ exec, now: () => 1000 }).capture(1000)).rejects.toThrow(
+      ExecTimeoutError,
+    );
+    expect(calls).toEqual([]);
+  });
+});
+
+test('a subprocess timeout preserves identity even before the shared deadline', async () => {
+  await withEnv(mixed, async () => {
+    const timeout = new ExecTimeoutError('scrot killed by invocation cap');
+    const { exec, calls } = fakeCapture(async () => {
+      throw timeout;
+    });
+    const error = await new Screenshot({ exec, now: () => 1000 })
+      .capture(2000)
+      .catch((error: unknown) => error);
+    expect(error).toBe(timeout);
+    expect(calls.map(({ cmd }) => cmd)).toEqual(['scrot']);
+    await expectClean(calls);
+  });
 });
