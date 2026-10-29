@@ -108,7 +108,8 @@ Adding a new adapter: see `docs/adapters-howto.md`.
 
 ```
 src/
-  main.ts          — stdio MCP server boot
+  main.ts          — CLI entry: help/version/init/status/stop, then boots the server
+  boot.ts          — server boot: owner-lock gate → config → workspace → provider/models → stdio MCP server
   mcp/             — MCP server + tool definitions (few fat tools)
   agent/           — debug agent (Vercel AI SDK loop)
     belt/          — inner tool belt: observe / act / look / report

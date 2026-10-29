@@ -1,0 +1,173 @@
+/**
+ * Server boot — the sequence that turns a project directory into a live stdio
+ * MCP server.
+ *
+ * It lives apart from the CLI (`src/main.ts`) for one reason: the boot has a
+ * GATE in front of it. The workspace's one-run ownership rests on a
+ * kernel-held `flock(2)`, and a host that cannot provide that backend can
+ * never enforce it — two servers would each believe it owns the workspace. So
+ * the gate runs FIRST: a host without a flock backend must not have created a
+ * workspace, read a config, probed a provider or accepted a run.
+ *
+ * Everything after the gate is the wiring `main.ts` used to do inline, moved
+ * verbatim: config → workspace → provider/models → self-look → the debug
+ * service → the outer tools → the stdio server, plus the shutdown path.
+ *
+ * Every step a test needs to observe is a seam ({@link BootDeps}), so the
+ * whole boot is drivable in-process — no module mock, which would leak into
+ * the suites running alongside.
+ */
+
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { supportsImageInput } from './agent/capabilities.js';
+import { resolveModels } from './agent/models.js';
+import { createOpenRouterProvider, resolveProviderConfig } from './agent/provider.js';
+import { makeConfigWatch } from './config/fingerprint.js';
+import { CONFIG_CANDIDATES, ignoredRootConfig, loadConfig } from './config/load.js';
+import { NAME } from './index.js';
+import { type McpTool, startStdioServer } from './mcp/server.js';
+import { outerTools } from './mcp/tools/index.js';
+import { DebugService } from './services/debug-service.js';
+import { makeSessionBuilder } from './services/session-builder.js';
+import { createShutdown } from './services/shutdown.js';
+import { SessionManager } from './session/manager.js';
+import { assertOwnerLockBackend } from './session/owner-lock.js';
+import type { Session } from './session/session.js';
+import { FileStatePort } from './session/state-file.js';
+import { ensureWorkspace, workspacePaths } from './session/workspace.js';
+
+/** The seams the boot drives — each injectable, so the boot is drivable in-process. */
+export interface BootDeps {
+  /**
+   * The owner-lock backend gate: resolve the platform's `flock(2)` WITHOUT
+   * taking a lock. Defaults to the real one (`assertOwnerLockBackend`), which
+   * fails loud when the host has no such backend.
+   */
+  assertOwnerLockBackend?: () => Promise<void>;
+  /** Start the MCP server. Defaults to the stdio server. */
+  startServer?: (tools: McpTool[], init: { onClose?: () => void }) => Promise<McpServer>;
+  /** Terminate the process. Defaults to `process.exit`. */
+  exit?: (code: number) => void;
+}
+
+/** What a successful boot hands back. */
+export interface BootResult {
+  /** The live MCP server. */
+  server: McpServer;
+  /** Remove the signal handlers this boot installed (test seam). */
+  dispose: () => void;
+}
+
+/**
+ * Boot the stdio MCP server for `cwd`.
+ *
+ * The owner-lock backend gate runs FIRST — a host that cannot lock the
+ * workspace must not get one. Everything after it is the wiring moved out of
+ * `main.ts`.
+ */
+export async function bootServer(cwd: string, deps: BootDeps = {}): Promise<BootResult> {
+  const gate: () => Promise<void> = deps.assertOwnerLockBackend ?? (() => assertOwnerLockBackend());
+  const start: NonNullable<BootDeps['startServer']> = deps.startServer ?? startStdioServer;
+  const exit: (code: number) => void = deps.exit ?? ((code) => process.exit(code));
+
+  // The gate: resolve `flock(2)` WITHOUT taking the run lock. It fails loud
+  // when this host has no libc carrying it — and it runs before the config is
+  // read, before the workspace exists and before the server is started.
+  await gate();
+
+  // Load project config (cwd-keyed)
+  const config = loadConfig({ cwd });
+  // Both candidates on disk: name the ignored root copy ONCE, on stderr —
+  // stdout is the stdio MCP JSON-RPC channel and must stay machine-only.
+  const ignoredRoot = ignoredRootConfig(cwd);
+  if (ignoredRoot) {
+    console.error(
+      `${NAME}: using ${CONFIG_CANDIDATES[0]} — ignoring the root ${ignoredRoot} (remove it to stop this notice)`,
+    );
+  }
+
+  // Bootstrap workspace directories (chrome-user-data/, sessions/).
+  // A relative workspace anchors at the project root; an absolute (shared) one
+  // gets a cwd-derived project dir — see `workspacePaths`.
+  const workspace = workspacePaths(cwd, config.workspace);
+  await ensureWorkspace(workspace);
+
+  // Resolve provider + per-role models (driver, vision, summary)
+  const providerOptions = {
+    apiKey: config.provider.apiKey,
+    baseURL: config.provider.baseUrl,
+  };
+  const provider = createOpenRouterProvider(providerOptions);
+  const roleModels = resolveModels(provider, config.models);
+
+  // Self-look: control + vision on the SAME model AND the provider catalog
+  // confirms it takes image input → `look` hands the frame to the driver
+  // itself (full context, no second call). Unknown capability (null) keeps
+  // the safe separate-call path — its vision latch fails soft, while an
+  // image pushed at a text-only driver would poison every later step.
+  let selfLook = false;
+  if (config.models.driver === config.models.vision) {
+    const { apiKey, baseURL } = resolveProviderConfig(providerOptions);
+    selfLook = (await supportsImageInput(baseURL, apiKey, config.models.driver)) === true;
+  }
+
+  // Wire the debug session service
+  const manager = new SessionManager<Session>();
+  const builder = makeSessionBuilder({
+    config,
+    models: {
+      driver: roleModels.driver,
+      vision: roleModels.vision,
+      summary: roleModels.summary,
+      selfLook,
+    },
+    workspace,
+  });
+  const service = new DebugService({
+    manager,
+    config,
+    cwd,
+    build: builder,
+    state: new FileStatePort(workspace),
+    // Everything above was resolved from the config file as it read a moment
+    // ago; if it changes underneath us, say so instead of running on stale wiring.
+    configChanged: makeConfigWatch(cwd),
+  });
+
+  // Graceful stop: a CLI `stop` (or any SIGTERM/SIGINT) tears the run down —
+  // abort the loop, close the browser, free the profile — then exits cleanly.
+  // Bounded: a teardown that wedges (a tool call that never observes its abort)
+  // must not leave the process alive forever, because `stop` only signals once.
+  const shutdown = createShutdown({
+    endActive: () => service.endActive(),
+    exit,
+  });
+  const onSigterm = (): void => shutdown(0);
+  const onSigint = (): void => shutdown(130);
+  process.once('SIGTERM', onSigterm);
+  process.once('SIGINT', onSigint);
+
+  // Boot stdio MCP server with outer tools. A dead client is a shutdown too:
+  // nothing can read findings or `end_session` any more, so the run must not
+  // keep a browser (and the profile lock) alive until its cap. Same idempotent
+  // teardown path as the signals above.
+  const tools = outerTools(service);
+  let server: McpServer;
+  try {
+    server = await start(tools, { onClose: () => shutdown(0) });
+  } catch (error) {
+    // A server that never started must not leave its signal handlers behind:
+    // they would outlive the boot and fire into a process that has no run.
+    process.removeListener('SIGTERM', onSigterm);
+    process.removeListener('SIGINT', onSigint);
+    throw error;
+  }
+
+  return {
+    server,
+    dispose: () => {
+      process.removeListener('SIGTERM', onSigterm);
+      process.removeListener('SIGINT', onSigint);
+    },
+  };
+}
