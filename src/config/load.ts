@@ -15,8 +15,8 @@
  * The provider key is resolved through the shared provider credential contract
  * (`src/agent/provider.ts`): `OPENAI_API_KEY` then `OPENROUTER_API_KEY`, the
  * same order the runtime provider uses.
- * The per-session smart-agent overrides (top of the documented order) are a
- * runtime concern, not the file loader's — out of scope here.
+ * Per-session overrides are a runtime concern, not the file loader's — the
+ * doc's `Resolution order` marks the layer proposed, not shipped.
  *
  * Bad config fails fast and loud via `ConfigError` — never a silent fallback.
  * That includes a bad `.dz/` copy: it errors, never falls through to root.
