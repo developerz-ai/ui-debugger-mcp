@@ -26,14 +26,30 @@ scroll(opts)           scroll viewport or a scoped region
 readState(opts?)       read the normalized UI tree (capped list of Node[])
 screenshot()           capture PNG bytes
 waitFor(opts)          block until a condition holds or time out
-console(opts?)         drain captured log messages (newest first)
-network(opts?)         drain captured network exchanges (newest first)
+console(opts?)         read captured log messages (newest first, narrowed by LogQuery, non-destructive)
+network(opts?)         read captured network exchanges (newest first, narrowed by LogQuery, non-destructive)
 close()                release the target (managed: stop; attach: disconnect only)
 ```
 
-All read parameters are `Query` (SQL-like `query/fields/filters/limit/within`).
+Tree reads (`find`/`readState`) take `Query` (SQL-like `query/filters/limit/within`), while the
+log channels (`console`/`network`) take `LogQuery` (`filters`/`limit` only) — `fields` is not a
+`Query` member but the belt's node-column projection (`observe`).
 Filters are whitelisted per adapter — reject unknown keys with `AdapterError`, never
 silently ignore them.
+
+**Declare your selector dialect.** Every adapter carries one required member:
+
+```ts
+readonly selectorDialect: SelectorDialect = 'web';   // 'web' | 'native'
+```
+
+It names the grammar your `find`/`click`/`type` parse — `'web'` (the Playwright
+engines: `data-testid="…"`, `role=button[name="…" i]`, `text=…`, `>> nth=N`) or
+`'native'` (`role "name"`, or a bare name / `resource-id` substring). The belt emits
+every tree node's `target` in that dialect, so the declaration must be EXPLICIT: it is
+never inferred from the optional `tabs` capability, which is a capability and not a
+dialect marker — a target may have tabs and still parse the native grammar. A missing
+or unknown declaration fails loud; it never falls back to `web`.
 
 **Fail loud.** Every backend error must throw `AdapterError` (or a more specific custom
 class from `src/errors.ts`). Never swallow, never return a silent fallback. Re-throw
@@ -80,6 +96,7 @@ export interface MyAdapterInit {
 }
 
 export class MyAdapter implements Adapter {
+  readonly selectorDialect: SelectorDialect = 'web';   // declare YOUR grammar
   readonly #backend: MyBackend;
 
   private constructor(backend: MyBackend, config: MyTarget) { … }
@@ -175,12 +192,17 @@ discriminant.
 
 ## 6 — Session-builder hook (if needed)
 
-**`src/session/session-builder.ts`** wires the adapter into the agent loop. For most
-adapters nothing changes here — the factory already returns an `Adapter` and the loop
-is adapter-blind. But if your adapter needs a target-specific `open()` argument
-(e.g. the web adapter receives the configured `url`, the android adapter receives the
-configured package/activity), check how the builder calls `adapter.open(...)` and
-extend that logic if needed.
+**`src/adapters/factory.ts`** constructs the concrete adapter;
+**`src/services/session-builder.ts`** binds it into the agent belt/loop and supplies
+its `open()` arguments. For most adapters nothing changes in the builder — the
+factory already returns an `Adapter` and the loop is adapter-blind.
+
+If your adapter needs a target-specific `open()` argument, check the builder's
+`openAddress` helper and its `adapter.open(...)` call, and extend that logic if needed:
+- Web receives the URL (the configured `url` or the per-run override).
+- Desktop receives the `window.title` hint, or an empty string when unset.
+- Android receives an empty string to boot/attach; the agent navigates to the app
+  via `act navigate` using the package/activity from the story.
 
 ---
 
@@ -222,7 +244,7 @@ For non-trivial backends, add a `docs/idea/<name>-adapter.md` documenting:
 
 - Protocol / toolchain (e.g. `busctl` D-Bus walk for AT-SPI2)
 - Managed vs attach decision
-- Known limitations and vision fallback trigger
+- Known limitations — accessibility-only reads: no automatic vision/OCR fallback; `screenshot()` still captures frames for evidence, and the agent-level `look` belt call is the only path by which a frame reaches a model
 - External dependencies / system packages needed
 
 Reference it from `docs/idea/adapters.md`.

@@ -17,7 +17,6 @@
  */
 
 import type { Browser, BrowserContext, Page } from 'playwright-core';
-import { chromium } from 'playwright-core';
 import type { WebTarget } from '../../config/schema.js';
 import { AdapterError, UiDebuggerError } from '../../errors.js';
 import { capWait } from '../budget.js';
@@ -32,12 +31,12 @@ import type {
   Query,
   ScreenshotOptions,
   ScrollOptions,
+  SelectorDialect,
   TabInfo,
   WaitOptions,
 } from '../contract.js';
 import { capToLimit } from '../limit.js';
-import type { CaptureSink } from './cdp.js';
-import { CdpCapture } from './cdp.js';
+import type { CdpCapture } from './cdp.js';
 import { NODE_EXTRACTOR, type RawNode } from './extractor.js';
 import { applyNodeFilters, centerWithin } from './filters.js';
 import {
@@ -51,21 +50,20 @@ import {
 } from './geometry.js';
 import {
   appendDebugLogin,
-  closeOnFailure,
-  createFailure,
-  LAUNCH_TIMEOUT_MS,
   NAV_TIMEOUT_MS,
-  resolveLaunchBinary,
   resolveTargetUrl,
   unreachableFailure,
 } from './launch.js';
+import type { AdapterHandles, BrowserAdapterInit } from './lifecycle.js';
+import { openBrowserHandles } from './lifecycle.js';
 import { locateAcrossFrames, regionAcrossFrames, waitAcrossFrames } from './locate.js';
 import { redactUrl } from './log-format.js';
 import { normalizeQuery } from './query.js';
+import type { TabContext } from './tab-context.js';
 
 // The adapter stays the one import surface its callers (and tests) know: the
-// helpers it leans on live in `geometry.ts`/`launch.ts` only to keep every file
-// under the 500-LOC cap.
+// helpers it leans on live in `geometry.ts`/`launch.ts`, and the create/attach
+// wiring in `lifecycle.ts`, only to keep every file under the 500-LOC cap.
 export type { RawNode } from './extractor.js';
 export { applyNodeFilters, NODE_FILTER_KEYS } from './filters.js';
 export { isFrameGone, isOutsideViewport, scrollDelta } from './geometry.js';
@@ -75,6 +73,7 @@ export {
   resolveTargetUrl,
   unreachableFailure,
 } from './launch.js';
+export type { BrowserAdapterInit } from './lifecycle.js';
 
 /** Default cap on `readState` so the tree stays small (overridable via `limit`). */
 const DEFAULT_LIMIT = 200;
@@ -97,39 +96,17 @@ export function remainingTimeout(deadline?: number, now: number = Date.now()): n
   return Math.max(1, deadline - now);
 }
 
-interface AdapterHandles {
-  config: WebTarget;
-  context: BrowserContext;
-  page: Page;
-  browser: Browser | null;
-  mode: 'managed' | 'attach';
-  capture: CdpCapture;
-}
-
-/** The slice of `chromium` this adapter actually calls — the test seam below overrides it. */
-type ChromiumLauncher = Pick<typeof chromium, 'launchPersistentContext' | 'connectOverCDP'>;
-
-export interface BrowserAdapterInit {
-  /** Resolved web-target config (url, headless, debugLogin, cdpUrl, …). */
-  config: WebTarget;
-  /** Absolute persistent-profile dir for a managed launch; ignored when attaching. */
-  profileDir: string;
-  /** Optional sink for streaming captured console/network lines to `findings-store`. */
-  onLog?: CaptureSink;
-  /** Override the Playwright launcher/connector (test seam) — defaults to the real `chromium`. */
-  chromium?: ChromiumLauncher;
-  /**
-   * The run's remaining wall-clock budget (ms) for getting Chrome up. Shortens the
-   * launch/connect wait so it fits inside the caller's `timeout`; omit for the default.
-   */
-  timeoutMs?: number;
-}
-
 /**
  * The web {@link Adapter}: a Playwright-driven Chrome page. Construct via
  * {@link BrowserAdapter.create} (async launch/connect can't live in a constructor).
  */
 export class BrowserAdapter implements Adapter {
+  /**
+   * The web selector grammar — the Playwright engines this adapter's
+   * `find`/`click`/`type` parse (`data-testid="…"`, `role=button[name="…" i]`,
+   * `text=…`, `>> nth=N`).
+   */
+  readonly selectorDialect: SelectorDialect = 'web';
   readonly #config: WebTarget;
   readonly #context: BrowserContext;
   /** The tab currently driven — reassigned by {@link BrowserAdapter.selectTab}. */
@@ -137,6 +114,15 @@ export class BrowserAdapter implements Adapter {
   readonly #browser: Browser | null;
   readonly #mode: 'managed' | 'attach';
   readonly #capture: CdpCapture;
+  /**
+   * The run's tab registry — the same one the capture stamps rows with.
+   *
+   * It hands out a label per PAGE (`tab-1`, `tab-2`, …) that survives a tab
+   * switch and a closing tab shifting the positional indices, so the marker in
+   * `logs/console.log` / `logs/network.log` always names the tab the driver
+   * drove — never the index it happened to hold at the time.
+   */
+  readonly #tabs: TabContext;
 
   /**
    * Full-document loads the page performed on its own, oldest first — see
@@ -163,88 +149,17 @@ export class BrowserAdapter implements Adapter {
     this.#browser = handles.browser;
     this.#mode = handles.mode;
     this.#capture = handles.capture;
+    this.#tabs = handles.tabs;
+    // First sight of the run's first tab: it is `tab-1` from the start, even if
+    // it never logs anything — the label names the PAGE, it is not a reward for
+    // activity.
+    this.#tabs.label(handles.page);
     this.#page.on('load', this.#onLoad);
   }
 
   /** Open the adapter: attach over `cdpUrl` when set, else launch a managed persistent context. */
   static async create(init: BrowserAdapterInit): Promise<BrowserAdapter> {
-    const { cdpUrl } = init.config;
-    const launcher = init.chromium ?? chromium;
-    // Nothing raw escapes: launch, connect and post-connect wiring all leave here as
-    // AdapterError (header contract). Cleanup of a half-built adapter happens below.
-    const wait = capWait(LAUNCH_TIMEOUT_MS, init.timeoutMs);
-    try {
-      return cdpUrl
-        ? await BrowserAdapter.#attach(init.config, launcher, wait, init.onLog)
-        : await BrowserAdapter.#launch(init.config, init.profileDir, launcher, wait, init.onLog);
-    } catch (error) {
-      throw createFailure(
-        error,
-        cdpUrl ? { mode: 'attach', cdpUrl } : { mode: 'managed', profileDir: init.profileDir },
-      );
-    }
-  }
-
-  static async #launch(
-    config: WebTarget,
-    profileDir: string,
-    launcher: ChromiumLauncher,
-    timeout: number,
-    onLog?: CaptureSink,
-  ): Promise<BrowserAdapter> {
-    // Still CDP: Playwright drives Chromium exclusively over the DevTools Protocol
-    // (here a CDP pipe; `#attach` uses a CDP WebSocket). A persistent context is the
-    // supported way to own a Chrome process WITH the per-project profile — both
-    // managed and attach speak the same protocol, only the transport differs.
-    const context = await launcher.launchPersistentContext(profileDir, {
-      headless: config.headless,
-      timeout,
-      // Signals stay with `main.ts`, which owns the graceful shutdown. These default
-      // to `true`, and Playwright's own SIGINT handler is
-      // `gracefullyCloseAll().then(() => process.exit(130))` — it ran right after
-      // ours started and killed the process mid-teardown, so the terminal findings
-      // write, the summary and `replay.mp4` never landed and `state.json` was left
-      // saying `running`. On SIGTERM it closed Chrome underneath a loop that was
-      // still unwinding, and the last flush died as `Target closed`.
-      handleSIGINT: false,
-      handleSIGTERM: false,
-      handleSIGHUP: false,
-      ...resolveLaunchBinary(config),
-    });
-    // Chrome is LIVE from here on and holds the profile lock — a throw past this point
-    // must close it, or every later run of this project fails to launch.
-    return closeOnFailure(context, async () => {
-      const page = context.pages()[0] ?? (await context.newPage());
-      const capture = BrowserAdapter.#startCapture(page, onLog);
-      return new BrowserAdapter({ config, context, page, browser: null, mode: 'managed', capture });
-    });
-  }
-
-  static async #attach(
-    config: WebTarget,
-    launcher: ChromiumLauncher,
-    timeout: number,
-    onLog?: CaptureSink,
-  ): Promise<BrowserAdapter> {
-    if (!config.cdpUrl) {
-      throw new AdapterError('attach mode requires `cdpUrl`');
-    }
-    const browser = await launcher.connectOverCDP(config.cdpUrl, { timeout });
-    // Cleanup here drops the CONNECTION only — same disconnect semantics `close()`
-    // relies on, so a failed attach never stops a browser we did not start.
-    return closeOnFailure(browser, async () => {
-      const context = browser.contexts()[0] ?? (await browser.newContext());
-      const page = context.pages()[0] ?? (await context.newPage());
-      const capture = BrowserAdapter.#startCapture(page, onLog);
-      return new BrowserAdapter({ config, context, page, browser, mode: 'attach', capture });
-    });
-  }
-
-  /** Wire console/network capture onto the live page before the first navigation. */
-  static #startCapture(page: Page, onLog?: CaptureSink): CdpCapture {
-    const capture = new CdpCapture({ page, sink: onLog });
-    capture.start();
-    return capture;
+    return new BrowserAdapter(await openBrowserHandles(init));
   }
 
   async open(target: string, timeoutMs?: number): Promise<void> {
@@ -468,6 +383,11 @@ export class BrowserAdapter implements Adapter {
       return Promise.all(
         pages.map(async (page, index) => ({
           index,
+          // The stable label of THIS page — the same marker the console/network
+          // rows carry, so a `[tab-2]` line in the log resolves to the tab that
+          // produced it. It follows the page, not this index: closing an earlier
+          // tab shifts the indices and the marker stays.
+          id: this.#tabs.label(page),
           // Tab URLs reach the driver verbatim via observe({kind:'tabs'}) and
           // act's multi-tab hint, so credential-bearing query values (?code=,
           // ?token=, ?signature=…) are redacted here at the source — the same
@@ -476,6 +396,8 @@ export class BrowserAdapter implements Adapter {
           // A tab opened a moment ago may not have a document yet.
           title: await page.title().catch(() => ''),
           active: page === this.#page,
+          // Measure each live document; control identity is not visibility or OS focus.
+          visible: await page.evaluate("document.visibilityState === 'visible'"),
         })),
       );
     });

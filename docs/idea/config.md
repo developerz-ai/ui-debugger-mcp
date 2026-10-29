@@ -41,7 +41,7 @@ npx @developerz.ai/ui-debugger-mcp@latest init   # run in the project root
 
 `init` (idempotent — won't clobber existing files):
 1. creates the workspace dir `./tmp/ui-debugger-mcp/`
-2. writes a starter config — deepseek/glm model defaults + a `web` target stub
+2. writes a starter config — deepseek/qwen model defaults + a `web` target stub
    (`http://localhost:3000`) — only if absent, at `.dz/ui-debugger/ui-debugger-mcp.json`
    when the repo already has a `.dz/` dir, else at the root `.ui-debugger-mcp.json`
 3. adds `tmp/` to `.gitignore`
@@ -96,7 +96,7 @@ the root file is NOT read in that case.
     },
     "desktop": {
       "adapter": "desktop",
-      "launch": "my-desktop-app",                  // command the server runs (managed)
+      "launch": "my-desktop-app",                  // foreground command; stays alive while the app window is open (managed)
       "window": { "title": "My Desktop App" },     // which window to drive (WM_NAME/WM_CLASS); omit → launched window
       "display": null                              // X11 DISPLAY, e.g. ":99" for Xvfb; null = inherit env
     },
@@ -104,7 +104,7 @@ the root file is NOT read in that case.
       "adapter": "android",                        // ADB-driven (uiautomator + screencap)
       // --- managed mode (default): server boots the emulator ---
       "avd": "my-avd",                             // emulator @my-avd
-      "emulatorPath": null,                        // null = auto-detect from SDK
+      "emulatorPath": null,                        // null = auto-detect first executable file: $ANDROID_HOME → $ANDROID_SDK_ROOT → ~/Android/Sdk → ~/Library/Android/sdk → PATH (a non-executable candidate falls through)
       "headless": true,                            // default; -no-window + software GL + -no-audio
       "emulatorArgs": [],                          // appended verbatim, e.g. ["-http-proxy", "…"]
       // --- attach mode: talk to an already-running device/emulator ---
@@ -113,6 +113,10 @@ the root file is NOT read in that case.
   }
 }
 ```
+
+For managed desktop targets, `launch` must run in the foreground and stay alive
+while the app window is open. Do not use `app &`, `nohup`, or backgrounding or
+daemonizing wrappers: the server must track the live app process throughout the run.
 
 ## `notes` — what is EXPECTED of this app (any adapter)
 
@@ -139,6 +143,15 @@ One fact per line. They become a `## Known about this app` section of the compos
 system prompt (`agent/prompts/compose.ts`), ahead of the goal: *stated by the
 project, treat as expected, never `report` one as a bug — and a screen that
 CONTRADICTS one IS worth reporting*. A note is context, not a gag order.
+
+**Both consumers get them.** The same section is composed into the SEPARATE
+vision model's prompt too — the provider behind `look` (`agent/belt/look.ts`),
+which is a different model from the driver whenever control and vision are
+split. Without it, a configured expected empty state came back from the eyes as
+a visual issue and was persisted in `findings.json` as a defect. With it, an
+expected condition is never an issue, and a screen that CONTRADICTS one is still
+reported. A self-look run (control == vision) needs nothing extra — the driver
+already carries the notes in its own prompt.
 
 **Bounded, and loud about it.** Max 1000 characters (`TARGET_NOTES_MAX_CHARS`),
 enforced at config validation — over it, the config fails to load naming the cap.
@@ -268,7 +281,7 @@ when both are set). No vendor lock-in (same posture as `../ai-task-master`).
 - **z.ai, DeepSeek, OpenAI, local (vLLM/Ollama), …** — point `OPENAI_BASE_URL`
   at their OpenAI-compatible URL and use that provider's model names.
 
-### Defaults (deepseek for text, glm for image)
+### Defaults (deepseek for text, qwen for image)
 
 | Role | Default | Why |
 |------|---------|-----|

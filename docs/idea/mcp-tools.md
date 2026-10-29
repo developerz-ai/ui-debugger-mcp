@@ -109,14 +109,14 @@ shape MCP tools should have."* So: a handful of verbs, lots of composable params
 
 | Tool | Shape | Maps to / routes |
 |------|-------|------------------|
-| `observe` | `{ kind, query?, fields?, filters?, limit?, within? }` | `readState` / `screenshot` |
-| `act`     | flat object: `{ action: enum, target?, text?, key?, ... }` | `find` + `click`/`type`/`waitFor`/`open` |
+| `observe` | `{ kind, query?, fields?, filters?, limit?, within? }` | `tree` → `readState` · `screenshot` → `screenshot` · `console` → `console` · `network` → `network` · `tabs` → `tabs` (optional) |
+| `act` | flat object: `{ action, target?, text?, clear?, key?, direction?, amount?, networkIdle?, timeout? }` | `find`, then `click`/`type`/`pressKey`/`scroll`/`open`/`waitFor`/`selectTab` (optional) — picked by the `action` enum (`click`, `type`, `key`, `scroll`, `navigate`, `wait`, `switch_tab`) |
 | `look`    | `{ question?, expect? }` → `{ description, matches?, issues[] }` | **vision model** (see [`models.md`](models.md)) |
-| `report`  | `{ bugs[], visual[], steps[], summary }` (Zod) | → surfaced via `get_findings` |
+| `report` | `{ status, steps[], bugs[], visual[], dismissStreamed?, summary? }` (Zod) | → surfaced via `get_findings` |
 
 - **One `act`, not six tools.** `act({action:"click", target})` beats
   `click_element` / `fill_input` / `press_key` — one flat object with an enum discriminant.
-- **One `observe`, not four.** `kind` selects tree / screenshot / console / network.
+- **One `observe` for all channels.** `kind` selects tree / screenshot / console / network / tabs.
 - **`look` is the eyes.** The driver is a fast **blind text model**; `look` sends
   the screenshot to a **vision model** that describes / judges how it looks and
   answers questions. Blind-driver + sighted-describer — see [`models.md`](models.md).
@@ -133,7 +133,7 @@ Push composition into params, like a `SELECT`:
 | `fields`  | `SELECT cols` | sparse reads — ask only for role/name/bounds, not the whole tree |
 | `filters` | `WHERE field_op` | `{ visible_eq: true, role_in: ["button","link"] }` |
 | `limit` / `within` | `LIMIT` / scope | cap tree size; scope to a subtree/region |
-| `kind`    | table | `tree \| screenshot \| console \| network` |
+| `kind`    | table | `tree \| screenshot \| console \| network \| tabs` |
 
 One `observe({kind:"tree", query:"role=button[name=Checkout]", fields:["bounds","enabled"]})`
 beats a dozen `get_*` tools. The model composes the call; that's what it's good at.

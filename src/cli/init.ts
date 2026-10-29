@@ -8,7 +8,9 @@
  *     `./tmp/ui-debugger-mcp` default — see {@link existingWorkspace})
  *  2. write the project config (only if absent) at the location
  *     {@link resolveConfigPath} picks: `.dz/ui-debugger/ui-debugger-mcp.json`
- *     when the repo has a `.dz/` dir, else the root `.ui-debugger-mcp.json`
+ *     when the repo has a `.dz/` dir, else the root `.ui-debugger-mcp.json`.
+ *     The starter is validated against `ConfigSchema` FIRST — the file `init`
+ *     writes must satisfy the same schema the server parses it with
  *  3. add the workspace dir to .gitignore (only if the line is missing)
  *  4. print .mcp.json snippet (never writes the API key)
  */
@@ -21,28 +23,53 @@ import {
   ignoredRootConfig,
   resolveConfigPath,
 } from '../config/load.js';
+import { type Config, ConfigSchema } from '../config/schema.js';
 import { InitError } from '../errors.js';
 
-/** Starter project config written on `init` (only if absent). */
-const STARTER_CONFIG = JSON.stringify(
-  {
-    models: {
-      driver: DEFAULT_MODELS.driver,
-      vision: DEFAULT_MODELS.vision,
-      summary: DEFAULT_MODELS.summary,
-    },
-    workspace: DEFAULT_WORKSPACE,
-    targets: {
-      web: {
-        adapter: 'browser',
-        url: 'http://localhost:3000',
-        headless: true,
-      },
+/**
+ * Starter project config written on `init` (only if absent).
+ *
+ * Bound to the parser's contract, twice over:
+ *  - `satisfies Config` — the schema's own type, so `bun run typecheck` fails
+ *    the moment the starter drifts from `ConfigSchema`'s shape
+ *  - {@link validateStarterConfig} — the same schema at runtime, on the write
+ *    path, because a schema is a runtime contract too and `init` is the one
+ *    place that HANDS OUT a config file
+ */
+export const STARTER_CONFIG = {
+  models: {
+    driver: DEFAULT_MODELS.driver,
+    vision: DEFAULT_MODELS.vision,
+    summary: DEFAULT_MODELS.summary,
+  },
+  workspace: DEFAULT_WORKSPACE,
+  targets: {
+    web: {
+      adapter: 'browser',
+      url: 'http://localhost:3000',
+      headless: true,
     },
   },
-  null,
-  2,
-);
+} satisfies Config;
+
+/**
+ * Validate a starter config candidate against the parser's contract.
+ *
+ * `init` writes the starter to disk, so the file must satisfy the SAME schema
+ * the server parses it with — otherwise `init` scaffolds a config the server
+ * rejects at boot. Throws `InitError` naming every schema issue (never a raw
+ * `ZodError`); returns the parsed config on success.
+ */
+export function validateStarterConfig(candidate: unknown): Config {
+  const result = ConfigSchema.safeParse(candidate);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((i) => `${i.path.map(String).join('.') || '(root)'}: ${i.message}`)
+      .join('; ');
+    throw new InitError(`Starter config is invalid — ${issues}`);
+  }
+  return result.data;
+}
 
 /**
  * `.mcp.json` snippet printed to stdout (API key placeholder — never written).
@@ -134,11 +161,30 @@ function gitignoreLineFor(
   return line;
 }
 
+/** Options for {@link runInit}. */
+export interface InitOptions {
+  /**
+   * The starter config to write when the project has none yet. Defaults to
+   * {@link STARTER_CONFIG}. Whatever is passed is validated against
+   * `ConfigSchema` BEFORE anything is written — an invalid starter throws
+   * `InitError` and leaves the project untouched (no config file, no
+   * `.gitignore` line, no workspace dir).
+   */
+  starter?: unknown;
+}
+
 /**
  * Run the init scaffold in `cwd`.
- * Throws `InitError` on filesystem failures.
+ * Throws `InitError` on filesystem failures or an invalid starter config.
  */
-export function runInit(cwd: string = process.cwd()): void {
+export function runInit(cwd: string = process.cwd(), opts: InitOptions = {}): void {
+  // 0. validate the starter — before ANY filesystem effect. A starter that
+  // violates the schema must not leave a half-scaffolded project behind.
+  // Only `undefined` means "no starter given" — every other candidate
+  // (`null` included) is validated, never silently replaced by the default.
+  const starter = opts.starter === undefined ? STARTER_CONFIG : opts.starter;
+  validateStarterConfig(starter);
+
   // 1. mkdir workspace — respects an already-present config's `workspace` field.
   const workspaceValue = existingWorkspace(cwd);
   const workspaceDir = resolve(cwd, workspaceValue);
@@ -167,7 +213,9 @@ export function runInit(cwd: string = process.cwd()): void {
       // The `.dz/` candidate needs its parent dir; for the root candidate this
       // is a no-op on the (existing) project root.
       mkdirSync(dirname(configPath), { recursive: true });
-      writeFileSync(configPath, `${STARTER_CONFIG}\n`, 'utf8');
+      // The validated starter, serialized as-is: the parse is a gate, not a
+      // transform — the bytes on disk stay exactly the documented ones.
+      writeFileSync(configPath, `${JSON.stringify(starter, null, 2)}\n`, 'utf8');
     } catch (e) {
       throw new InitError(
         `Failed to write ${configName}: ${e instanceof Error ? e.message : String(e)}`,

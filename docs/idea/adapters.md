@@ -7,11 +7,11 @@ a mobile emulator. One **shared contract**; each adapter implements it.
 
 A big project can expose several:
 
-| Target  | Adapter            | Protocol / drives              | Reads state |
-|---------|--------------------|--------------------------------|-------------|
-| web     | browser            | CDP — a Chrome page            | DOM         |
-| desktop | desktop (x11/wl)   | the desktop app window         | a11y tree / vision |
-| mobile  | android            | ADB — uiautomator + screencap | view hierarchy / vision |
+| Target  | Adapter            | Protocol / drives              | Reads state  |
+|---------|--------------------|--------------------------------|--------------|
+| web     | browser            | CDP — a Chrome page            | DOM          |
+| desktop | desktop (x11/wl)   | the desktop app window         | a11y tree    |
+| mobile  | android            | ADB — uiautomator + screencap | view hierarchy |
 
 **Three adapters, three targets.** Each target speaks its own real protocol:
 web = CDP, desktop = X11/Wayland input, mobile = ADB. They share one contract
@@ -28,25 +28,39 @@ The story names the target: *"on **mobile**, log in and …"*.
 Every adapter implements the same small interface so the agent loop is
 adapter-blind:
 
-| Op          | Web (CDP)            | Desktop (X11/XWayland)       | Mobile (ADB)            |
-|-------------|----------------------|------------------------------|-------------------------|
-| `open`      | navigate to url      | launch / focus the window    | launch activity / app   |
-| `find`      | DOM selector         | a11y node, else vision       | uiautomator node, else vision |
-| `click`     | CDP input            | synthesized pointer event    | `input tap`             |
-| `type`      | CDP input            | synthesized key event        | `input text`            |
-| `readState` | DOM snapshot         | AT-SPI a11y tree, else OCR   | uiautomator dump, else OCR |
-| `screenshot`| CDP capture          | X11/Xvfb or grim (Wayland)   | `screencap`             |
-| `waitFor`   | DOM / network idle   | poll a11y / pixels           | poll hierarchy / pixels |
+| Op          | Web (CDP)                      | Desktop (X11/XWayland)              | Mobile (ADB)                                        |
+|-------------|--------------------------------|-------------------------------------|-----------------------------------------------------|
+| `selectorDialect` | `"web"` — Playwright engines | `"native"` — role "name" / bare name | `"native"` — role "name" / bare name or resource-id |
+| `open`      | navigate to url                | launch / focus the window           | boot (managed) + launch activity / app              |
+| `find`      | DOM selector                   | a11y node                           | uiautomator node                                    |
+| `click`     | CDP input                      | synthesized pointer event           | `input tap`                                         |
+| `type`      | CDP input                      | synthesized key event               | `input text`                                        |
+| `pressKey`  | CDP input                      | synthesized key event               | `input keyevent`                                    |
+| `scroll`    | mouse wheel                    | wheel, optionally inside a region   | `input swipe`                                       |
+| `readState` | DOM snapshot                   | AT-SPI a11y tree                    | uiautomator dump                                    |
+| `screenshot`| CDP capture                    | X11/Xvfb or grim (Wayland)          | `screencap`                                         |
+| `waitFor`   | DOM / network idle             | poll a11y (networkIdle unsupported) | poll hierarchy (networkIdle unsupported)            |
+| `console`   | CDP capture                    | unsupported — fails loud            | logcat tail                                         |
+| `network`   | CDP exchanges (bodies/headers) | unsupported — fails loud            | unsupported over ADB — fails loud                   |
+| `close`     | managed: stop Chrome · attach: disconnect | managed: stop the launched app · else no-op | managed: kill our emulator · attach: disconnect |
+| `tabs` — optional (web) | list open tabs | — | — |
+| `selectTab` — optional (web) | drive another tab | — | — |
+| `takeUnrequestedLoads` — optional (web) | drained surprise full-document loads | — | — |
 
-Web is precise (DOM). Desktop prefers the **accessibility tree**; mobile the
-**view hierarchy**. When a target exposes neither, the adapter **falls back to
-vision** (screenshot + coordinates).
+Web is precise (DOM). Desktop reads the **accessibility tree**; mobile the
+**view hierarchy**. There is **no automatic vision/OCR fallback** — the adapter
+never switches to pixels. A custom-drawn surface (canvas, game, custom widget)
+exposes no nodes at all, so the adapter finds nothing there; Chromium/Electron
+need `--force-renderer-accessibility`, Qt needs its bridge. The only vision
+today is the agent-level `look`: the driver captures a frame and hands it to
+the vision model for a visual judgment.
 
 > Linux tooling per adapter (X11 vs Wayland capture, screenshots, AT-SPI) is
 > worked out in [`desktop-control.md`](desktop-control.md). Short version:
-> a11y-tree-first everywhere it exists, vision as the universal fallback,
-> X11/Xvfb container as the low-friction default. Wayland capture via `grim`
-> (wlroots) is supported; native-Wayland input via libei/ydotool is future work.
+> a11y-tree-first everywhere it exists, no automatic vision/OCR fallback, the
+> adapter never switches to pixels, X11/Xvfb container as the low-friction
+> default. Wayland capture via `grim` (wlroots) is supported; native-Wayland
+> input via libei/ydotool is future work.
 
 ## Why this matters
 
@@ -69,8 +83,21 @@ The browser adapter runs Chrome one of two ways:
   (else auto-detect).
 - **Attach** — if a **`cdpUrl`** is configured, the adapter connects to an
   already-running browser over CDP and **never starts/stops it** (not its
-  process) and doesn't touch its profile. For live/staging/containerised or
-  remote Chrome.
+  process). Teardown disconnects without closing its context. For
+  live/staging/containerised or remote Chrome.
+
+Attach adopts the **first tab in the first available browser context**, creating
+a context or tab only if missing. This is **not active-tab or URL-based
+selection**. `start_debug` navigates that tab to the effective target URL (the
+per-run `url` override, otherwise the configured target URL). When `as` selects a
+configured persona, the same tab then navigates to the persona's login URL,
+resolved against the run URL, and the login flow enters and submits its configured
+fields before the agent starts.
+
+**Lifecycle non-ownership does not preserve tab contents or browser state.**
+Navigation replaces the adopted tab's contents; login and agent actions can change
+cookies, storage, and other session state. Use a **dedicated browser for attach
+runs**, not a browser holding unrelated work or personal sessions.
 
 `cdpUrl` set → attach. Unset → managed. See [`config.md`](config.md).
 
@@ -91,5 +118,8 @@ the same managed/attach split applies:
   or a network `host:port`) is configured, the adapter talks to that already-running
   device over ADB and **does not start/stop it**. For a physical phone or a
   shared emulator.
+- **Canvas / Compose surfaces** expose no view hierarchy, so they are simply
+  absent from the tree — no automatic vision/OCR fallback. The only vision is
+  the agent-level `look`.
 - iOS stays out of scope on Linux (XCUITest is macOS-only) — see
   [`desktop-control.md`](desktop-control.md).

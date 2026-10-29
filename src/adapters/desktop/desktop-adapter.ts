@@ -9,7 +9,12 @@
  *
  * **Managed only**: the desktop target has no attach handle (unlike web `cdpUrl` /
  * android `adbSerial`), so `open` launches the configured command and `close` stops
- * it. Reads/clicks key off AT-SPI screen extents; vision fallback is future work.
+ * it. Reads/clicks/type key off the AT-SPI tree — its screen extents give the
+ * click coordinates. A custom-drawn surface (a canvas, a game, a custom widget)
+ * exposes no a11y node, so it is simply absent from the tree: `find`, `click` and
+ * `type` cannot reach it. There is no automatic vision/OCR fallback: this adapter
+ * has no OCR/pixel path, so the adapter never switches to pixels — a read yields
+ * tree nodes or nothing. Only the agent-level `look` can describe a frame.
  *
  * **Every read is scoped to one window.** The AT-SPI tree spans every application
  * on the desktop, so an unscoped lookup for "Save" can resolve to another app's
@@ -35,6 +40,7 @@ import type {
   NodeRef,
   Query,
   ScrollOptions,
+  SelectorDialect,
   WaitOptions,
 } from '../contract.js';
 import {
@@ -64,6 +70,15 @@ const POLL_MS = 500;
 
 /** How long `open` waits for the launched window to appear before failing loud. */
 const WINDOW_WAIT_MS = 10_000;
+
+/**
+ * Appended to the early-exit diagnosis when the launch command itself exits (code
+ * or signal) before any window appears. A possibility, never a proof: the exit
+ * code alone cannot show the command daemonized, so the hint names the likely
+ * shape and the fix, not a cause.
+ */
+const EARLY_EXIT_HINT =
+  '. The command may have backgrounded or daemonized itself (e.g. a trailing &, nohup, or a wrapper that forks) — that exits before any window can appear. Use a foreground launch command that stays alive holding the window';
 
 /** Wheel-step calibration: pixels-per-click, and the default page-ish distance. */
 const SCROLL_STEP_PX = 120;
@@ -107,6 +122,13 @@ export interface DesktopAdapterInit {
  * contract. Construct via {@link DesktopAdapter.create}.
  */
 export class DesktopAdapter implements Adapter {
+  /**
+   * The native selector grammar — the AT-SPI parser this adapter's
+   * `find`/`click`/`type` accept: `role "name"` or a bare name substring, and
+   * nothing else. Declared here, not derived from the absence of `tabs`: the
+   * dialect is the grammar, and the grammar is the adapter's own.
+   */
+  readonly selectorDialect: SelectorDialect = 'native';
   readonly #config: DesktopTarget;
   readonly #env: NodeJS.ProcessEnv;
   readonly #atspi: AtspiSource;
@@ -204,18 +226,20 @@ export class DesktopAdapter implements Adapter {
       stdio: 'ignore',
     });
     const died = new Promise<never>((_resolve, reject) => {
-      const down = (reason: string): void => {
+      const down = (reason: string, hint = ''): void => {
         // A dead app must not pin `#child`: clear it so a later `open` relaunches
         // and `close` never kills a recycled process group.
         if (this.#child?.proc === proc) this.#child = null;
         reject(
           new AdapterError(
-            `desktop: launch command exited (${reason}) before the window appeared: ${command}`,
+            `desktop: launch command exited (${reason}) before the window appeared: ${command}${hint}`,
           ),
         );
       };
+      // The daemonization hint rides the exit event only — on 'error' (spawn
+      // failed) the command never ran, so the hint would mislead there.
       proc.once('exit', (code, signal) =>
-        down(signal ? `killed by ${signal}` : `exit code ${code ?? 'unknown'}`),
+        down(signal ? `killed by ${signal}` : `exit code ${code ?? 'unknown'}`, EARLY_EXIT_HINT),
       );
       // 'error' fires async: unlistened, a missing `/bin/sh` would crash the server.
       proc.once('error', (error) => down(`spawn failed: ${error.message}`));

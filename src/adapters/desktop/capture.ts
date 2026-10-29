@@ -1,43 +1,49 @@
 /**
- * Desktop screenshots — compositor-aware capture to PNG bytes.
- *
- * There is no universal Linux screen-capture API: naive X11 grabbers return BLACK
- * on Wayland (`idea/desktop-control.md`). So detect the session and dispatch —
- * **grim** on wlroots/Wayland, **scrot** on X11. Both write a temp PNG we read and
- * delete, keeping one uniform path. GNOME/KDE D-Bus + portal routes are future work.
- *
- * The picker + arg builders are pure and unit-tested; {@link Screenshot} is the
- * thin runner that shells out and fails loud as an {@link AdapterError}.
+ * Desktop screenshots — try X11, then Wayland when available. Environment hints
+ * do not prove compositor protocol support: only a successful capture does.
+ * Both routes write temporary PNGs; portal/D-Bus capture remains unimplemented.
  */
 
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AdapterError } from '../../errors.js';
+import { AdapterError, ExecTimeoutError } from '../../errors.js';
 import { desktopEnv, type Exec, errMessage, makeExec } from './proc.js';
 
-/**
- * Capture cap — deliberately longer than `proc.ts`'s input/a11y default: a cold
- * grim/scrot encoding a hi-dpi PNG (plus a compositor round-trip on Wayland) is
- * legitimately slow, and one frame is worth waiting for. Still bounded: a wedged
- * capture must not park the run until the outer session timeout.
- */
+/** One shared cap: fallback must not restart the capture budget. */
 const CAPTURE_TIMEOUT_MS = 30_000;
 
-/** Capture backends we dispatch to, chosen by the live session type. */
 export type CaptureTool = 'grim' | 'scrot';
 
-/**
- * Pick the capture tool from the environment: Wayland (`WAYLAND_DISPLAY`) → grim,
- * X11 (`DISPLAY`) → scrot. Throws loud when neither is set — there is nothing to capture.
- */
-export function chooseCaptureTool(env: NodeJS.ProcessEnv): CaptureTool {
-  if (env.WAYLAND_DISPLAY) return 'grim';
-  if (env.DISPLAY) return 'scrot';
-  throw new AdapterError('desktop: cannot screenshot — neither WAYLAND_DISPLAY nor DISPLAY is set');
+function captureTools(env: NodeJS.ProcessEnv): CaptureTool[] {
+  const tools: CaptureTool[] = [];
+  if (env.DISPLAY) tools.push('scrot');
+  if (env.WAYLAND_DISPLAY) tools.push('grim');
+  return tools;
 }
 
-/** Build the capture argv that writes a PNG to `file` (grim: positional · scrot: `--overwrite`). */
+function captureFailure(env: NodeJS.ProcessEnv, failures: string[]): AdapterError {
+  const hints = ['XDG_CURRENT_DESKTOP', 'XDG_SESSION_DESKTOP', 'DESKTOP_SESSION']
+    .filter((key) => env[key])
+    .map((key) => `${key}=${env[key]}`)
+    .join(', ');
+  return new AdapterError(
+    `desktop: screenshot capture infrastructure unavailable (not an application defect; ${hints || 'compositor/desktop unknown'}): ${failures.join('; ')}. ` +
+      'grim requires a compositor supporting the Wayland screencopy protocol; portal/D-Bus capture is not implemented.',
+  );
+}
+
+/** First route to try, not a claim that the display or backend is usable. */
+export function chooseCaptureTool(env: NodeJS.ProcessEnv): CaptureTool {
+  const tool = captureTools(env)[0];
+  if (tool) return tool;
+  throw captureFailure(env, [
+    'scrot unavailable: DISPLAY is not set',
+    'grim unavailable: WAYLAND_DISPLAY is not set',
+  ]);
+}
+
+/** Build the capture argv that writes a PNG to `file`. */
 export function captureArgs(tool: CaptureTool, file: string): string[] {
   switch (tool) {
     case 'grim':
@@ -51,51 +57,56 @@ export function captureArgs(tool: CaptureTool, file: string): string[] {
   }
 }
 
-/** Screenshot surface the adapter calls — implemented by {@link Screenshot}, faked in tests. */
+/** Screenshot surface the adapter calls — implemented by Screenshot, faked in tests. */
 export interface ScreenCapture {
-  /**
-   * Capture the current frame as PNG bytes.
-   *
-   * `deadline` is the absolute instant (epoch ms) the capture must not run past: the
-   * grim/scrot invocation is capped by the time left until then instead of by its own
-   * 30 s default, and a frame that lands after it is a failure, not a screenshot.
-   */
+  /** Capture PNG bytes within the absolute epoch-ms deadline (and the local 30s cap). */
   capture(deadline?: number): Promise<Uint8Array>;
 }
 
-/** grim/scrot-backed {@link ScreenCapture}. Construct with a target `display` (or inject `exec`). */
+/** grim/scrot-backed capture with injectable execution and clock for deterministic tests. */
 export class Screenshot implements ScreenCapture {
   readonly #env: NodeJS.ProcessEnv;
   readonly #exec: Exec;
+  readonly #now: () => number;
 
-  constructor(init: { display?: string; exec?: Exec } = {}) {
+  constructor(init: { display?: string; exec?: Exec; now?: () => number } = {}) {
     this.#env = desktopEnv(init.display);
     this.#exec = init.exec ?? makeExec(this.#env, CAPTURE_TIMEOUT_MS);
+    this.#now = init.now ?? Date.now;
   }
 
-  /** Capture the current frame as PNG bytes via a temp file (read then deleted). */
   async capture(deadline?: number): Promise<Uint8Array> {
-    const tool = chooseCaptureTool(this.#env);
-    const dir = await mkdtemp(join(tmpdir(), 'uidbg-shot-'));
-    const file = join(dir, 'shot.png');
-    try {
-      await this.#exec(
-        tool,
-        captureArgs(tool, file),
-        deadline === undefined ? undefined : { deadline },
-      );
-      // A frame produced after the deadline is stale: the caller asked for it within
-      // its budget, so a late capture fails loud instead of resolving as a success.
-      if (deadline !== undefined && Date.now() >= deadline) {
-        throw new AdapterError(
-          `desktop: screenshot (${tool}) resolved after its deadline (${deadline}) had passed`,
-        );
+    const end = Math.min(deadline ?? Infinity, this.#now() + CAPTURE_TIMEOUT_MS);
+    const checkDeadline = () => {
+      if (this.#now() >= end) {
+        throw new ExecTimeoutError(`desktop: screenshot capture at/after its deadline (${end})`);
       }
-      const buffer = await readFile(file);
-      return new Uint8Array(buffer);
-    } catch (error) {
-      if (error instanceof AdapterError) throw error;
-      throw new AdapterError(`desktop.screenshot failed (${tool}): ${errMessage(error)}`);
+    };
+    const failures: string[] = [];
+    if (!this.#env.DISPLAY) failures.push('scrot unavailable: DISPLAY is not set');
+    if (!this.#env.WAYLAND_DISPLAY) failures.push('grim unavailable: WAYLAND_DISPLAY is not set');
+    const tools = captureTools(this.#env);
+    if (!tools.length) throw captureFailure(this.#env, failures);
+    checkDeadline();
+    const dir = await mkdtemp(join(tmpdir(), 'uidbg-shot-'));
+    try {
+      for (const tool of tools) {
+        checkDeadline();
+        // Separate files prevent a failed route's partial output becoming fallback evidence.
+        const file = join(dir, `${tool}.png`);
+        try {
+          await this.#exec(tool, captureArgs(tool, file), { deadline: end });
+          checkDeadline();
+          const buffer = await readFile(file);
+          checkDeadline();
+          return new Uint8Array(buffer);
+        } catch (error) {
+          if (error instanceof ExecTimeoutError) throw error;
+          checkDeadline();
+          failures.push(`${tool} failed: ${errMessage(error)}`);
+        }
+      }
+      throw captureFailure(this.#env, failures);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

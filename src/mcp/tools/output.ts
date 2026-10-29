@@ -16,6 +16,7 @@
  */
 
 import { z } from 'zod';
+import { FINDINGS_STATUSES } from '../../findings/schema.js';
 import type { Ack, DescribeResult, StartResult } from '../../services/debug-service.js';
 
 /** `start_debug` output — the id every later call is keyed by. */
@@ -74,7 +75,7 @@ const RunInfoSchema = z.object({
     .min(1)
     .describe('Session id — pass to get_findings, send_message and end_session.'),
   status: z
-    .enum(['running', 'passed', 'failed'])
+    .enum(FINDINGS_STATUSES)
     .describe('running, or the verdict it settled on (still readable, still holding the project).'),
   goal: z.string().describe('The goal this run was started with.'),
 });

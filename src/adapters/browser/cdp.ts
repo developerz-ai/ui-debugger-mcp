@@ -18,6 +18,11 @@
  * (the session layer wires it to `findings-store`'s `logs/console.log` /
  * `logs/network.log`), so the persistent trail and the live buffer stay in sync.
  *
+ * Every entry carries the label of the tab it was captured on (`tab-1`, `tab-2`,
+ * …), stamped at EVENT time — so a row whose line is written only after the
+ * body-enrichment await still names the tab it came from, and two tabs' traffic
+ * is never indistinguishable in the durable trail.
+ *
  * Reads are non-destructive and SQL-like: `console`/`network` return newest-first,
  * narrowed by the whitelisted {@link LogQuery.filters} and capped by `limit`. The
  * buffer is the source of truth for the agent's `observe`; the on-disk log is the
@@ -26,7 +31,7 @@
  */
 
 import type { ConsoleMessage, Page, Request, Response } from 'playwright-core';
-import type { ConsoleEntry, LogQuery, NetworkEntry } from '../contract.js';
+import type { CaptureSink, ConsoleEntry, LogQuery, NetworkEntry } from '../contract.js';
 import { capToLimit } from '../limit.js';
 import { filterConsole, filterNetwork } from './log-filters.js';
 import {
@@ -37,10 +42,14 @@ import {
   redactUrl,
   truncateBody,
 } from './log-format.js';
+import type { TabContext } from './tab-context.js';
 
+// The capture seam is declared in the contract (two adapters stream to it now)
+// and re-exported here, so `cdp.js` stays the single import surface for the
+// capture channel — every existing reader keeps its import path and type identity.
 // Filtering lives in `log-filters.ts` and rendering/redaction in `log-format.ts`
-// (500-LOC cap); both are re-exported here so `cdp.js` stays the single import
-// surface for the capture channel.
+// (500-LOC cap); both are re-exported here for the same reason.
+export type { CaptureSink } from '../contract.js';
 export {
   CONSOLE_FILTER_KEYS,
   filterConsole,
@@ -146,16 +155,16 @@ async function readHeaders(
   }
 }
 
-/**
- * Where captured entries are streamed as formatted log lines. The session layer
- * binds this to `findings-store`'s append-only `console`/`network` channels; the
- * adapter stays decoupled from the session (depends on this seam, not the store).
- */
-export type CaptureSink = (channel: 'console' | 'network', line: string) => void;
-
 export interface CdpCaptureInit {
   /** Page that emits `console`/`pageerror`/`requestfailed`/`response`. */
   page: Page;
+  /**
+   * The run's tab registry — every captured row is stamped with the label of
+   * the page the event fired on, so the durable trail says WHICH tab produced
+   * it. One registry per run: the adapter's `tabs()` listing reports the same
+   * labels.
+   */
+  tabs: TabContext;
   /** Optional log sink — each new entry is streamed here as a line. */
   sink?: CaptureSink;
   /** Injected clock (epoch ms) for deterministic capture timestamps; default `Date.now`. */
@@ -198,6 +207,8 @@ function newestFirstByTime(filtered: NetworkEntry[], limit?: number): NetworkEnt
 export class CdpCapture {
   /** The page events are read from — reassigned by {@link CdpCapture.rebind} on a tab switch. */
   #page: Page;
+  /** The run's tab registry — names the page a row was captured on. */
+  readonly #tabs: TabContext;
   readonly #sink: CaptureSink | undefined;
   readonly #now: () => number;
   readonly #cap: number;
@@ -222,6 +233,7 @@ export class CdpCapture {
 
   constructor(init: CdpCaptureInit) {
     this.#page = init.page;
+    this.#tabs = init.tabs;
     this.#sink = init.sink;
     this.#now = init.now ?? (() => Date.now());
     this.#cap = init.cap ?? DEFAULT_BUFFER_CAP;
@@ -268,6 +280,20 @@ export class CdpCapture {
     if (wasStarted) this.start();
   }
 
+  /**
+   * The label of the tab this capture is bound to RIGHT NOW.
+   *
+   * The listeners hang off {@link CdpCapture.#page} alone (a tab switch
+   * re-binds them), so the bound page IS the page that fired the event. Read
+   * it here — at the moment the event fires — and store it ON the entry: a
+   * network row's log line is written only after its body/header await
+   * resolves, and by then the driver may have switched tabs. A label read at
+   * THAT moment would file the row under the tab the driver moved to.
+   */
+  #tabLabel(): string {
+    return this.#tabs.label(this.#page);
+  }
+
   /** Captured console messages, newest first, narrowed by {@link LogQuery}. */
   console(opts: LogQuery = {}): ConsoleEntry[] {
     return newestFirst(filterConsole(this.#console, opts.filters), opts.limit);
@@ -289,6 +315,7 @@ export class CdpCapture {
       // in an editor) 1-based, so the raw numbers point one line too high.
       location: loc.url ? `${loc.url}:${loc.line + 1}:${loc.column + 1}` : undefined,
       timestamp: this.#now(),
+      tab: this.#tabLabel(),
     });
   };
 
@@ -298,6 +325,7 @@ export class CdpCapture {
       text: error.message,
       location: error.stack?.split('\n')[1]?.trim(),
       timestamp: this.#now(),
+      tab: this.#tabLabel(),
     });
   };
 
@@ -360,6 +388,7 @@ export class CdpCapture {
       resourceType: request.resourceType(),
       error,
       timestamp: at,
+      tab: this.#tabLabel(),
       ...optional('durationMs', this.#elapsed(request, at)),
       ...optional('requestBody', this.#requestBodyOf(request)),
     };
@@ -390,6 +419,7 @@ export class CdpCapture {
       ok: response.ok(),
       resourceType: request.resourceType(),
       timestamp: at,
+      tab: this.#tabLabel(),
       ...optional('durationMs', this.#elapsed(request, at)),
       ...optional('requestBody', this.#requestBodyOf(request)),
     };

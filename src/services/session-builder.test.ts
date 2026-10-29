@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
@@ -8,12 +8,19 @@ import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { chromium } from 'playwright-core';
 import { z } from 'zod';
+import { BrowserAdapter } from '../adapters/browser/browser-adapter.js';
+import type { Adapter } from '../adapters/contract.js';
+import { DesktopAdapter } from '../adapters/desktop/desktop-adapter.js';
 import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import { AdapterError, AuthError, ConfigError, TargetNotFoundError } from '../errors.js';
+import { FindingsSchema } from '../findings/schema.js';
+import { createSecretRedactor } from '../redact.js';
+import { FindingsStore } from '../session/findings-store.js';
 import { sessionPaths, workspacePaths } from '../session/workspace.js';
 import {
   buildSession,
+  createCaptureSink,
   makeSessionBuilder,
   resolveRunTarget,
   type SessionBuilderDeps,
@@ -321,8 +328,7 @@ const CHROME = findChrome();
 
 /**
  * Capture what the driver model is actually sent, then stop the loop at once.
- * The prompt is the only place `notes` can be observed — it is composed, not
- * stored — so this drives one real (mock-backed) step to read it back.
+ * Notes are composed, not stored; this drives one mock-backed driver step.
  */
 function capturingDriver(seen: string[]): MockLanguageModelV3 {
   return new MockLanguageModelV3({
@@ -388,6 +394,76 @@ test('buildSession sends no notes section for a target that declares none', asyn
   expect(seen[0]).not.toContain('Known about this app');
 });
 
+test('buildSession binds selected multiline target notes to the separate vision provider', async () => {
+  const png = new Uint8Array([137, 80, 78, 71]);
+  const capture = spyOn(DesktopAdapter.prototype, 'screenshot').mockResolvedValue(png);
+  const seen: string[] = [];
+  let calls = 0;
+  const reply = {
+    finishReason: { unified: 'stop' as const, raw: 'stop' },
+    usage: {
+      inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+      outputTokens: { total: 1, text: 1, reasoning: undefined },
+    },
+    warnings: [],
+  };
+  const driver = new MockLanguageModelV3({
+    doGenerate: async () => ({
+      ...reply,
+      content:
+        calls++ === 0
+          ? [
+              {
+                type: 'tool-call' as const,
+                toolCallId: 'look1',
+                toolName: 'look',
+                input: '{}',
+              },
+            ]
+          : [{ type: 'text' as const, text: 'done' }],
+    }),
+  });
+  const vision = new MockLanguageModelV3({
+    doGenerate: async ({ prompt }) => {
+      seen.push(JSON.stringify(prompt));
+      return {
+        ...reply,
+        content: [{ type: 'text', text: '{"description":"empty table","issues":[]}' }],
+      };
+    },
+  });
+  const d = deps();
+  d.models = { ...d.models, driver, vision, selfLook: false };
+  d.config = {
+    ...CONFIG,
+    targets: {
+      ...CONFIG.targets,
+      screen: {
+        adapter: 'desktop',
+        launch: 'myapp',
+        notes: '  Empty tables are expected.\n\n  Header must remain visible.  ',
+      },
+      other: { adapter: 'desktop', launch: 'other', notes: 'UNSELECTED TARGET NOTE' },
+    },
+  };
+  try {
+    const built = await buildSession(d, { id: 'vision-notes', target: 'screen', goal: 'inspect' });
+    await built.run({
+      inbox: { drain: () => [] },
+      progress: { writeFindings: async () => 'findings.json' },
+      signal: new AbortController().signal,
+    });
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain('Known about this app');
+    expect(seen[0]).toContain('- Empty tables are expected.');
+    expect(seen[0]).toContain('- Header must remain visible.');
+    expect(seen[0]).not.toContain('UNSELECTED TARGET NOTE');
+  } finally {
+    capture.mockRestore();
+  }
+});
+
 // --- named auth personas (`start_debug({as})`) ------------------------------
 
 /** A web target carrying two personas; `executablePath` is never reached in these. */
@@ -432,6 +508,139 @@ test('buildSession rejects a persona on a non-web target', async () => {
     buildSession(deps(), { id: 'auth-desktop', target: 'screen', goal: 'x', as: 'admin' }),
   ).rejects.toThrow(ConfigError);
 });
+
+for (const selected of [true, false]) {
+  test(`findings from a real failing act ${selected ? 'redact the selected' : 'preserve the unselected'} persona`, async () => {
+    const secret = 'fixture"pass\\word with @';
+    const spellings = [
+      secret,
+      encodeURIComponent(secret),
+      encodeURIComponent(secret).replaceAll('%20', '+'),
+      JSON.stringify(secret).slice(1, -1),
+    ];
+    const errorText = `POST /checkout rejected: ${spellings.join(' | ')}; retry disabled`;
+    const redact = createSecretRedactor(selected ? [secret] : []);
+    const adapter: Adapter = {
+      selectorDialect: 'web',
+      open: async () => {},
+      find: async () => {
+        throw new AdapterError(errorText);
+      },
+      click: async () => {},
+      type: async () => {},
+      pressKey: async () => {},
+      scroll: async () => {},
+      readState: async () => [],
+      screenshot: async () => new Uint8Array(),
+      waitFor: async () => {},
+      console: async () => [],
+      network: async () => [],
+      close: async () => {},
+    };
+    const create = spyOn(BrowserAdapter, 'create').mockResolvedValue(adapter as BrowserAdapter);
+    const reachedReport = Promise.withResolvers<void>();
+    const releaseReport = Promise.withResolvers<void>();
+    let calls = 0;
+    const driver = new MockLanguageModelV3({
+      doGenerate: async () => {
+        const first = calls++ === 0;
+        if (!first) {
+          reachedReport.resolve();
+          await releaseReport.promise;
+        }
+        return {
+          content: [
+            {
+              type: 'tool-call' as const,
+              toolCallId: first ? 'failed-act' : 'verdict',
+              toolName: first ? 'act' : 'report',
+              input: JSON.stringify(
+                first
+                  ? { action: 'click', target: '#checkout' }
+                  : {
+                      status: 'failed',
+                      summary: errorText,
+                      bugs: [{ kind: 'flow', detail: errorText }],
+                    },
+              ),
+            },
+          ],
+          finishReason: { unified: 'tool-calls' as const, raw: 'tool-calls' },
+          usage: {
+            inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+            outputTokens: { total: 1, text: 1, reasoning: undefined },
+          },
+          warnings: [],
+        };
+      },
+    });
+    const d = deps();
+    d.models = { ...d.models, driver };
+    d.config = {
+      ...CONFIG,
+      targets: {
+        web: {
+          adapter: 'browser',
+          url: 'http://localhost:3000',
+          headless: true,
+          auth: { admin: { path: '/login', fields: { password: secret }, submit: 'Sign in' } },
+        },
+      },
+    };
+    let built: Awaited<ReturnType<typeof buildSession>> | undefined;
+    try {
+      built = await buildSession(d, {
+        id: 'findings-auth',
+        target: 'web',
+        goal: 'check checkout',
+        ...(selected && { as: 'admin' }),
+      });
+      // Login is intentionally not opened: this exercises builder binding and the
+      // real act/loop/store lifecycle, independently of the browser login flow.
+      const finished = built.session.start(built.run);
+      await reachedReport.promise;
+      const path = sessionPaths(d.workspace, 'findings-auth').findingsJson;
+      const inspect = async (status: 'running' | 'failed') => {
+        const raw = await readFile(path, 'utf8');
+        const disk = FindingsSchema.parse(JSON.parse(raw));
+        expect(disk.status).toBe(status);
+        expect(disk.steps).toEqual([
+          {
+            step: 'click #checkout',
+            ok: false,
+            note: `AdapterError: ${redact(errorText)}`,
+          },
+        ]);
+        expect(await built?.session.snapshot()).toEqual(disk);
+        expect(await built?.session.snapshot(['steps', 'summary'])).toEqual({
+          steps: disk.steps,
+          ...(disk.summary !== undefined && { summary: disk.summary }),
+        });
+        if (selected) {
+          for (const value of spellings) {
+            expect(raw).not.toContain(value);
+            expect(raw).not.toContain(JSON.stringify(value).slice(1, -1));
+          }
+          expect(raw).toContain('<redacted,');
+        } else {
+          expect(disk.steps[0]?.note).toContain(secret);
+        }
+        return disk;
+      };
+      await inspect('running');
+      releaseReport.resolve();
+      await finished;
+      const terminal = await inspect('failed');
+      expect(terminal.summary).toBe(redact(errorText));
+      expect(terminal.bugs).toEqual([{ kind: 'flow', detail: redact(errorText) }]);
+      expect(calls).toBe(2);
+    } finally {
+      releaseReport.resolve();
+      await built?.session.close();
+      create.mockRestore();
+    }
+  });
+}
 
 // --- the login itself, against a real browser and a real login form ---------
 
@@ -578,6 +787,45 @@ function serveLoginApp(credentials: { email: string; password: string }) {
   },
   STORY_TIMEOUT_MS,
 );
+
+// --- the run's capture sink (redaction before disk) --------------------------
+
+/**
+ * Read a log file once it carries `marker`, bounded: the sink writes
+ * fire-and-forget, so a sink that never writes must fail the assertion below
+ * rather than hang the suite.
+ */
+async function readWhenWritten(file: string, marker: string): Promise<string> {
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    const content = await readFile(file, 'utf8').catch(() => '');
+    if (content.includes(marker)) return content;
+    if (Date.now() >= deadline) return content;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test('the per-run capture sink redacts a persona value before it reaches the durable trail', async () => {
+  // A persona's password is typed into the app, so it comes back at us through
+  // whatever the target echoes — a CDP console row, an android logcat line. The
+  // session's capture sink is the ONE writer of `logs/*.log`, so its redaction is
+  // the last gate before a credential reaches disk: no adapter writes to disk, and
+  // there is no second, unredacted path into the trail.
+  const secret = 'p@ssw0rd-9';
+  const d = deps();
+  const paths = sessionPaths(d.workspace, 'sink1');
+  const store = new FindingsStore(paths);
+  const sink = createCaptureSink(store, createSecretRedactor([secret]));
+
+  sink('console', `2026-07-27T14:30:05.000Z ERROR login failed for ${secret}`);
+
+  const written = await readWhenWritten(join(paths.logs, 'console.log'), '<redacted, 10 chars>');
+  // Presence stays diagnostic (the length of the secret), the secret itself is gone.
+  expect(written).toContain('<redacted, 10 chars>');
+  expect(written).not.toContain(secret);
+  // …and the row around it survives: redaction replaces the value, not the line.
+  expect(written).toContain('login failed for');
+});
 
 test('makeSessionBuilder binds the deps into a per-run builder', async () => {
   const build = makeSessionBuilder(deps());

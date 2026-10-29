@@ -22,6 +22,7 @@ import {
   makeAdapter,
   makeAttachAdapter,
   makeFakeEmulator,
+  stubResolveBin,
 } from './android-adapter.test-helpers.js';
 
 /** True while `pid` is alive (`kill -0`); false once it's gone (ESRCH). */
@@ -98,6 +99,7 @@ describe('AndroidAdapter managed teardown', () => {
       adb: new FakeAdb(),
       ui: new FakeUi([]),
       spawn: () => child,
+      resolveBin: stubResolveBin(),
       pickPort: async () => 5554,
       bootWaitMs: 2000,
     });
@@ -133,6 +135,7 @@ describe('AndroidAdapter managed boot', () => {
         spawns++;
         return makeFakeEmulator(undefined);
       },
+      resolveBin: stubResolveBin(),
       pickPort: async () => 5554,
       bootWaitMs: 2000,
     });
@@ -154,6 +157,7 @@ describe('AndroidAdapter managed boot', () => {
         spawned = [bin, ...args];
         return makeFakeEmulator();
       },
+      resolveBin: stubResolveBin(),
       pickPort: async () => 5554,
       bootWaitMs: 2000,
     });
@@ -185,6 +189,7 @@ describe('AndroidAdapter managed boot', () => {
         spawned = [bin, ...args];
         return makeFakeEmulator();
       },
+      resolveBin: stubResolveBin(),
       pickPort: async () => 5554,
       bootWaitMs: 2000,
     });
@@ -209,6 +214,7 @@ describe('AndroidAdapter managed boot', () => {
         spawned = [bin, ...args];
         return makeFakeEmulator();
       },
+      resolveBin: stubResolveBin(),
       pickPort: async () => 5554,
       bootWaitMs: 2000,
     });
@@ -235,6 +241,7 @@ describe('AndroidAdapter managed boot', () => {
         queueMicrotask(() => child.emit('error', new Error('spawn /nope/emulator ENOENT')));
         return child;
       },
+      resolveBin: stubResolveBin(),
       pickPort: async () => 5554,
       bootWaitMs: 2000,
     });
@@ -255,6 +262,7 @@ describe('AndroidAdapter managed boot', () => {
         queueMicrotask(() => child.emit('exit', 1, null));
         return child;
       },
+      resolveBin: stubResolveBin(),
       pickPort: async () => 5554,
       bootWaitMs: 2000,
     });
@@ -271,12 +279,74 @@ describe('AndroidAdapter managed boot', () => {
       adb,
       ui: new FakeUi([]),
       spawn: () => makeFakeEmulator(),
+      resolveBin: stubResolveBin(),
       pickPort: async () => 5554,
       bootWaitMs: 50,
     });
     const err = await adapter.open('com.example').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AdapterError);
     expect((err as AdapterError).message).toContain('no device appeared');
+  });
+
+  test('an SDK-detected binary reaches the spawn seam (null = auto-detect)', async () => {
+    // `emulatorPath: null` resolves through the SDK layouts — whatever the
+    // resolver reports becomes the spawned binary, verbatim.
+    let spawned: string[] = [];
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb: new FakeAdb(),
+      ui: new FakeUi([]),
+      resolveBin: () => ({
+        bin: '/sdk/emulator/emulator',
+        origin: 'sdk',
+        where: '$ANDROID_HOME',
+      }),
+      spawn: (bin, args) => {
+        spawned = [bin, ...args];
+        return makeFakeEmulator();
+      },
+      pickPort: async () => 5554,
+      bootWaitMs: 2000,
+    });
+    await adapter.open('com.example');
+    expect(spawned[0]).toBe('/sdk/emulator/emulator');
+  });
+
+  test('a `missing` resolution rejects loud before a port is picked or anything spawns', async () => {
+    let ports = 0;
+    let spawns = 0;
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb: new FakeAdb(),
+      ui: new FakeUi([]),
+      resolveBin: () => ({
+        bin: '',
+        origin: 'missing',
+        where: 'not found',
+        searched: [
+          '$ANDROID_HOME/emulator/emulator',
+          '$ANDROID_SDK_ROOT/emulator/emulator',
+          '~/Android/Sdk/emulator/emulator',
+          '~/Library/Android/sdk/emulator/emulator',
+        ],
+      }),
+      spawn: () => {
+        spawns++;
+        return makeFakeEmulator(undefined);
+      },
+      pickPort: async () => {
+        ports++;
+        return 5554;
+      },
+      bootWaitMs: 2000,
+    });
+    const err = await adapter.open('com.example').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as AdapterError).message).toContain('no emulator binary found');
+    expect((err as AdapterError).message).toContain('$ANDROID_HOME/emulator/emulator');
+    expect((err as AdapterError).message).toContain('~/Library/Android/sdk/emulator/emulator');
+    expect(ports).toBe(0);
+    expect(spawns).toBe(0);
   });
 
   /** Managed adapter over an ADB seam whose `get-state` is scripted per call. */
@@ -291,6 +361,7 @@ describe('AndroidAdapter managed boot', () => {
       adb,
       ui: new FakeUi([]),
       spawn: () => makeFakeEmulator(undefined),
+      resolveBin: stubResolveBin(),
       pickPort: async () => 5554,
       bootWaitMs,
     });
@@ -344,6 +415,7 @@ describe('AndroidAdapter managed boot budget', () => {
       adb,
       ui: new FakeUi([]),
       spawn: () => makeFakeEmulator(undefined),
+      resolveBin: stubResolveBin(),
       pickPort: async () => 5554,
       bootWaitMs: 60_000,
     });
@@ -367,6 +439,7 @@ describe('AndroidAdapter managed boot budget', () => {
       adb,
       ui: new FakeUi([]),
       spawn: () => makeFakeEmulator(undefined),
+      resolveBin: stubResolveBin(),
       pickPort: async () => 5554,
       bootWaitMs: 60_000,
     });
@@ -392,6 +465,7 @@ describe('AndroidAdapter managed boot budget', () => {
       adb,
       ui: new FakeUi([]),
       spawn: () => makeFakeEmulator(undefined),
+      resolveBin: stubResolveBin(),
       pickPort: async () => 5554,
       bootWaitMs: 60_000,
     });
@@ -439,6 +513,7 @@ describe('AndroidAdapter device binding', () => {
         return makeFakeEmulator(undefined);
       },
       pickPort: async () => ports[next++] ?? 5554,
+      resolveBin: stubResolveBin(),
       bootWaitMs: 2000,
       ...overrides,
     });

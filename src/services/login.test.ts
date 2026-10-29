@@ -173,6 +173,7 @@ function fakeAdapter(options: FakeOptions = {}): { adapter: Adapter; calls: Call
     enabled: true,
   });
   const adapter: Adapter = {
+    selectorDialect: 'web',
     open: async (target) => {
       if (options.openDelayMs) await delay(options.openDelayMs);
       calls.push({ fn: 'open', arg: target });

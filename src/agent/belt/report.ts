@@ -30,11 +30,14 @@
 import { tool } from 'ai';
 import { z } from 'zod';
 import type { Bug, Findings, Step, VisualIssue } from '../../findings/schema.js';
-import { BugSchema, StepSchema, VisualIssueSchema } from '../../findings/schema.js';
+import {
+  BUG_KINDS,
+  BugSchema,
+  StepSchema,
+  TERMINAL_STATUSES,
+  VisualIssueSchema,
+} from '../../findings/schema.js';
 import { evidenceKey, type TrailEvidence } from './trail.js';
-
-/** Terminal verdicts `report` may emit — `running` is excluded (it isn't terminal). */
-const TERMINAL_STATUSES = ['passed', 'failed'] as const;
 
 /** The empty evidence set — what a run with no wired trail streams. */
 export const EMPTY_EVIDENCE: TrailEvidence = { steps: [], bugs: [], visual: [] };
@@ -45,6 +48,12 @@ export const EMPTY_EVIDENCE: TrailEvidence = { steps: [], bugs: [], visual: [] }
  * persists; arrays default to `[]` so a clean pass needs only `{ status }`.
  */
 export const ReportInputSchema = z.object({
+  /**
+   * Terminal verdicts `report` may emit — `running` is excluded: it is the
+   * in-flight state the session overlays before a verdict exists, and a run
+   * that is both concluded and not is a contradiction, so the input schema
+   * rejects it.
+   */
   status: z
     .enum(TERMINAL_STATUSES)
     .describe(
@@ -57,7 +66,7 @@ export const ReportInputSchema = z.object({
   bugs: z
     .array(BugSchema)
     .default([])
-    .describe('functional bugs found: { kind: console|network|flow, detail, evidence? }'),
+    .describe(`functional bugs found: { kind: ${BUG_KINDS.join('|')}, detail, evidence? }`),
   visual: z
     .array(VisualIssueSchema)
     .default([])

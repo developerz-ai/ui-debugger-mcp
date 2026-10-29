@@ -8,24 +8,47 @@
  * schemas reject — that shipped once (`hover`, a `frames` kind/action neither
  * schema has) and burns the driver's steps on a call the belt throws away.
  *
+ * The terminal `report` example is the same kind of drift risk: it teaches the
+ * driver the exact verdict object the `report` tool validates. A key the schema
+ * does not have is STRIPPED by Zod — the call succeeds and the verdict lands
+ * without the field the driver thought it reported. An enum value the schema
+ * rejects fails the call at the worst possible moment — the run's last step.
+ *
  * This test extracts every such example from the base prompt (both eye modes)
  * and all three target addenda, and asserts it names something
  * {@link ACT_ACTIONS} / {@link OBSERVE_KINDS} / {@link NODE_FIELDS} actually accepts.
+ * The report example is read OUT of the prompt at test time — never copied here
+ * — and checked against {@link ReportInputSchema} and the findings sub-schemas.
  */
 
 import { expect, test } from 'bun:test';
 import type { Adapter, Node } from '../../adapters/contract.js';
+import {
+  BUG_KINDS,
+  BugSchema,
+  StepSchema,
+  TERMINAL_STATUSES,
+  VISUAL_SEVERITIES,
+  VisualIssueSchema,
+} from '../../findings/schema.js';
 import { ACT_ACTIONS } from '../belt/act.js';
+import { VISION_SYSTEM_PROMPT } from '../belt/look.js';
 import { NODE_FIELDS, OBSERVE_KINDS, runObserve } from '../belt/observe.js';
+import { ReportInputSchema } from '../belt/report.js';
 import { ANDROID_ADDENDUM_PROMPT } from './android-addendum.js';
 import { debugAgentPrompt } from './debug-agent.js';
 import { DESKTOP_ADDENDUM_PROMPT } from './desktop-addendum.js';
 import { WEB_ADDENDUM_PROMPT } from './web-addendum.js';
 
-/** Every prompt string a driver session can be composed from, labelled for failure messages. */
-const PROMPTS: Record<string, string> = {
+/** The base prompt in both eye modes — the terminal `report` example lives here. */
+const BASE_PROMPTS: Record<string, string> = {
   'debug-agent (vision mode)': debugAgentPrompt(false),
   'debug-agent (self-look mode)': debugAgentPrompt(true),
+};
+
+/** Every prompt string a driver session can be composed from, labelled for failure messages. */
+const PROMPTS: Record<string, string> = {
+  ...BASE_PROMPTS,
   'web addendum': WEB_ADDENDUM_PROMPT,
   'desktop addendum': DESKTOP_ADDENDUM_PROMPT,
   'android addendum': ANDROID_ADDENDUM_PROMPT,
@@ -79,9 +102,10 @@ const NATIVE_PROMPTS: Record<string, string> = {
   'android addendum': ANDROID_ADDENDUM_PROMPT,
 };
 
-/** A minimal NATIVE-shaped adapter — no `tabs`, which is what marks a web target. */
+/** A minimal NATIVE-shaped adapter — it DECLARES the native dialect (and has no `tabs`). */
 function nativeAdapter(nodes: Node[]): Adapter {
   return {
+    selectorDialect: 'native',
     open: async () => {},
     find: async () => null,
     click: async () => {},
@@ -150,4 +174,463 @@ test('the base prompt\'s "act" belt line lists exactly ACT_ACTIONS, in order', (
   expect(match).not.toBeNull();
   const verbs = (match?.[1] ?? '').split(',').map((verb) => verb.trim());
   expect(verbs).toEqual([...ACT_ACTIONS]);
+});
+
+// --- the findings vocabulary (severity / kind / terminal status) -------------
+
+/**
+ * The prompts also TEACH the findings vocabulary itself — the piped enumerations
+ * in the visual-finding shape and the terminal `report` JSON example. A doc edit
+ * that teaches `severity: "critical"` or drops `network` from the kind list makes
+ * the driver emit findings the schemas reject (or never emit a kind it should).
+ * These guards hold every prompt that teaches it — the driver (both eye modes)
+ * and the vision guy's system prompt — against the canonical owner,
+ * `findings/schema.ts`, so the literals are pinned in exactly one place.
+ */
+
+/** The prompts that teach the findings vocabulary, labelled for failure messages. */
+const FINDINGS_PROMPTS: Record<string, string> = {
+  'debug-agent (vision mode)': debugAgentPrompt(false),
+  'debug-agent (self-look mode)': debugAgentPrompt(true),
+  'vision guy': VISION_SYSTEM_PROMPT,
+};
+
+/**
+ * One taught piped enumeration: how to find it, what it must hold, the owner's
+ * name for failures.
+ *
+ * The head is one complete quoted value; every `|` alternative after it is
+ * consumed as a WHOLE segment — all characters up to the value's end (a `,`,
+ * `}`, `]`, newline, or the next `|`). Reading a PREFIX of an alternative
+ * (`[a-z]+` reads an appended `"high2"` as the canonical `high`) let a mutated
+ * enumeration pass the membership check below with a value the schema rejects,
+ * so {@link enumTokens} throws on any segment it cannot read as a complete
+ * quoted value instead of skipping it.
+ */
+const TAUGHT_ENUMS: ReadonlyArray<[RegExp, readonly string[], string]> = [
+  [
+    /severity"?\s*:\s*("[^"]+")((?:\s*\|\s*[^,}\]\n|]+)*)/gi,
+    VISUAL_SEVERITIES,
+    'VISUAL_SEVERITIES',
+  ],
+  [/"kind"\s*:\s*("[^"]+")((?:\s*\|\s*[^,}\]\n|]+)*)/g, BUG_KINDS, 'BUG_KINDS'],
+  [/"status"\s*:\s*("[^"]+")((?:\s*\|\s*[^,}\]\n|]+)*)/g, TERMINAL_STATUSES, 'TERMINAL_STATUSES'],
+];
+
+/**
+ * Split one matched enumeration into its bare value tokens
+ * (`"low" | "medium"` → low, medium), reading every alternative WHOLE.
+ *
+ * Two taught shapes: the head may hold the entire union in one pair of quotes
+ * (`severity: "low|medium|high"`, the inline-code form), or each alternative
+ * after a `|` is quoted on its own (`"status": "passed" | "failed"`). A
+ * segment that is not a complete quoted value — an unquoted alternative, a
+ * value the closing quote never reaches — is thrown, never skipped: a
+ * half-read token would pass the membership check while the schema rejects it.
+ */
+function enumTokens(name: string, owner: string, match: RegExpExecArray): readonly string[] {
+  const alternatives = [match[1] ?? '', ...(match[2] ?? '').split('|')].filter(
+    (alternative) => alternative.trim().length > 0,
+  );
+  return alternatives
+    .map((alternative) => {
+      const quoted = /^"([^"]*)"$/.exec(alternative.trim());
+      if (quoted === null) {
+        throw new Error(
+          `${name}: teaches an unreadable ${owner} alternative ${JSON.stringify(alternative.trim())} — an alternative must be a complete quoted value`,
+        );
+      }
+      return quoted[1] ?? '';
+    })
+    .flatMap((quoted) => quoted.split('|'))
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+}
+
+/** Every taught enumeration in one prompt must hold canonical findings values only. */
+function assertTaughtEnumsHoldCanonicalValues(name: string, prompt: string): void {
+  for (const [pattern, canonical, owner] of TAUGHT_ENUMS) {
+    for (const match of prompt.matchAll(pattern)) {
+      for (const token of enumTokens(name, owner, match)) {
+        if (!canonical.includes(token)) {
+          throw new Error(
+            `${name}: teaches "${token}" in a ${owner} enumeration, which findings/schema.ts does not declare`,
+          );
+        }
+      }
+    }
+  }
+}
+
+test('every taught severity/kind/status enumeration holds canonical findings values only', () => {
+  for (const [name, prompt] of Object.entries(FINDINGS_PROMPTS)) {
+    assertTaughtEnumsHoldCanonicalValues(name, prompt);
+  }
+});
+
+test('the enumeration guard rejects `| "high2"` appended to a severity enumeration', () => {
+  const prompt = debugAgentPrompt(false);
+  const joined = VISUAL_SEVERITIES.map((severity) => `"${severity}"`).join('|');
+
+  // The real prompt passes, and the schema really has no `high2` to pass on.
+  expect(() => assertTaughtEnumsHoldCanonicalValues('debug-agent', prompt)).not.toThrow();
+  expect([...VISUAL_SEVERITIES]).not.toContain('high2');
+
+  // Appending `| "high2"` to the report example's severity enumeration must
+  // FAIL the guard: `[a-z]+` used to read the appended token as the canonical
+  // prefix `high`, so a mutated prompt passed while the schema rejects `high2`.
+  const appended = prompt.replace(`"severity": ${joined}`, `"severity": ${joined}|"high2"`);
+  expect(appended).not.toBe(prompt);
+  expect(() => assertTaughtEnumsHoldCanonicalValues('mutated', appended)).toThrow(/high2/);
+
+  // An alternative the reader cannot close (an unquoted one) is drift too —
+  // failed loud, never skipped.
+  const unquoted = prompt.replace(`"severity": ${joined}`, `"severity": ${joined}|high2`);
+  expect(unquoted).not.toBe(prompt);
+  expect(() => assertTaughtEnumsHoldCanonicalValues('mutated', unquoted)).toThrow(/high2/);
+});
+
+test('every canonical findings value is taught by at least one prompt', () => {
+  const taught = new Set<string>();
+  for (const [name, prompt] of Object.entries(FINDINGS_PROMPTS)) {
+    for (const [pattern, , owner] of TAUGHT_ENUMS) {
+      for (const match of prompt.matchAll(pattern)) {
+        for (const token of enumTokens(name, owner, match)) taught.add(token);
+      }
+    }
+  }
+  for (const [canonical, owner] of [
+    [VISUAL_SEVERITIES, 'VISUAL_SEVERITIES'],
+    [BUG_KINDS, 'BUG_KINDS'],
+    [TERMINAL_STATUSES, 'TERMINAL_STATUSES'],
+  ] as const) {
+    for (const value of canonical) {
+      if (!taught.has(value)) {
+        throw new Error(
+          `no prompt teaches ${owner} value "${value}" — the driver or vision guy was never told it exists`,
+        );
+      }
+    }
+  }
+});
+
+// --- the terminal `report` example vs the report schemas --------------------
+
+/** The heading the terminal `report` example lives under in the base prompt. */
+const REPORT_SECTION = '## Terminal `report` call';
+
+/** The top-level keys the report example must show — the guard reads each one. */
+const REQUIRED_REPORT_KEYS = ['status', 'steps', 'bugs', 'visual'] as const;
+
+/** A severity the findings schema does not accept — the drift the guard must catch. */
+const OUT_OF_ENUM_SEVERITY = 'critical';
+
+/**
+ * The `"key": value` pairs of one example object.
+ *
+ * Values are kept as RAW TEXT: the example is pseudo-JSON — its enums are
+ * unions (`"passed" | "failed"`) — so a value is read, never `JSON.parse`d. A
+ * value ends at the comma that closes it, so one key's text never leaks into
+ * the next key's candidates.
+ */
+type ExamplePairs = ReadonlyMap<string, string>;
+
+/**
+ * The offset just past the value that starts at `start`: the matching close
+ * bracket of a `{…}`/`[…]` value, the next top-level comma of a scalar, or the
+ * end of the text.
+ */
+function endOfValue(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text.charAt(index);
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === '{' || char === '[') depth += 1;
+    else if (char === '}' || char === ']') {
+      depth -= 1;
+      if (depth <= 0) return index;
+    } else if (char === ',' && depth === 0) return index;
+  }
+  return text.length;
+}
+
+/** The `"key": value` pairs of one object body. */
+function objectPairs(body: string): ExamplePairs {
+  const pairs = new Map<string, string>();
+  let rest = body;
+  for (;;) {
+    const match = /"((?:[^"\\]|\\.)*)"\s*:/.exec(rest);
+    if (match === null) return pairs;
+    const valueStart = match.index + match[0].length;
+    const valueEnd = endOfValue(rest, valueStart);
+    pairs.set(match[1] ?? '', rest.slice(valueStart, valueEnd).trim());
+    rest = rest.slice(valueEnd);
+  }
+}
+
+/** The body of the example's outer object — the text between its braces. */
+function exampleBody(example: string): string {
+  const start = example.indexOf('{');
+  if (start < 0) throw new Error('the report example is not an object');
+  return example.slice(start + 1, endOfValue(example, start));
+}
+
+/** The bodies of the objects an array value holds, at the array's own level. */
+function arrayObjectBodies(value: string): readonly string[] {
+  const bodies: string[] = [];
+  let depth = 0;
+  let start = -1;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value.charAt(index);
+    if (char === '{') {
+      depth += 1;
+      if (depth === 1) start = index;
+    } else if (char === '}') {
+      if (depth === 1 && start >= 0) {
+        bodies.push(value.slice(start + 1, index));
+        start = -1;
+      }
+      depth -= 1;
+    }
+  }
+  return bodies;
+}
+
+/**
+ * The object bodies of a nested collection — at least one, or the example is
+ * drift.
+ *
+ * An empty collection teaches the driver NO key and NO enum value, and a guard
+ * that iterates an empty collection checks nothing at all: it would pass the
+ * very drift it exists to catch (an example whose `bugs` array lost every bug
+ * object). One nonempty example per collection is what keeps the key/enum
+ * checks below reachable.
+ */
+function requiredObjectBodies(what: string, value: string): readonly string[] {
+  const bodies = arrayObjectBodies(value);
+  if (bodies.length === 0) {
+    throw new Error(`the report example never shows a ${what} — the collection is empty`);
+  }
+  return bodies;
+}
+
+/** The quoted strings of a raw value — the enum candidates it teaches. */
+function stringCandidates(value: string): readonly string[] {
+  return [...value.matchAll(/"([^"]*)"/g)].map((match) => match[1] ?? '');
+}
+
+/** The value of one key — a key the example never shows is drift, not a skip. */
+function requiredValue(pairs: ExamplePairs, key: string): string {
+  const value = pairs.get(key);
+  if (value === undefined) {
+    throw new Error(`the report example never shows "${key}"`);
+  }
+  return value;
+}
+
+/** Every key an example object teaches must be one the schema accepts. */
+function assertExampleKeys(what: string, accepted: readonly string[], pairs: ExamplePairs): void {
+  for (const key of pairs.keys()) {
+    if (!accepted.includes(key)) {
+      throw new Error(
+        `the report example's ${what} teaches "${key}", which the schema does not accept`,
+      );
+    }
+  }
+}
+
+/**
+ * Every candidate the example teaches must be an accepted value — and every
+ * accepted value must be taught: a half-taught enum is drift too (a driver that
+ * never hears "failed" reports a pass it did not earn).
+ */
+function assertExampleEnum(what: string, accepted: readonly string[], value: string): void {
+  const candidates = stringCandidates(value);
+  for (const candidate of candidates) {
+    if (!accepted.includes(candidate)) {
+      throw new Error(
+        `the report example teaches "${candidate}" as ${what}, which the schema does not accept`,
+      );
+    }
+  }
+  for (const option of accepted) {
+    if (!candidates.includes(option)) {
+      throw new Error(`the report example never teaches "${option}" as ${what}`);
+    }
+  }
+}
+
+/**
+ * Pull the fenced ```json report example out of a prompt.
+ *
+ * Throws when the section or the fence is missing: a guard that cannot find
+ * the example must never pass silently.
+ */
+function extractReportExample(prompt: string): string {
+  const section = prompt.split(REPORT_SECTION)[1];
+  if (section === undefined) {
+    throw new Error(`the prompt has no "${REPORT_SECTION}" section`);
+  }
+  const fenced = section.match(/```json\r?\n([\s\S]*?)```/);
+  const body = fenced?.[1];
+  if (body === undefined) {
+    throw new Error(`the "${REPORT_SECTION}" section has no fenced json example`);
+  }
+  return body;
+}
+
+/**
+ * Assert the report example teaches exactly what the `report` schemas accept.
+ *
+ * Throws on any drift: a key the schema does not have, a key the example never
+ * shows, a value outside a field's enum, an enum value the example never
+ * teaches, or a nested collection that shows no object at all (an empty one
+ * teaches no key and no enum — and an empty one would leave the checks below
+ * with nothing to check). The example text is a PARAMETER — the caller reads it
+ * out of the prompt — so a test can feed this a mutated copy.
+ */
+function assertReportExampleMatchesSchemas(example: string): void {
+  const top = objectPairs(exampleBody(example));
+  const reportKeys = Object.keys(ReportInputSchema.shape);
+
+  for (const key of top.keys()) {
+    if (!reportKeys.includes(key)) {
+      throw new Error(
+        `the report example teaches "${key}", which the report schema does not accept`,
+      );
+    }
+  }
+
+  for (const key of REQUIRED_REPORT_KEYS) {
+    requiredValue(top, key);
+    if (!reportKeys.includes(key)) {
+      throw new Error(`the report schema has no "${key}" field`);
+    }
+  }
+
+  assertExampleEnum(
+    'a status',
+    ReportInputSchema.shape.status.options,
+    requiredValue(top, 'status'),
+  );
+
+  const stepKeys = Object.keys(StepSchema.shape);
+  for (const body of requiredObjectBodies('step', requiredValue(top, 'steps'))) {
+    assertExampleKeys('a step', stepKeys, objectPairs(body));
+  }
+
+  const bugKeys = Object.keys(BugSchema.shape);
+  const bugKinds = BugSchema.shape.kind.options;
+  for (const body of requiredObjectBodies('bug', requiredValue(top, 'bugs'))) {
+    const bug = objectPairs(body);
+    assertExampleKeys('a bug', bugKeys, bug);
+    assertExampleEnum('a bug kind', bugKinds, requiredValue(bug, 'kind'));
+  }
+
+  const visualKeys = Object.keys(VisualIssueSchema.shape);
+  const severities = VisualIssueSchema.shape.severity.options;
+  for (const body of requiredObjectBodies('visual issue', requiredValue(top, 'visual'))) {
+    const visual = objectPairs(body);
+    assertExampleKeys('a visual issue', visualKeys, visual);
+    assertExampleEnum('a visual severity', severities, requiredValue(visual, 'severity'));
+  }
+}
+
+test("the base prompt's report example teaches exactly what the report schemas accept", () => {
+  for (const [name, prompt] of Object.entries(BASE_PROMPTS)) {
+    try {
+      assertReportExampleMatchesSchemas(extractReportExample(prompt));
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`${name}: ${reason}`);
+    }
+  }
+});
+
+test('the report-example guard rejects an unknown key and an out-of-enum severity', () => {
+  const example = extractReportExample(debugAgentPrompt(false));
+
+  // The real example passes…
+  expect(() => assertReportExampleMatchesSchemas(example)).not.toThrow();
+
+  // …a key the report schema does not have…
+  const unknownKey = example.replace(/^\{/, '{ "notAReportKey": "x",');
+  expect(unknownKey).not.toBe(example);
+  expect(() => assertReportExampleMatchesSchemas(unknownKey)).toThrow(
+    /the report example teaches "notAReportKey"/,
+  );
+
+  // …a key a NESTED finding does not have…
+  const unknownBugKey = example.replace(/"kind":/, '"notABugKey": "x", "kind":');
+  expect(unknownBugKey).not.toBe(example);
+  expect(() => assertReportExampleMatchesSchemas(unknownBugKey)).toThrow(
+    /a bug teaches "notABugKey"/,
+  );
+
+  // …and a severity outside the findings enum.
+  const severities = [...VisualIssueSchema.shape.severity.options];
+  const mutated = severities.map((option, index) =>
+    index === severities.length - 1 ? OUT_OF_ENUM_SEVERITY : option,
+  );
+  const badSeverity = example.replace(
+    /"severity":\s*"[^"]*"(?:\s*\|\s*"[^"]*")+/,
+    `"severity": ${mutated.map((option) => `"${option}"`).join('|')}`,
+  );
+  expect(badSeverity).not.toBe(example);
+  expect(() => assertReportExampleMatchesSchemas(badSeverity)).toThrow(
+    new RegExp(OUT_OF_ENUM_SEVERITY),
+  );
+});
+
+test('the report-example guard rejects an enum value the example never teaches', () => {
+  const example = extractReportExample(debugAgentPrompt(false));
+
+  // A half-taught enum is drift too: drop "flow" and the driver never hears
+  // the one bug kind only it can report.
+  const halfTaught = example.replace(
+    /"kind":\s*"console"\|"network"\|"flow"/,
+    '"kind": "console"|"network"',
+  );
+  expect(halfTaught).not.toBe(example);
+  expect(() => assertReportExampleMatchesSchemas(halfTaught)).toThrow(/never teaches "flow"/);
+});
+
+test('the report-example guard rejects an empty nested collection', () => {
+  const example = extractReportExample(debugAgentPrompt(false));
+
+  // An empty collection teaches the driver no key and no enum value — and a
+  // guard that iterated an empty collection would check nothing, so it would
+  // pass the very drift it exists to catch. Every nested collection must carry
+  // at least one object example.
+  const collections: readonly (readonly [string, string])[] = [
+    ['steps', 'step'],
+    ['bugs', 'bug'],
+    ['visual', 'visual issue'],
+  ];
+  for (const [key, what] of collections) {
+    const emptied = example.replace(new RegExp(`"${key}":\\s*\\[[\\s\\S]*?\\],`), `"${key}": [],`);
+    expect(emptied).not.toBe(example);
+    expect(() => assertReportExampleMatchesSchemas(emptied)).toThrow(
+      new RegExp(`never shows a ${what}`),
+    );
+  }
+});
+
+test('the report-example guard fails loud when the example cannot be read', () => {
+  expect(() => extractReportExample('a prompt with no report section')).toThrow();
+  expect(() => extractReportExample(`${REPORT_SECTION}\n\nno fenced example`)).toThrow();
+  expect(() => assertReportExampleMatchesSchemas('not an example')).toThrow();
+
+  const example = extractReportExample(debugAgentPrompt(false));
+  const noSteps = example.replace(/"steps":\s*\[[^\]]*\],/, '');
+  expect(noSteps).not.toBe(example);
+  expect(() => assertReportExampleMatchesSchemas(noSteps)).toThrow(/never shows "steps"/);
 });

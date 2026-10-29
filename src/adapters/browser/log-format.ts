@@ -2,13 +2,26 @@
  * Rendering + redaction for captured console/network entries.
  *
  * Split out of `cdp.ts` to keep that file under the 500-LOC cap — no behavior
- * change. Everything here is pure: level normalization, body truncation, the two
- * `logs/*.log` line renderers, and the two redactors that keep a credential out
- * of the model's context and out of the durable trail (a secret in a header
+ * change. Everything here is pure: level normalization, body truncation, the
+ * `logs/network.log` line renderer, and the two redactors that keep a credential
+ * out of the model's context and out of the durable trail (a secret in a header
  * VALUE, or in a query param of the URL itself).
+ *
+ * The console-line renderer is SHARED (the android logcat drain renders the
+ * same shape), so it lives in `src/adapters/log-format.ts` and is re-exported
+ * here — every existing reader keeps its import path.
+ *
+ * Both renderers put the TAB MARKER between the timestamp and the row
+ * (`<ISO> [tab-1] LEVEL text @ location`, `<ISO> [tab-1] METHOD url → 200 …`),
+ * so a line says which tab produced it. The marker is an opaque label — no
+ * URL, no title, no secret — and a row without a tab renders exactly as it did
+ * before the marker existed.
  */
 
 import type { ConsoleEntry, NetworkEntry } from '../contract.js';
+import { stamp, tabMarker } from '../log-format.js';
+
+export { formatConsoleLine } from '../log-format.js';
 
 /**
  * Per-body character cap. Big enough for an error payload or a small collection,
@@ -77,46 +90,6 @@ export function redactUrl(url: string): string {
   return `${url.slice(0, start + 1)}${query}${url.slice(end)}`;
 }
 
-/**
- * Values a CONFIGURED auth persona types into the app (`targets.<t>.auth.<p>.fields`).
- *
- * The two redactors above key off a NAME they recognize (`authorization`,
- * `?password=`). A persona's values have no such tell: they land in a form POST
- * body, in a `type` tool input on the agent trail, in whatever an adapter error
- * echoes back. So this one keys off the VALUE — the only thing all three share —
- * and is bound per run to the persona the caller named.
- *
- * Same posture as the other two: presence stays diagnostic (`<redacted, N chars>`
- * still tells you a password of the right length was typed), the secret itself
- * never reaches the durable trail. Form-encoded and JSON-escaped spellings are
- * redacted too — a password with an `@` rides a form POST as `%40`, and matching
- * only the plain text would leave the real body in `logs/network.log`.
- *
- * Longest first, so a value that contains another still redacts whole.
- */
-export function createSecretRedactor(secrets: readonly string[]): (line: string) => string {
-  const spellings = new Set<string>();
-  for (const secret of secrets) {
-    if (secret.length === 0) continue;
-    spellings.add(secret);
-    const encoded = encodeURIComponent(secret);
-    spellings.add(encoded);
-    spellings.add(encoded.replaceAll('%20', '+')); // form encoding spells a space `+`
-    spellings.add(JSON.stringify(secret).slice(1, -1)); // JSON body escaping
-  }
-  const values = [...spellings].sort((a, b) => b.length - a.length);
-  if (values.length === 0) return (line) => line;
-  return (line) => {
-    let out = line;
-    for (const value of values) {
-      // `split`/`join`, not a regex: a credential is arbitrary text and escaping it
-      // for a pattern is one missed metacharacter away from not redacting at all.
-      if (out.includes(value)) out = out.split(value).join(`<redacted, ${value.length} chars>`);
-    }
-    return out;
-  };
-}
-
 // --- Normalizers ------------------------------------------------------------
 
 /** Map a CDP console `type()` onto the normalized {@link ConsoleEntry} level. */
@@ -141,17 +114,6 @@ export function normalizeConsoleLevel(type: string): ConsoleEntry['level'] {
 
 // --- Line formatting (durable log trail) ------------------------------------
 
-/** ISO-8601 stamp from epoch ms; deterministic given the injected clock. */
-function stamp(ts: number): string {
-  return new Date(ts).toISOString();
-}
-
-/** Render a {@link ConsoleEntry} as one greppable `logs/console.log` line. */
-export function formatConsoleLine(entry: ConsoleEntry): string {
-  const where = entry.location ? ` @ ${entry.location}` : '';
-  return `${stamp(entry.timestamp)} ${entry.level.toUpperCase()} ${entry.text}${where}`;
-}
-
 /** One log line's worth of a captured body — single-line, hard-capped, never secret-bearing. */
 function bodySnippet(label: string, body: string | undefined): string {
   if (body === undefined || body.length === 0) return '';
@@ -166,7 +128,7 @@ function bodySnippet(label: string, body: string | undefined): string {
  * the exact dead end this log exists to prevent.
  */
 export function formatNetworkLine(entry: NetworkEntry): string {
-  const head = `${stamp(entry.timestamp)} ${entry.method} ${entry.url}`;
+  const head = `${stamp(entry.timestamp)}${tabMarker(entry.tab)} ${entry.method} ${entry.url}`;
   const sent = bodySnippet('req', entry.requestBody);
   if (entry.error !== undefined) return `${head} → FAILED ${entry.error}${sent}`;
   const type = entry.resourceType ? ` [${entry.resourceType}]` : '';

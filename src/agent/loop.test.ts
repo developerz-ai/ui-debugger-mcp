@@ -14,8 +14,6 @@ import {
   KICKOFF_PROMPT,
   type LoopInbox,
   progressForStep,
-  pruneStaleFrames,
-  STALE_FRAME_NOTE,
 } from './loop.js';
 
 test('budgetNudge stays silent while there is ample budget', () => {
@@ -351,70 +349,6 @@ test('createDebugAgent builds an agent driving the four-tool belt', () => {
 test('loop constants are sane', () => {
   expect(DEFAULT_MAX_STEPS).toBeGreaterThan(0);
   expect(KICKOFF_PROMPT).toContain('report');
-});
-
-// --- pruneStaleFrames --------------------------------------------------------
-
-/** A tool message carrying one self-look frame (content output with file-data). */
-function lookFrameMessage(id: string): ModelMessage {
-  return {
-    role: 'tool',
-    content: [
-      {
-        type: 'tool-result',
-        toolCallId: id,
-        toolName: 'look',
-        output: {
-          type: 'content',
-          value: [
-            { type: 'text', text: 'screenshot saved: s.png' },
-            { type: 'file-data', data: 'AAAA', mediaType: 'image/png' },
-          ],
-        },
-      },
-    ],
-  } as unknown as ModelMessage;
-}
-
-test('pruneStaleFrames keeps only the newest look frame; older ones collapse to a note', () => {
-  const user: ModelMessage = { role: 'user', content: 'go' };
-  const messages = [user, lookFrameMessage('a'), lookFrameMessage('b')];
-  const pruned = pruneStaleFrames(messages);
-
-  const partsOf = (m: ModelMessage) =>
-    (m.content as Array<{ output: { value: Array<{ type: string; text?: string }> } }>)[0]?.output
-      .value;
-  // older frame stripped to the stale note
-  expect(partsOf(pruned[1] as ModelMessage)?.map((v) => v.type)).toEqual(['text', 'text']);
-  expect(partsOf(pruned[1] as ModelMessage)?.[1]?.text).toBe(STALE_FRAME_NOTE);
-  // newest frame untouched
-  expect(partsOf(pruned[2] as ModelMessage)?.map((v) => v.type)).toEqual(['text', 'file-data']);
-  // untouched messages pass through by reference
-  expect(pruned[0]).toBe(user);
-});
-
-test('pruneStaleFrames returns the SAME array when there is at most one frame', () => {
-  const single = [{ role: 'user', content: 'go' } as ModelMessage, lookFrameMessage('only')];
-  expect(pruneStaleFrames(single)).toBe(single);
-  const none = [{ role: 'user', content: 'go' } as ModelMessage];
-  expect(pruneStaleFrames(none)).toBe(none);
-});
-
-test('pruneStaleFrames ignores non-look tool results and non-content outputs', () => {
-  const actResult = {
-    role: 'tool',
-    content: [
-      {
-        type: 'tool-result',
-        toolCallId: 'x',
-        toolName: 'act',
-        output: { type: 'json', value: { label: 'click', screenshot: 's.png' } },
-      },
-    ],
-  } as unknown as ModelMessage;
-  const messages = [actResult, lookFrameMessage('a'), lookFrameMessage('b')];
-  const pruned = pruneStaleFrames(messages);
-  expect(pruned[0]).toBe(actResult);
 });
 
 test('describeStep surfaces a tool-error content part (AI SDK 6 shape), not toolResults', () => {

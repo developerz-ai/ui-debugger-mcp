@@ -6,7 +6,7 @@
 
 import { z } from 'zod';
 
-/** Per-role model strings (OpenAI-compatible router; defaults: deepseek text, glm image). */
+/** Per-role model strings (OpenAI-compatible router; defaults: deepseek text, qwen image). */
 export const ModelsSchema = z.strictObject({
   driver: z.string(), // fast guy — controls the target (blind, text)
   vision: z.string(), // vision guy — describes screenshots, judges looks
@@ -109,10 +109,14 @@ const WindowMatchSchema = z.strictObject({
 /**
  * Desktop target — X11/Xvfb + Wayland adapter. Managed launch.
  *
- * **Launch must stay foreground** (no daemonization via `detached:true`, `&`, `nohup`).
- * The adapter spawns the command and latches its exit code to detect launch failures.
- * Daemonized apps orphan the process group → `close()` can't kill them and the
- * profile lock persists.
+ * **The launch command must stay in the foreground** — it must not daemonize or
+ * background itself: avoid `&`, `nohup` and `setsid`.
+ * The adapter spawns the command and latches its exit code, failing `open` loud
+ * if the child exits before the window appears. A command that backgrounds itself
+ * lets the launch shell exit at once → the adapter drops its child handle, so
+ * `close()` has no pid to signal: the app stays in the group but nobody kills
+ * it, and its locks persist. `setsid` goes further: it puts the app in a
+ * process group of its own, outside the one the adapter tears down.
  */
 export const DesktopTargetSchema = z.strictObject({
   adapter: z.literal('desktop'),

@@ -83,6 +83,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its "never appeared" wording — it only shares the one budget now — and the
   "this target cannot report its current location" error is unchanged.
 
+- **A target's `notes` now reach the separate vision model.** The preconditions
+  were composed into the driver's system prompt only, so a run whose control and
+  vision models differed had the vision guy judge a configured expected empty
+  state as a visual defect — and it was persisted in `findings.json` as a
+  finding. The same `## Known about this app` section now rides the vision
+  request too: an expected condition is never an issue, while a screen that
+  CONTRADICTS one is still reported. Self-look runs (control == vision) are
+  unchanged — the driver already carries the notes in its own prompt.
+
 ## [1.9.0] - 2026-09-05
 
 ### Added
@@ -495,7 +504,7 @@ below is a defect that consumer actually hit.
 
 ### Added
 
-- **Android adapter** — full ADB + uiautomator support for mobile app automation with view hierarchy reading and vision fallback.
+- **Android adapter** — full ADB + uiautomator support for mobile app automation with view hierarchy reading only; there is no automatic vision/OCR fallback.
 - **Desktop adapter** — X11/Wayland input control for Linux desktop apps with AT-SPI accessibility tree reading.
 - **Video replay** — automatic stitching of screenshots into captioned `replay.mp4` for evidence and debugging.
 - **CLI tools** — `init` (scaffold projects), `status` (check active runs), `stop` (graceful cleanup).

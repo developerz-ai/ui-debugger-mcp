@@ -18,7 +18,6 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import type { LanguageModel, Tool } from 'ai';
 import type { CaptureSink } from '../adapters/browser/cdp.js';
 import { resolveTargetUrl } from '../adapters/browser/launch.js';
-import { createSecretRedactor } from '../adapters/browser/log-format.js';
 import type { Adapter } from '../adapters/contract.js';
 import { createAdapter } from '../adapters/factory.js';
 import { createActTool } from '../agent/belt/act.js';
@@ -32,6 +31,7 @@ import type { ResolvedConfig } from '../config/load.js';
 import type { Target } from '../config/schema.js';
 import { ConfigError, TargetNotFoundError } from '../errors.js';
 import type { Step } from '../findings/schema.js';
+import { createSecretRedactor } from '../redact.js';
 import { pruneSessions, SESSION_RETENTION } from '../session/cleanup.js';
 import { FindingsStore } from '../session/findings-store.js';
 import { type LoopRunner, Session, type SessionAdapter } from '../session/session.js';
@@ -143,6 +143,27 @@ export function withToolLog(name: string, t: Tool, log: (line: string) => void):
         throw err;
       }
     },
+  };
+}
+
+/**
+ * The run's durable capture sink: redact, THEN append to the session's log channel.
+ *
+ * One writer for every captured row, whoever produced it — the browser's CDP
+ * capture (console + network) and the android logcat drain alike. The adapters
+ * never touch disk; they hand lines to this seam and the session decides what
+ * lands in `logs/*.log`. Redaction happens HERE, on the way in, so no second
+ * (unredacted) path to the trail can exist.
+ *
+ * Fire-and-forget by design: a capture burst must never block the adapter that
+ * produced it, and a failed write must never fail the read that produced it.
+ */
+export function createCaptureSink(
+  store: FindingsStore,
+  redact: (line: string) => string,
+): CaptureSink {
+  return (channel, line) => {
+    void store.appendLog(channel, redact(line)).catch(() => undefined);
   };
 }
 
@@ -280,18 +301,21 @@ export async function buildSession(
   // run's dir even if the clock moved backwards since the previous one.
   await pruneSessions(workspace, { keep: SESSION_RETENTION, protect: id });
   const criteriaLines = splitLines(criteria);
+  const notes = splitLines(targetConfig.notes);
   const address = openAddress(targetConfig);
   const origin = runOrigin(targetConfig);
   await writeFile(paths.storyMd, renderStoryMd(target, address, goal, criteriaLines), 'utf8');
-  const store = new FindingsStore(paths);
-  // Bound once, applied to EVERY durable log line this run writes. A persona's
+  // Bound once, applied to findings text and EVERY durable log line. A persona's
   // values are typed into the app, so they come back at us through the form POST
   // in `network.log` and through anything an adapter error quotes — the same
   // posture `log-format.ts` already holds for credential headers and `?token=`.
   const redact = createSecretRedactor(auth ? Object.values(auth.persona.fields) : []);
-  const onLog: CaptureSink = (channel, line) => {
-    void store.appendLog(channel, redact(line)).catch(() => undefined);
-  };
+  // The store redacts findings TEXT on write; the sink redacts every captured
+  // row on its way in — one writer, one redaction gate.
+  const store = new FindingsStore(paths, redact);
+  // The run's ONE capture sink — the browser's CDP capture and the android logcat
+  // drain both stream into it, so every captured row is redacted on its way to disk.
+  const onLog = createCaptureSink(store, redact);
 
   // `profile` is a browser-target key — no other adapter has a profile dir. A managed
   // launch lives in it; attach ignores it (that browser keeps its own state).
@@ -316,7 +340,7 @@ export async function buildSession(
     // The target's standing preconditions: config-level, so they are stated once
     // here instead of re-pasted into every `goal`. Length is capped at the config
     // boundary — this section rides along on every step.
-    notes: splitLines(targetConfig.notes),
+    notes,
   });
 
   const appendAgentLog = (line: string): Promise<string> =>
@@ -360,7 +384,7 @@ export async function buildSession(
           'look',
           selfLook
             ? createSelfLookTool(adapter, store)
-            : createLookTool(adapter, models.vision, store, trail),
+            : createLookTool(adapter, models.vision, store, trail, notes),
           logAgent,
         ),
         report: withToolLog(
@@ -417,7 +441,8 @@ export async function buildSession(
       // Out-of-band and BEFORE the loop: the driver never sees the credentials, and
       // a login that cannot complete fails `start_debug` outright instead of handing
       // back a run that will report every screen behind it as empty. See `login.ts`.
-      const steps = await signIn(adapter, auth, targetConfig, logAgent, timeoutMs);
+      // Login awaits this sink so open() returns with its auth trail durable.
+      const steps = await signIn(adapter, auth, targetConfig, flushAgentLog, timeoutMs);
       for (const step of steps) trail.record(step);
     },
     run,

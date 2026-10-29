@@ -13,12 +13,13 @@
  *    retrieval that returns it whole. Never capped without both — a dropped entry
  *    the caller cannot ask for again is silent data loss, and prose alone lets a
  *    caller that skips the note conclude there were exactly 20 findings.
- *  - **`resource_link`s**: evidence paths (screenshots, `replay.mp4`, logs) ride
+ *  - **`resource_link`s**: evidence paths (screenshots, `replay.mp4`) ride
  *    as `resource_link` content items (file:// URIs) alongside the text block —
  *    the spec-blessed form, not inline path strings the caller has to notice.
  */
 
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { EVIDENCE_FIELD_NAMES } from '../../findings/schema.js';
 
 /** A plain object value (not an array) — what every outer tool returns. */
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -28,8 +29,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Cap on a top-level array field before it gets truncated for the response. */
 export const MAX_LIST_ITEMS = 20;
 
-/** Keys whose string value — when an absolute path — is evidence worth linking. */
-export const EVIDENCE_KEYS = new Set(['screenshot', 'evidence']);
+/** Keys whose string value — when an absolute path — is evidence worth linking.
+ * Sourced from the findings schema — the canonical owner of findings field names. */
+export const EVIDENCE_KEYS: ReadonlySet<string> = new Set<string>(EVIDENCE_FIELD_NAMES);
 
 type ResourceLinkContent = Extract<CallToolResult['content'][number], { type: 'resource_link' }>;
 

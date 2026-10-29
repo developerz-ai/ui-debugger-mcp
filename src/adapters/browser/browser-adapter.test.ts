@@ -15,10 +15,9 @@ import {
   scrollDelta,
 } from './browser-adapter.js';
 
-// See `browser-adapter.lifecycle.test.ts` for tests that exercise class-level
-// behavior (create/attach wiring, waitFor, scroll, close) against a fake
-// `chromium` launcher — kept out of this file to stay under the 500-LOC cap
-// and to keep this file's scope to the pure helper functions.
+// Pure helpers plus tab visibility regressions using an injected launcher.
+// See `browser-adapter.lifecycle.test.ts` for the remaining lifecycle behavior;
+// split to keep this file under the 500-LOC cap without global module mocks.
 
 // --- resolveLaunchBinary ----------------------------------------------------
 
@@ -56,6 +55,134 @@ test('create surfaces a failed CDP attach as AdapterError, never a raw Playwrigh
   });
   await expect(failed).rejects.toThrow(AdapterError);
   await expect(failed).rejects.toThrow(/cannot attach to http:\/\/127\.0\.0\.1:1/);
+});
+
+// --- live tab visibility ----------------------------------------------------
+
+type Launcher = NonNullable<Parameters<typeof BrowserAdapter.create>[0]['chromium']>;
+
+async function attachedTabs() {
+  const states = [
+    { visibilityState: 'hidden', fronts: 0, probeError: null as Error | null },
+    { visibilityState: 'visible', fronts: 0, probeError: null as Error | null },
+  ];
+  const pages = states.map((state, index) => ({
+    on: () => undefined,
+    off: () => undefined,
+    url: () => `https://example.com/tab-${index}?code=secret&view=details`,
+    title: async () => `Tab ${index}`,
+    evaluate: async (expression: string) => {
+      expect(expression).toBe("document.visibilityState === 'visible'");
+      if (state.probeError) throw state.probeError;
+      return state.visibilityState === 'visible';
+    },
+    bringToFront: async () => {
+      state.fronts += 1;
+      for (const other of states) other.visibilityState = 'hidden';
+      state.visibilityState = 'visible';
+    },
+  }));
+  const context = { pages: () => pages };
+  const chromium = {
+    connectOverCDP: async () => ({
+      contexts: () => [context],
+      close: async () => undefined,
+    }),
+  } as unknown as Launcher;
+  const adapter = await BrowserAdapter.create({
+    config: webTarget({ cdpUrl: 'http://localhost:9222' }),
+    profileDir: '/tmp/unused-profile',
+    chromium,
+  });
+  return { adapter, states };
+}
+
+test('attachment controls a hidden page without foregrounding it; tab URLs stay redacted', async () => {
+  const { adapter, states } = await attachedTabs();
+  try {
+    expect(await adapter.tabs()).toEqual([
+      {
+        index: 0,
+        // The stable label of the PAGE — the same marker the console/network
+        // rows carry, so a `[tab-2]` line in the log resolves to a tab.
+        id: 'tab-1',
+        url: 'https://example.com/tab-0?code=<redacted, 6 chars>&view=details',
+        title: 'Tab 0',
+        active: true,
+        visible: false,
+      },
+      {
+        index: 1,
+        id: 'tab-2',
+        url: 'https://example.com/tab-1?code=<redacted, 6 chars>&view=details',
+        title: 'Tab 1',
+        active: false,
+        visible: true,
+      },
+    ]);
+    expect(states.map((state) => state.fronts)).toEqual([0, 0]);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('explicit tab selection foregrounds the selected page and reports live state', async () => {
+  const { adapter, states } = await attachedTabs();
+  try {
+    await adapter.selectTab(1);
+    expect(states.map((state) => state.fronts)).toEqual([0, 1]);
+    expect((await adapter.tabs()).map(({ active, visible }) => ({ active, visible }))).toEqual([
+      { active: false, visible: false },
+      { active: true, visible: true },
+    ]);
+    await adapter.selectTab(0);
+    expect(states.map((state) => state.fronts)).toEqual([1, 1]);
+    expect((await adapter.tabs()).map(({ active, visible }) => ({ active, visible }))).toEqual([
+      { active: true, visible: true },
+      { active: false, visible: false },
+    ]);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('external visibility changes are re-probed without changing controlled identity', async () => {
+  const { adapter, states } = await attachedTabs();
+  try {
+    await adapter.selectTab(0);
+    expect((await adapter.tabs()).map((tab) => tab.visible)).toEqual([true, false]);
+    for (const state of states) {
+      state.visibilityState = state.visibilityState === 'visible' ? 'hidden' : 'visible';
+    }
+    expect((await adapter.tabs()).map(({ active, visible }) => ({ active, visible }))).toEqual([
+      { active: true, visible: false },
+      { active: false, visible: true },
+    ]);
+    expect(states.map((state) => state.fronts)).toEqual([1, 0]);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('a failed visibility probe rejects the listing as AdapterError, never cached visibility', async () => {
+  const { adapter, states } = await attachedTabs();
+  try {
+    await adapter.selectTab(0);
+    expect((await adapter.tabs())[0]?.visible).toBe(true);
+    // Failure of either the controlled page or an uncontrolled page must be loud.
+    for (const state of states) {
+      state.probeError = new Error('visibility execution context destroyed');
+      const listing = adapter.tabs();
+      await expect(listing).rejects.toThrow(AdapterError);
+      await expect(listing).rejects.toThrow(
+        'browser.tabs failed: visibility execution context destroyed',
+      );
+      state.probeError = null;
+    }
+    expect(states.map((state) => state.fronts)).toEqual([1, 0]);
+  } finally {
+    await adapter.close();
+  }
 });
 
 // --- resolveTargetUrl -------------------------------------------------------

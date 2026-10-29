@@ -7,11 +7,11 @@
  * live in android-adapter.test.ts.
  */
 
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { AdapterError } from '../../errors.js';
-import type { Node } from '../contract.js';
+import type { CaptureSink, Node } from '../contract.js';
 import { AndroidAdapter } from './android-adapter.js';
-import { FakeAdb, makeAdapter, makeNode } from './android-adapter.test-helpers.js';
+import { FakeAdb, FakeUi, makeAdapter, makeNode } from './android-adapter.test-helpers.js';
 import type { AndroidNode, UiAutomatorSource } from './uiautomator.js';
 
 describe('AndroidAdapter.readState', () => {
@@ -365,6 +365,377 @@ describe('AndroidAdapter.console', () => {
     expect(entries.length).toBeGreaterThan(0);
     const call = adb.calls.find((c) => c.args[0] === 'logcat');
     expect(call?.args).toContain('900');
+  });
+
+  // --- capture sink -------------------------------------------------------------
+
+  /** An adapter over the fake seams with the run's capture sink wired in. */
+  function withSink(onLog: CaptureSink): AndroidAdapter {
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog,
+    });
+    adb.setResponse('logcat -v epoch -t 500', RAW_LOGCAT);
+    return adapter;
+  }
+
+  test('streams one formatted console line per logcat row (drain order)', async () => {
+    const lines: Array<[string, string]> = [];
+    const adapter = withSink((channel, line) => {
+      lines.push([channel, line]);
+    });
+    await adapter.console({});
+    expect(lines).toHaveLength(2);
+    expect(lines.every(([channel]) => channel === 'console')).toBe(true);
+    // Oldest first, one browser-style line per row: ISO stamp, level, text, @ tag.
+    expect(lines[0]?.[1]).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z INFO hello @ MyTag$/,
+    );
+    expect(lines[1]?.[1]).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z ERROR boom @ Crash$/,
+    );
+  });
+
+  test('a second drain of the same rows does not stream them twice', async () => {
+    const lines: string[] = [];
+    const adapter = withSink((_channel, line) => {
+      lines.push(line);
+    });
+    await adapter.console({});
+    await adapter.console({});
+    expect(lines).toHaveLength(2);
+  });
+
+  test('two drains of a tail larger than the overlap window stream each row once', async () => {
+    // The reviewed defect: the remembered window (2000 rows) was smaller than the
+    // drained tail (3000). The second read re-streamed the forgotten oldest rows
+    // and, re-inserting them as the window's newest entries, evicted the remembered
+    // newer rows before they were checked — the whole tail hit the sink twice.
+    // The covered span remembers the previous drain's rows as one span, so the
+    // identical re-drain streams nothing (nothing to outgrow, nothing to evict).
+    const lines: string[] = [];
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog: (_channel, line) => {
+        lines.push(line);
+      },
+    });
+    const row = (i: number): string => `${1546300800 + i}.000  1000  1001 I Tag: row ${i}`;
+    adb.setResponse(
+      'logcat -v epoch -t 3000',
+      `${Array.from({ length: 3000 }, (_, i) => row(i)).join('\n')}\n`,
+    );
+
+    await adapter.console({ limit: 3000 });
+    expect(lines).toHaveLength(3000);
+
+    // The same 3000 rows, re-drained: every one sits inside the previous span.
+    await adapter.console({ limit: 3000 });
+    expect(lines).toHaveLength(3000);
+    expect(new Set(lines).size).toBe(3000);
+  });
+
+  test('a wider drain bridging two nonoverlapping drains streams only the unseen gap', async () => {
+    // The reviewed defect: coverage was remembered as ONE key sequence, so two
+    // drains with an unseen middle concatenated into a "contiguous" span. The
+    // next wide drain matched neither that sequence nor a suffix at its head,
+    // and all 1000 already-captured rows hit the sink a second time. Disjoint
+    // spans keep the two drains separate, so the wide drain streams exactly the
+    // rows neither earlier drain saw — once.
+    const lines: string[] = [];
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog: (_channel, line) => {
+        lines.push(line);
+      },
+    });
+    const row = (i: number): string => `${1546300800 + i}.000  1000  1001 I Tag: row ${i}`;
+    const range = (from: number, count: number): string =>
+      `${Array.from({ length: count }, (_, i) => row(from + i)).join('\n')}\n`;
+
+    adb.setResponse('logcat -v epoch -t 500', range(0, 500));
+    await adapter.console({});
+    expect(lines).toHaveLength(500);
+
+    // The log slid 500 rows on: this drain shares nothing with the first one.
+    adb.setResponse('logcat -v epoch -t 500', range(1000, 500));
+    await adapter.console({});
+    expect(lines).toHaveLength(1000);
+
+    // A drain wide enough to hold both earlier spans AND the 500 rows between
+    // them: only that middle was ever missing from the trail.
+    adb.setResponse('logcat -v epoch -t 1500', range(0, 1500));
+    await adapter.console({ limit: 1500 });
+    expect(lines).toHaveLength(1500);
+    expect(new Set(lines).size).toBe(1500);
+    // The gap rows — and only they — arrived on the third drain.
+    expect(lines[1000]).toContain('row 500');
+    expect(lines[1499]).toContain('row 999');
+  });
+
+  test('repeated drains wider than the coverage cap stream each row once', async () => {
+    // The reviewed defect: the cap trimmed the remembered keys to the newest
+    // 4096 and FORGOT the trimmed rows' coverage, so a second identical drain
+    // re-appended the oldest 5000 − 4096 rows as unseen back-fill. Trimmed keys
+    // now stay covered as their span's `below` count, anchored by the span's
+    // first retained key — the repeated drains stream nothing.
+    const lines: string[] = [];
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog: (_channel, line) => {
+        lines.push(line);
+      },
+    });
+    const row = (i: number): string => `${1546300800 + i}.000  1000  1001 I Tag: row ${i}`;
+    const tail = `${Array.from({ length: 5000 }, (_, i) => row(i)).join('\n')}\n`;
+    adb.setResponse('logcat -v epoch -t 5000', tail);
+
+    await adapter.console({ limit: 5000 });
+    expect(lines).toHaveLength(5000);
+
+    // The identical drain again — wider than MAX_COVERED_KEYS, so the trimmed
+    // oldest keys must still be remembered as covered.
+    await adapter.console({ limit: 5000 });
+    expect(lines).toHaveLength(5000);
+    expect(new Set(lines).size).toBe(5000);
+
+    // And a third: the coverage state is stable under the cap.
+    await adapter.console({ limit: 5000 });
+    expect(lines).toHaveLength(5000);
+  });
+
+  test('a narrow drain strictly inside the covered span streams nothing', async () => {
+    // A drain that starts and ends INSIDE an already-covered stretch — neither
+    // edge at a span boundary — matches as a block of the span's keys: every
+    // row it holds was streamed by the wider drain before it, and the span's
+    // covered rows on both sides of it stay remembered.
+    const lines: string[] = [];
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog: (_channel, line) => {
+        lines.push(line);
+      },
+    });
+    const all = Array.from(
+      { length: 3000 },
+      (_, i) => `${1546300800 + i}.000  1000  1001 I Tag: row ${i}`,
+    );
+    const wide = 'logcat -v epoch -t 3000';
+    adb.setResponse(wide, `${all.join('\n')}\n`);
+    await adapter.console({ limit: 3000 });
+    expect(lines).toHaveLength(3000);
+
+    // Strictly interior re-read: rows 1000..1499 of the covered 0..2999.
+    adb.setResponse('logcat -v epoch -t 500', `${all.slice(1000, 1500).join('\n')}\n`);
+    await adapter.console({});
+    expect(lines).toHaveLength(3000);
+
+    // Wide again — the interior drain must not have shrunk the span's coverage.
+    adb.setResponse(wide, `${all.join('\n')}\n`);
+    await adapter.console({ limit: 3000 });
+    expect(lines).toHaveLength(3000);
+    expect(new Set(lines).size).toBe(3000);
+  });
+
+  test('a repeated drain holding byte-identical records does not re-stream the tail', async () => {
+    // The reviewed defect: the overlap cursor located the previous drain's LAST
+    // row with findIndex on its raw key — the FIRST occurrence. A drain ending
+    // on a byte-identical twin of an earlier record therefore located its own
+    // end one twin too early and re-streamed everything after the first twin.
+    // Matching the whole covered key sequence (twins included) finds the true
+    // end, so the repeat streams nothing.
+    const lines: string[] = [];
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog: (_channel, line) => {
+        lines.push(line);
+      },
+    });
+    // Records 2 and 4 are byte-identical (same epoch ms, pid, tid, priority,
+    // tag, text) — the tail ENDS on a twin of an earlier row.
+    const twin = '1546300800.500  1000  1001 I Tag: twin';
+    adb.setResponse(
+      'logcat -v epoch -t 500',
+      `1546300800.100  1000  1001 I Tag: a\n${twin}\n1546300800.700  1000  1001 I Tag: b\n${twin}\n`,
+    );
+
+    await adapter.console({});
+    expect(lines).toHaveLength(4);
+    // The two twins format to the same durable line; a, twin and b are distinct.
+    expect(new Set(lines).size).toBe(3);
+
+    // The identical drain again: every row — the second twin included — sits
+    // inside the covered sequence.
+    await adapter.console({});
+    expect(lines).toHaveLength(4);
+  });
+
+  test('a narrower drain between two wide ones does not shrink coverage (wide → narrow → wide)', async () => {
+    // The reviewed defect: the default 500-row drain overwrote the coverage
+    // start the 3000-row drain had recorded, so the next wide read treated the
+    // 2500 rows below the narrow cutoff as never-drained back-fill and appended
+    // them a second time. A narrower drain must only ever extend the remembered
+    // coverage, never shrink it.
+    const lines: string[] = [];
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog: (_channel, line) => {
+        lines.push(line);
+      },
+    });
+    const all = Array.from(
+      { length: 3000 },
+      (_, i) => `${1546300800 + i}.000  1000  1001 I Tag: row ${i}`,
+    );
+    const wide = 'logcat -v epoch -t 3000';
+    adb.setResponse(wide, `${all.join('\n')}\n`);
+    await adapter.console({ limit: 3000 });
+    expect(lines).toHaveLength(3000);
+
+    // The default (500-line) drain of the same, unchanged log sees only the
+    // newest 500 rows — coverage must stay at the wide drain's span.
+    adb.setResponse('logcat -v epoch -t 500', `${all.slice(2500).join('\n')}\n`);
+    await adapter.console({});
+    expect(lines).toHaveLength(3000);
+
+    // Wide again, same rows: everything is already covered.
+    adb.setResponse(wide, `${all.join('\n')}\n`);
+    await adapter.console({ limit: 3000 });
+    expect(lines).toHaveLength(3000);
+    expect(new Set(lines).size).toBe(3000);
+  });
+
+  test('a re-drain whose tail grew streams only the fresh rows', async () => {
+    const lines: string[] = [];
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog: (_channel, line) => {
+        lines.push(line);
+      },
+    });
+    const row = (n: string): string => `1546300800.000  1000  1001 I Tag: ${n}`;
+    adb.setResponse('logcat -v epoch -t 500', `${row('one')}\n${row('two')}\n${row('three')}\n`);
+    await adapter.console({});
+    expect(lines).toHaveLength(3);
+
+    // The tail grew: one/two rotated out, the drain now covers three..five —
+    // only four and five arrived since.
+    adb.setResponse('logcat -v epoch -t 500', `${row('three')}\n${row('four')}\n${row('five')}\n`);
+    await adapter.console({});
+    expect(lines).toHaveLength(5);
+    expect(lines[3]).toContain('four');
+    expect(lines[4]).toContain('five');
+  });
+
+  test('a wider drain back-fills rows the earlier tail never covered', async () => {
+    const lines: string[] = [];
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog: (_channel, line) => {
+        lines.push(line);
+      },
+    });
+    const row = (n: string): string => `1546300800.000  1000  1001 I Tag: ${n}`;
+    // First read: the default 500-line tail covers only the newest three rows.
+    adb.setResponse('logcat -v epoch -t 500', `${row('three')}\n${row('four')}\n${row('five')}\n`);
+    await adapter.console({});
+    expect(lines).toHaveLength(3);
+
+    // A wider read drains rows the earlier cutoff sat below: never drained, so
+    // they stream now — once — while the overlap with the first read stays silent.
+    const wider = ['one', 'two', 'three', 'four', 'five'].map(row).join('\n');
+    adb.setResponse('logcat -v epoch -t 3000', `${wider}\n`);
+    await adapter.console({ limit: 3000 });
+    expect(lines).toHaveLength(5);
+    // Stream order across drains: the first read's rows, then the back-filled ones.
+    expect(lines.slice(0, 3).join()).toContain('three');
+    expect(lines[3]).toContain('one');
+    expect(lines[4]).toContain('two');
+  });
+
+  test('rows identical after normalization stream as distinct occurrences', async () => {
+    // The reviewed defect: the dedup key used the NORMALIZED entry — timestamp
+    // rounded to whole milliseconds, `F` folded into `error`, PID/TID dropped —
+    // so three distinct logcat rows collapsed into one durable line. The key is
+    // now the raw record: full emitted precision plus PID, TID and raw priority.
+    const lines: string[] = [];
+    const adb = new FakeAdb();
+    const adapter = AndroidAdapter.create({
+      config: { adapter: 'android', headless: true, avd: 'test_avd' },
+      adb,
+      ui: new FakeUi(),
+      onLog: (_channel, line) => {
+        lines.push(line);
+      },
+    });
+    // Same tag/text and all three rounding to the same millisecond (…123): they
+    // differ only in sub-ms fraction, TID and PID.
+    adb.setResponse(
+      'logcat -v epoch -t 500',
+      '1546300800.1231  1000  1001 I Tag: dup\n' +
+        '1546300800.1234  1000  1002 I Tag: dup\n' +
+        '1546300800.1231  2000  1001 I Tag: dup\n',
+    );
+    const entries = await adapter.console({});
+    // The returned view still normalizes — all three stamp to the same ms —
+    expect(entries).toHaveLength(3);
+    expect(entries.every((entry) => entry.timestamp === 1546300800123)).toBe(true);
+    // …but the durable trail keeps every occurrence.
+    expect(lines).toHaveLength(3);
+  });
+
+  test('a throwing sink does not fail the read', async () => {
+    const quiet = spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const adapter = withSink(() => {
+        throw new Error('sink down');
+      });
+      const entries = await adapter.console({});
+      expect(entries).toHaveLength(2);
+      expect(entries[0]?.level).toBe('error');
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  test('filters and limit narrow the returned view, not the streamed trail', async () => {
+    const lines: string[] = [];
+    const adapter = withSink((_channel, line) => {
+      lines.push(line);
+    });
+    const entries = await adapter.console({ limit: 1, filters: { level_eq: 'error' } });
+    // Newest first: the error row is the newer one, and the only filter match.
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.level).toBe('error');
+    // Both rows still reached the durable trail.
+    expect(lines).toHaveLength(2);
   });
 });
 

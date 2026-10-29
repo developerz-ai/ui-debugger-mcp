@@ -88,6 +88,7 @@ text (plain text resolves) or \`role "name"\`. Avoid XPath and positional CSS.
 - \`observe({kind:"console", filters:{level_eq:"error"}})\` — just JS errors.
 - \`observe({kind:"network", filters:{status_gte:400}})\` — just failed requests.
 - \`limit\` caps rows when you need only the latest few.
+- Every row carries \`tab\` — the id of the tab it came from (see Tabs).
 
 Check both after actions that plausibly error (submits, navigations, API calls) —
 not mechanically after every \`act\`. Record what you find as \`console\`/\`network\`
@@ -125,13 +126,24 @@ on a node you can see → check for \`frame\`, and prefer clicking the node obje
 ### Tabs — a click can open one
 
 With more than one tab open, every \`act\` result carries \`tabs\`
-(\`index\`, \`url\`, \`title\`, \`active\`). A click on an external link, an OAuth button
+(\`index\`, \`id\`, \`url\`, \`title\`, \`active\`, \`visible\`). \`active\` means the controlled
+page; \`visible\` measures live document visibility, NOT OS-window focus. Attachment
+adopts a page without foregrounding it, so an active page can be hidden.
+A click on an external link, an OAuth button
 or \`target="_blank"\` opens a new tab and **you stay on the old one** — a click that
 seems to have done nothing means check \`tabs\` before calling the button broken.
 
 - \`observe({kind:"tabs"})\` — list them.
-- \`act({action:"switch_tab", target:"1"})\` — drive tab 1 from now on. Console and
-  network capture follow you; the previous tab's records are kept.
+- \`act({action:"switch_tab", target:"1"})\` — drive the tab at index 1 from now on
+  and explicitly bring it forward. Console and network capture follow you; the
+  previous tab's records are kept.
+
+\`index\` is a POSITION — it shifts when an earlier tab closes. \`id\` is the tab
+(\`tab-1\`, \`tab-2\`, …) and follows the PAGE for the whole run, so it survives the
+shift. A console or network row carries that same label as \`tab\`: a row with
+\`tab:"tab-2"\` came from the tab whose \`id\` is \`tab-2\`. To drive that tab, find
+its \`id\` in the CURRENT \`tabs\` listing and switch to that entry's \`index\` — the
+label is NOT an index, and \`switch_tab\` rejects it.
 
 Switch back the same way when the popup flow is done.
 `;

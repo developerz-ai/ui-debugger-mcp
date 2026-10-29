@@ -112,63 +112,119 @@ export function foldInstructionsIntoStep(
 /** What a pruned frame collapses to — tells the driver how to get a fresh one. */
 export const STALE_FRAME_NOTE = '[stale frame removed — call look again for a fresh screenshot]';
 
-/** Whether a tool-result part carries a self-look frame (`content` output with `file-data`). */
-function isLookFrame(part: unknown): boolean {
-  if (typeof part !== 'object' || part === null) return false;
-  const p = part as {
-    type?: string;
-    toolName?: string;
-    output?: { type?: string; value?: unknown };
-  };
-  return (
-    p.type === 'tool-result' &&
-    p.toolName === 'look' &&
-    p.output?.type === 'content' &&
-    Array.isArray(p.output.value) &&
-    p.output.value.some((v) => (v as { type?: string })?.type === 'file-data')
-  );
+/**
+ * A tool-result part that may carry a self-look frame, narrowed to what the
+ * prune reads: a `look` tool-result whose `content` output holds the frame.
+ */
+type FramePart = {
+  type?: string;
+  toolName?: string;
+  output?: { type?: string; value?: unknown };
+};
+
+/** Where one live self-look frame sits in the transcript. */
+type FrameSite = {
+  /** Index of the message holding the frame. */
+  messageIndex: number;
+  /** Index of the tool-result part inside that message's content. */
+  partIndex: number;
+  /** Index of the `file-data` value inside that part's output value array. */
+  valueIndex: number;
+};
+
+/** The content parts of a message as a plain array (empty for string content). */
+function partsOf(message: ModelMessage): unknown[] {
+  return Array.isArray(message.content) ? (message.content as unknown[]) : [];
 }
 
-/** Collapse every `file-data` part of a look tool-result to the stale-frame note. */
-function stripFrame(message: ModelMessage): ModelMessage {
-  if (!Array.isArray(message.content)) return message;
-  const content = message.content.map((part) => {
-    if (!isLookFrame(part)) return part;
-    const p = part as { output: { value: Array<{ type?: string }> } };
-    return {
-      ...part,
-      output: {
-        ...p.output,
-        value: p.output.value.map((v) =>
-          v?.type === 'file-data' ? { type: 'text' as const, text: STALE_FRAME_NOTE } : v,
-        ),
-      },
-    };
+/**
+ * Every self-look frame in the transcript, in transcript order (message →
+ * content part → output value).
+ *
+ * A frame is ONE `file-data` value part of a look tool-result. AI SDK 6 puts ALL
+ * of a step's tool results into ONE `tool`-role message, so a step that called
+ * `look` twice carries TWO frames inside a SINGLE message — counting messages
+ * instead of frames let both survive and stacked the driver's images.
+ */
+function findFrames(messages: ModelMessage[]): FrameSite[] {
+  const frames: FrameSite[] = [];
+  messages.forEach((message, messageIndex) => {
+    partsOf(message).forEach((part, partIndex) => {
+      // A content array may hold a null/undefined part — skip it instead of
+      // dereferencing it and killing the whole run inside `prepareStep`.
+      if (typeof part !== 'object' || part === null) return;
+      const p = part as FramePart;
+      if (p.type !== 'tool-result' || p.toolName !== 'look') return;
+      const output = p.output;
+      if (output?.type !== 'content') return;
+      const values = output.value;
+      if (!Array.isArray(values)) return;
+      (values as unknown[]).forEach((value, valueIndex) => {
+        if ((value as { type?: string } | null | undefined)?.type === 'file-data') {
+          frames.push({ messageIndex, partIndex, valueIndex });
+        }
+      });
+    });
   });
-  return { ...message, content } as ModelMessage;
+  return frames;
+}
+
+/** Collapse the stale frames of ONE tool-result part to the stale-frame note. */
+function collapseStaleFrames(part: unknown, staleValues: ReadonlySet<number>): unknown {
+  const p = part as FramePart;
+  const values = (p.output?.value ?? []) as unknown[];
+  return {
+    ...p,
+    output: {
+      ...p.output,
+      value: values.map((value, valueIndex) =>
+        staleValues.has(valueIndex) ? { type: 'text' as const, text: STALE_FRAME_NOTE } : value,
+      ),
+    },
+  };
 }
 
 /**
  * Keep only the NEWEST self-look frame in the transcript. The SDK re-sends every
  * tool result on every step, so each `look` image would otherwise ride along for
  * the rest of the run — N looks × M steps of image tokens. Rebuilt per step in
- * `prepareStep` (overrides never persist), like the instruction fold. Returns the
- * SAME array when there is at most one frame, preserving the no-change fast path.
+ * `prepareStep` (overrides never persist), like the instruction fold.
+ *
+ * Counts FRAMES, not messages: AI SDK 6 collects ALL of a step's tool results
+ * into ONE `tool`-role message, so a step that looked twice holds two frames in
+ * a single message. The newest frame (last in transcript order) stays live and
+ * every older one collapses to {@link STALE_FRAME_NOTE}; the rest of each
+ * tool-result (its own text, a sibling `act` result) is left exactly as it was.
+ * Returns the SAME array when the transcript holds at most ONE frame, keeping
+ * the no-change fast path.
  */
 export function pruneStaleFrames(messages: ModelMessage[]): ModelMessage[] {
-  const frameIndexes: number[] = [];
-  messages.forEach((message, index) => {
-    if (
-      message.role === 'tool' &&
-      Array.isArray(message.content) &&
-      message.content.some(isLookFrame)
-    ) {
-      frameIndexes.push(index);
+  const frames = findFrames(messages);
+  if (frames.length <= 1) return messages;
+  // Every frame but the LAST is stale — group them by the part they live in.
+  const staleByMessage = new Map<number, Map<number, Set<number>>>();
+  for (const frame of frames.slice(0, -1)) {
+    let parts = staleByMessage.get(frame.messageIndex);
+    if (!parts) {
+      parts = new Map<number, Set<number>>();
+      staleByMessage.set(frame.messageIndex, parts);
     }
+    let values = parts.get(frame.partIndex);
+    if (!values) {
+      values = new Set<number>();
+      parts.set(frame.partIndex, values);
+    }
+    values.add(frame.valueIndex);
+  }
+  return messages.map((message, messageIndex) => {
+    const staleParts = staleByMessage.get(messageIndex);
+    if (!staleParts) return message;
+    const content = partsOf(message).map((part, partIndex) => {
+      const staleValues = staleParts.get(partIndex);
+      return staleValues ? collapseStaleFrames(part, staleValues) : part;
+    });
+    return { ...message, content } as unknown as ModelMessage;
   });
-  if (frameIndexes.length <= 1) return messages;
-  const stale = new Set(frameIndexes.slice(0, -1));
-  return messages.map((message, index) => (stale.has(index) ? stripFrame(message) : message));
 }
 
 /** Steps left at or below which the driver is nudged to wrap up and `report`. */

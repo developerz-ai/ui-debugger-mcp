@@ -29,7 +29,8 @@ code, asks again. Loop until the UI works. No human clicking.
 - `../../sebyx07/claude-code-bible/docs` — deeper handbook. `?debug-ai=true` login bypass pattern.
 
 ## Architecture
-- `src/main.ts` — boot stdio MCP server.
+- `src/main.ts` — CLI entry (help/version/init/status/stop).
+- `src/boot.ts` — server boot: owner-lock gate → config → workspace → provider/models → stdio MCP server.
 - `src/mcp/` — MCP server, tool defs (few fat tools, NOT one-per-action).
 - `src/agent/` — debug agent (Vercel AI SDK loop). The **fast guy** (driver) +
   the **vision guy** (eyes via `look`). Models per role via OpenAI-compatible
@@ -53,8 +54,8 @@ code, asks again. Loop until the UI works. No human clicking.
 | Target  | Adapter        | Protocol            | Reads              |
 |---------|----------------|---------------------|--------------------|
 | web     | browser        | CDP                 | DOM                |
-| desktop | desktop        | X11/Xvfb; Wayland: wlroots capture (`grim`) only, no native input | a11y tree / vision |
-| mobile  | android        | ADB (uiautomator)   | view hierarchy / vision |
+| desktop | desktop        | X11/Xvfb; Wayland: wlroots capture (`grim`) only, no native input | a11y tree         |
+| mobile  | android        | ADB (uiautomator)   | view hierarchy     |
 
 Three adapters, one shared contract. Story names the target. iOS out of scope on Linux.
 
@@ -140,8 +141,26 @@ managed vs attach: `cdpUrl` (web) / `adbSerial` (android) → attach, never star
 `./tmp/ui-debugger-mcp/<project>/`
 - `chrome-user-data/` — persistent profile (login, cookies, storage).
 - `sessions/<id>/` — `story.md`, `screenshots/`, `findings.json`, `logs/`.
-- `logs/` — `console.log`, `network.log`, `agent.log`.
 - `state.json` — session keyed by cwd.
+
+The three log trails live in the SESSION, never at the project level:
+`sessions/<id>/logs/{console,network,agent}.log` — `console` is the browser/app
+console, `network` the request/response trail, `agent` the small agent's step
+trail. Path pinned by `sessionPaths().logs` (`src/session/workspace.ts:150`),
+written by `appendLog` (`src/session/findings-store.ts:157`).
+
+Which files exist depends on the run: `console`/`network` come from the run's
+capture sink — `CaptureSink` declared in `src/adapters/contract.ts` (re-exported
+by `src/adapters/browser/cdp.ts`), written by `createCaptureSink`
+(`src/services/session-builder.ts`) — threaded to the browser adapter (CDP
+console + network) AND to the android adapter (logcat rows,
+`src/adapters/factory.ts`). The web half is PUSH-based: the page's console
+streams as it happens. The android half is READ-driven —
+`AndroidAdapter.console()` streams the logcat rows it parses
+(`src/adapters/android/android-adapter.ts:553`) — so a mobile run writes
+`logs/console.log` only when the driver observes the console, and never writes
+`logs/network.log` (ADB has no network channel). A desktop run writes neither.
+`agent` is the agent sink (`src/services/session-builder.ts`).
 
 Session id **is** a local timestamp: `YYYY-MM-DD_HH-MM-SS-NNNN`
 (`2026-07-27_14-30-05-0001`). Fixed-width, so byte order == time order.
@@ -176,9 +195,11 @@ unresolvable field/submit, or a submit that left the run still on `path`
 (AuthError). NEVER a silently signed-out run — that reports every screen behind
 the login as an empty page.
 
-**Redaction.** `createSecretRedactor` (`browser/log-format.ts`) is bound per run to
-the persona's values and wraps every `logs/*.log` sink — plain, percent-encoded,
-`+`-for-space and JSON-escaped spellings. `describe` exposes names only.
+**Redaction.** `createSecretRedactor` (`src/redact.ts` — the neutral home, a
+sibling of `errors.ts`) is bound per run to the persona's values and wraps every
+`logs/*.log` sink — plain, percent-encoded, `+`-for-space and JSON-escaped
+spellings. Its signature is the named `Redactor` type, `(text: string) => string`,
+which every redactor parameter is annotated with. `describe` exposes names only.
 
 ## Target `notes` — preconditions, not a goal
 `targets.<t>.notes` (any adapter) = what is EXPECTED of this app: "needs seeded
@@ -190,6 +211,11 @@ one as a bug; a screen CONTRADICTING one still is a finding. Capped at
 `TARGET_NOTES_MAX_CHARS` (1000) — fails loud at config validation, never
 truncated. The section rides every step; that is what the cap is for. `describe`
 returns it verbatim.
+
+**Both consumers.** The same preconditions reach the SEPARATE vision model too —
+the provider behind `look` — so a configured expected state (an empty table) is
+not filed as a visual defect; a screen CONTRADICTING one is still reported.
+Self-look (control == vision) needs nothing: the driver carries them already.
 
 ## One run per cwd — never a wedged project
 A forgotten `end_session` must not need the out-of-band CLI to recover:
@@ -240,10 +266,20 @@ a public CLI subcommand (`main.ts` dispatches only init/status/stop).
 - Fail fast. Surface errors loud. No silent fallback.
 
 ## Adapter contract (the one real seam)
-One interface so the agent loop is adapter-blind:
-`open · find · click · type · readState · screenshot · waitFor · console · network`,
-plus optional `tabs · selectTab` (web only — the belt says "unsupported" elsewhere).
-Web → DOM. Desktop/mobile → a11y tree, fall back to vision/screenshots.
+One interface so the agent loop is adapter-blind (`src/adapters/contract.ts`):
+required — `selectorDialect · open · find · click · type · pressKey · scroll ·
+readState · screenshot · waitFor · console · network · close`;
+optional — `tabs · selectTab · takeUnrequestedLoads` (web only: the belt says
+"unsupported" for `tabs`/`switch_tab` off web, and skips the load queue
+silently). `selectorDialect` is a readonly PROPERTY (`'web' | 'native'`), never
+a method. `close()` stops a managed target; for attach it disconnects only.
+Web → DOM. Desktop/mobile → a11y tree / view hierarchy — there is
+no automatic vision/OCR fallback: the adapter never switches to pixels. The
+only vision is the agent-level `look` (the vision model on a captured frame).
+
+A custom-drawn surface (canvas, game, custom widget) exposes no a11y node, so
+the adapter finds nothing there; Chromium/Electron need
+`--force-renderer-accessibility`.
 
 **Web reads cross document boundaries.** `readState` extracts from every frame,
 translating child-frame bounds into page coordinates and tagging nodes with `frame`;

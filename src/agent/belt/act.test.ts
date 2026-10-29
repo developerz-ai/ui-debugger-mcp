@@ -50,6 +50,7 @@ function fakeAdapter(found: Node | null): {
     order: [],
   };
   const adapter: Adapter = {
+    selectorDialect: 'web',
     open: async (target) => {
       calls.open.push(target);
       calls.order.push('open');

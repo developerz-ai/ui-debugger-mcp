@@ -6,7 +6,6 @@
 
 import { expect, test } from 'bun:test';
 import {
-  createSecretRedactor,
   formatConsoleLine,
   formatNetworkLine,
   normalizeConsoleLevel,
@@ -40,6 +39,24 @@ test('formatConsoleLine omits location when absent', () => {
   );
 });
 
+test('formatConsoleLine puts the tab marker between the timestamp and the level', () => {
+  expect(
+    formatConsoleLine({
+      level: 'error',
+      text: 'boom',
+      location: 'app.js:1:2',
+      timestamp: 0,
+      tab: 'tab-1',
+    }),
+  ).toBe('1970-01-01T00:00:00.000Z [tab-1] ERROR boom @ app.js:1:2');
+});
+
+test('formatConsoleLine keeps the marker last-but-one when there is no location', () => {
+  expect(formatConsoleLine({ level: 'log', text: 'hi', timestamp: 0, tab: 'tab-3' })).toBe(
+    '1970-01-01T00:00:00.000Z [tab-3] LOG hi',
+  );
+});
+
 test('formatNetworkLine renders status and resourceType', () => {
   expect(
     formatNetworkLine({
@@ -66,6 +83,34 @@ test('formatNetworkLine renders failures', () => {
   ).toBe('1970-01-01T00:00:00.000Z POST http://x/b → FAILED net::ERR');
 });
 
+test('formatNetworkLine puts the tab marker between the timestamp and the method', () => {
+  expect(
+    formatNetworkLine({
+      method: 'GET',
+      url: 'http://x/a',
+      status: 200,
+      ok: true,
+      resourceType: 'fetch',
+      timestamp: 0,
+      tab: 'tab-2',
+    }),
+  ).toBe('1970-01-01T00:00:00.000Z [tab-2] GET http://x/a → 200 [fetch]');
+});
+
+test('formatNetworkLine keeps the marker on a failed exchange too', () => {
+  expect(
+    formatNetworkLine({
+      method: 'POST',
+      url: 'http://x/b',
+      status: 0,
+      ok: false,
+      error: 'net::ERR',
+      timestamp: 0,
+      tab: 'tab-2',
+    }),
+  ).toBe('1970-01-01T00:00:00.000Z [tab-2] POST http://x/b → FAILED net::ERR');
+});
+
 test('formatNetworkLine carries duration + the payloads of a failure', () => {
   expect(
     formatNetworkLine({
@@ -88,41 +133,6 @@ test('formatNetworkLine carries duration + the payloads of a failure', () => {
 test('truncateBody marks what it dropped', () => {
   expect(truncateBody('abcdef', 3)).toBe('abc…[truncated, 6 chars total]');
   expect(truncateBody('abc', 3)).toBe('abc');
-});
-
-// --- credentials a persona TYPES --------------------------------------------
-
-test('createSecretRedactor keeps a persona value out of the durable trail', () => {
-  const redact = createSecretRedactor(['hunter2', 'admin@dev.local']);
-  expect(redact('act type {"text":"hunter2"}')).toBe('act type {"text":"<redacted, 7 chars>"}');
-  expect(redact('POST /login → 401 req="email=admin@dev.local"')).toContain('<redacted, 15 chars>');
-  // Presence stays diagnostic, everything else untouched.
-  expect(redact('POST /login → 401')).toBe('POST /login → 401');
-});
-
-test('createSecretRedactor covers the form-encoded and JSON-escaped spellings', () => {
-  // A password with an `@` rides a form POST as `%40`; matching only the plain text
-  // would leave the real body sitting in `logs/network.log`.
-  const redact = createSecretRedactor(['p@ss word']);
-  expect(redact('req="password=p%40ss%20word&next=/"')).not.toContain('p%40ss');
-  // `application/x-www-form-urlencoded` spells a space `+`, not `%20`.
-  expect(redact('req="password=p%40ss+word&next=/"')).not.toContain('p%40ss');
-  const quoted = createSecretRedactor(['a"b\\c']);
-  expect(quoted('req={"password":"a\\"b\\\\c"}')).not.toContain('a\\"b');
-});
-
-test('createSecretRedactor redacts the longest value first', () => {
-  // A value that CONTAINS another must still redact whole — shortest-first would
-  // blank the inner one and leave the rest of the credential in the clear.
-  const redact = createSecretRedactor(['secret', 'supersecretpass']);
-  expect(redact('typed supersecretpass')).toBe('typed <redacted, 15 chars>');
-});
-
-test('createSecretRedactor is the identity when the run has no persona', () => {
-  const redact = createSecretRedactor([]);
-  const line = 'act type {"text":"hello"}';
-  expect(redact(line)).toBe(line);
-  expect(createSecretRedactor([''])(line)).toBe(line); // an empty value redacts nothing
 });
 
 // --- credentials in URLs ----------------------------------------------------

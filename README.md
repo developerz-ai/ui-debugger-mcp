@@ -45,7 +45,7 @@ Picture a **boss**, a **fast blind driver**, and a **describer with eyes**:
    │             │ ◀─────── get_findings │   ┌────────────┐     ┌────────────┐   │
    │ sets goals  │                       │   │  fast guy  │ look│ vision guy │   │
    │ fixes code  │                       │   │  (driver)  │────▶│  (eyes)    │   │
-   │ loops       │                       │   │ deepseek   │◀────│  glm 5v    │   │
+   │ loops       │                       │   │ deepseek   │◀────│  qwen3-vl  │   │
    └─────────────┘                       │   │ text·blind │ desc│ image      │   │
           ▲                              │   └─────┬──────┘     └────────────┘   │
           │ "works + looks nice"         │     observe / act (SQL-like)          │
@@ -65,7 +65,7 @@ Picture a **boss**, a **fast blind driver**, and a **describer with eyes**:
   click loop on structure (DOM / a11y tree / view hierarchy). Default: deepseek.
 - **vision guy** — the eyes. **Multimodal**. The driver calls `look` to ask
   *"does this look right? is the button centred?"* and gets a description back.
-  Default: glm. Spent only when visual judgment is needed.
+  Default: qwen. Spent only when visual judgment is needed.
 
 One goal: **the UI works *and* looks nice.** Full design in [`docs/idea/`](docs/idea/).
 
@@ -80,8 +80,15 @@ One project can expose several debug targets. A large app can have all three:
 | Target  | Protocol / how it's driven                       | Reads |
 |---------|--------------------------------------------------|-------|
 | web     | **CDP** (Chrome DevTools Protocol), headless by default | DOM |
-| desktop | **X11 / Wayland** input + AT-SPI                 | a11y tree / vision |
-| mobile  | **ADB** (uiautomator + screencap), Android, headless by default | view hierarchy / vision |
+| desktop | **X11 / Wayland** input + AT-SPI                 | a11y tree |
+| mobile  | **ADB** (uiautomator + screencap), Android, headless by default | view hierarchy |
+
+The desktop and android adapters read **structure only** — there is
+no automatic vision/OCR fallback: the adapter never switches to pixels. A
+custom-drawn surface (canvas, game, custom widget) exposes no nodes, so it is
+unreachable there; Chromium/Electron need `--force-renderer-accessibility`. The
+only vision is the agent-level `look` the driver calls when it needs a visual
+judgment.
 
 Three adapters, one shared contract. Each runs **managed** (server launches the
 target) or **attach** (connect to a running one via `cdpUrl` / `adbSerial`).
@@ -139,7 +146,7 @@ npx @developerz.ai/ui-debugger-mcp@latest init   # in your project root
 [`docs/idea/config.md`](docs/idea/config.md)):
 
 - creates the workspace dir `./tmp/ui-debugger-mcp/`
-- writes a starter config (default deepseek/glm models, a `web` target stub) if
+- writes a starter config (default deepseek/qwen models, a `web` target stub) if
   one doesn't already exist — at `.dz/ui-debugger/ui-debugger-mcp.json` when the
   repo already has a `.dz/` dir, else at the root `.ui-debugger-mcp.json`
 - adds `tmp/` to `.gitignore`
@@ -272,6 +279,9 @@ One fact per line, on any target (web, desktop, android). Unlike the per-run
 `goal`, `notes` is config: it is composed into the driver's prompt once, as its
 own *"Known about this app"* section — treat these as expected, never report one
 as a defect, and a screen that **contradicts** one is still worth reporting.
+The same preconditions also reach the separate vision model that judges
+screenshots, so a configured expected empty state stops being filed as a visual
+defect — and a screen that contradicts one is still worth reporting.
 Capped at 1000 characters, enforced when the config loads (the prompt carrying it
 is resent to the model on every step, so an essay here is paid for per step).
 
@@ -289,8 +299,8 @@ Every tool result carries **both** a pretty-printed text block and a typed
 `structuredContent` payload validated against a declared `outputSchema` — parse
 the structured half, don't scrape the text. Tools also declare MCP annotations
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) so clients
-can render/gate them correctly, and evidence paths (screenshots, `replay.mp4`,
-logs) ride as `resource_link` content items, not inline strings. Full shapes in
+can render/gate them correctly, and evidence paths (screenshots, `replay.mp4`)
+ride as `resource_link` content items, not inline strings. Full shapes in
 [`docs/reference.md`](docs/reference.md).
 
 Typical loop from a smart agent:
@@ -413,7 +423,7 @@ still land without it.
 - **Bun** + **TypeScript** (ships as npm, runs via `npx`/`bunx`)
 - **Vercel AI SDK** — the agent loop (fast driver + vision describer)
 - **Any OpenAI-compatible router** (OpenRouter default) — swap models per role.
-  Defaults: **deepseek** (text) drives, **glm** (image) sees.
+  Defaults: **deepseek** (text) drives, **qwen** (image) sees.
 - **CDP** for web, **X11/Wayland** for desktop, **ADB** for Android
 - stdio MCP transport
 

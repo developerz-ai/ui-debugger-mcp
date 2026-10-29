@@ -381,10 +381,22 @@ function staticBunImports(code: string): string[] {
 }
 
 /**
+ * A module the published bin never loads: the suites' own files (`*.test.ts`)
+ * and the fakes they share (`*.test-helpers.ts`).
+ *
+ * Both are TEST scaffolding — nothing the bin imports reaches them — so a
+ * Bun-only import in one of them is not what kills the installed copy. Every
+ * other module under `src/` ships, and every one of them has to load on Node.
+ */
+function isTestScaffolding(name: string): boolean {
+  return name.includes('.test.') || name.endsWith('.test-helpers.ts');
+}
+
+/**
  * The modules under `dir` that statically import a Bun-only specifier.
  *
  * Tests may use Bun freely — only shipped code has to be runtime-agnostic —
- * so the test files are skipped.
+ * so the test scaffolding is skipped.
  */
 function bunImportOffenders(dir: string): string[] {
   const offenders: string[] = [];
@@ -395,7 +407,7 @@ function bunImportOffenders(dir: string): string[] {
         walk(path);
         continue;
       }
-      if (!entry.name.endsWith('.ts') || entry.name.includes('.test.')) continue;
+      if (!entry.name.endsWith('.ts') || isTestScaffolding(entry.name)) continue;
       // Comments may name `bun:ffi` — the ban is on importing it, not on
       // explaining it.
       const code = readFileSync(path, 'utf8')
@@ -837,6 +849,22 @@ test('no shipped module statically imports a Bun-only specifier — the publishe
     expect(bunImportOffenders(dir)).toEqual(["offender.ts imports 'bun:ffi'"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+
+  // Mutation: the exemption is NARROW. A helper that is not test scaffolding
+  // is shipped code, and the walk must still catch it — only the suites' own
+  // files and the fakes they share are exempt.
+  const shipped = mkdtempSync(join(tmpdir(), 'bun-import-shipped-'));
+  try {
+    writeFileSync(join(shipped, 'helpers.ts'), "import { dlopen } from 'bun:ffi';\n");
+    expect(bunImportOffenders(shipped)).toEqual(["helpers.ts imports 'bun:ffi'"]);
+
+    // The shared fakes the suites import are test scaffolding — the bin never
+    // loads them, so they are exempt.
+    writeFileSync(join(shipped, 'x.test-helpers.ts'), "import { dlopen } from 'bun:ffi';\n");
+    expect(bunImportOffenders(shipped)).toEqual(["helpers.ts imports 'bun:ffi'"]);
+  } finally {
+    rmSync(shipped, { recursive: true, force: true });
   }
 
   // Mutation: a dynamic import is not fatal — it runs only where a runtime

@@ -39,18 +39,27 @@
  * reads or removes it. It cannot resurrect an owner — exclusion lives in the
  * kernel, not in file contents.
  *
- * `flock` comes from the kernel. Under Bun it is libc's, reached through Bun's
- * FFI; under Node there is no FFI, so the very same kernel lock is taken by
- * util-linux's `flock(1)`, applied to the descriptor this process already
- * holds. Either way it is ONE lock on ONE file: the kernel refuses every
- * other `flock` on it, and it dies with the descriptor. The server targets
- * Linux (see CLAUDE.md); the glibc and musl sonames and the macOS libc are
- * covered, and anything else fails loud at first use — a silent fallback here
- * would be two processes both believing they own the workspace.
+ * `flock` comes from the kernel, and the RUNTIME decides how this process
+ * reaches it. Under Bun it is libc's, through Bun's FFI; under Node there is
+ * no FFI, so the very same kernel lock is taken by util-linux's `flock(1)`,
+ * applied to the descriptor this process already holds. Either way it is ONE
+ * lock on ONE file: the kernel refuses every other `flock` on it, and it dies
+ * with the descriptor. The server targets Linux (see CLAUDE.md); the glibc and
+ * musl sonames and the macOS libc are covered, and anything else fails loud —
+ * a silent fallback here would be two processes both believing they own the
+ * workspace.
+ *
+ * The FFI access is DYNAMIC: the published bin runs on Node (`package.json` →
+ * `dist/main.js` behind `#!/usr/bin/env node`), where `bun:ffi` does not
+ * exist — a static import would crash the module on LOAD, before any probe
+ * could report why. The boot gate ({@link assertOwnerLockBackend}) resolves
+ * the backend BEFORE the server comes up: a host that cannot provide one can
+ * never enforce the one-run rule.
  */
 
 import { spawn } from 'node:child_process';
 import {
+  accessSync,
   closeSync,
   constants as fsConstants,
   ftruncateSync,
@@ -58,7 +67,7 @@ import {
   readFileSync,
   writeSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { z } from 'zod';
 import { SessionBusyError, WorkspaceError } from '../errors.js';
 import { ProcessIdentitySchema } from './process-identity.js';
@@ -119,60 +128,130 @@ export interface FlockBackend {
 }
 
 /** libc sonames carrying `flock`, in probe order (glibc, musl, macOS). */
-const LIBC_CANDIDATES = [
+export const LIBC_CANDIDATES = [
   'libc.so.6',
   'libc.musl-x86_64.so.1',
   'libc.musl-aarch64.so.1',
   'libc.dylib',
-];
+] as const;
 
-type FlockFn = (fd: number, operation: number) => number;
+/** `flock(2)` — the C function: (fd, operation) → 0 on success. */
+export type FlockFn = (fd: number, operation: number) => number;
 
 /**
- * `flock(2)` from libc, through Bun's FFI.
+ * Opens ONE libc soname and hands back its `flock` symbol.
  *
- * `bun:ffi` is a Bun-only module, and a STATIC import of it would make every
- * installed copy die on Node with ERR_UNSUPPORTED_ESM_URL_SCHEME before it
- * could print its own help — the published bin runs on the node floor
- * package.json declares. So the import is dynamic, and only the runtime check
- * in {@link loadBackend} ever reaches it.
+ * Throws when that soname cannot be opened or carries no `flock`. This is the
+ * seam the boot gate AND the acquire path are injected through — never a
+ * module mock, which would leak into the suites running alongside.
  */
-async function bunFlockBackend(): Promise<FlockBackend> {
-  let ffi: typeof import('bun:ffi');
+export type FlockOpener = (soname: string) => Promise<FlockFn>;
+
+/**
+ * The FFI module, loaded DYNAMICALLY.
+ *
+ * `bun:ffi` exists only under Bun, and the published bin runs on Node: a
+ * static import of it crashes the module on LOAD, before any probe can report
+ * why the backend is missing. A failed load is NOT cached — the next attempt
+ * retries, so a host that gains the backend (or a later boot in the same
+ * process) is not stuck with the first failure.
+ */
+let ffiModule: typeof import('bun:ffi') | undefined;
+
+async function loadFfi(): Promise<typeof import('bun:ffi')> {
+  if (ffiModule !== undefined) return ffiModule;
+  let loaded: typeof import('bun:ffi');
   try {
-    ffi = await import('bun:ffi');
+    loaded = await import('bun:ffi');
   } catch (error) {
+    // The runtime has no FFI backend AT ALL (Node): say so plainly. "flock is
+    // missing" would send an operator hunting for the wrong libc, when the
+    // backend that could have opened one was never there.
     throw new WorkspaceError(
-      `cannot load flock(2) for the workspace ownership lock: ${(error as Error).message}`,
+      `no FFI backend on this runtime — bun:ffi is unavailable: ${(error as Error).message}`,
     );
   }
+  ffiModule = loaded;
+  return loaded;
+}
 
+/**
+ * The default opener: the platform's libc, through Bun's FFI.
+ *
+ * Exported so a test can compose a failing opener with the REAL backend: a
+ * stub symbol cannot prove that a kernel lock was actually taken.
+ */
+export async function openFlockInLibc(soname: string): Promise<FlockFn> {
+  const ffi = await loadFfi();
+  const lib = ffi.dlopen(soname, {
+    flock: { args: [ffi.FFIType.int, ffi.FFIType.int], returns: ffi.FFIType.int },
+  });
+  return lib.symbols.flock as FlockFn;
+}
+
+/**
+ * Probe the libc candidates for `flock(2)`.
+ *
+ * Fails loud, naming the platform and EVERY soname tried with what each one
+ * said: an operator needs to know which libc was looked for, not just that
+ * "something went wrong".
+ */
+async function resolveFlock(opener: FlockOpener): Promise<FlockFn> {
   const misses: string[] = [];
   for (const name of LIBC_CANDIDATES) {
-    let flock: FlockFn;
     try {
-      const lib = ffi.dlopen(name, {
-        flock: { args: [ffi.FFIType.int, ffi.FFIType.int], returns: ffi.FFIType.int },
-      });
-      flock = lib.symbols.flock as FlockFn;
+      return await opener(name);
     } catch (error) {
+      // A house error is a BACKEND-level failure, not a soname-level miss: the
+      // FFI itself could not be loaded, so no libc was ever opened. Folding it
+      // into the misses would name sonames that were never tried and bury the
+      // one fact that matters ("this runtime has no FFI backend") — so it goes
+      // out unchanged.
+      if (error instanceof WorkspaceError) throw error;
       misses.push(`${name}: ${(error as Error).message}`);
       continue;
     }
-    return {
-      async tryLock(fd: number): Promise<boolean> {
-        return flock(fd, LOCK_EX | LOCK_NB) === 0;
-      },
-      release(fd: number): void {
-        flock(fd, LOCK_UN);
-        closeSync(fd);
-      },
-    };
   }
   throw new WorkspaceError(
     `cannot load flock(2) for the workspace ownership lock on ${process.platform} ` +
       `(tried ${LIBC_CANDIDATES.join(', ')}): ${misses.join('; ')}`,
   );
+}
+
+/**
+ * The backend over a RESOLVED `flock(2)` symbol.
+ *
+ * The symbol is the libc one, so the unlock is an explicit `LOCK_UN` — and
+ * the descriptor is closed even when that call fails, because closing alone
+ * releases the flock and a descriptor left open would keep the kernel lock
+ * alive with no registry entry to reach it by.
+ */
+function symbolBackend(flock: FlockFn): FlockBackend {
+  return {
+    async tryLock(fd: number): Promise<boolean> {
+      return flock(fd, LOCK_EX | LOCK_NB) === 0;
+    },
+    release(fd: number): void {
+      try {
+        flock(fd, LOCK_UN);
+      } finally {
+        closeSync(fd);
+      }
+    },
+  };
+}
+
+/**
+ * The Bun-side backend: libc's `flock(2)`, through Bun's FFI.
+ *
+ * `bun:ffi` is a Bun-only module, and a STATIC import of it would make every
+ * installed copy die on Node with ERR_UNSUPPORTED_ESM_URL_SCHEME before it
+ * could print its own help — the published bin runs on the node floor
+ * package.json declares. So the import is dynamic ({@link loadFfi}), and only
+ * the runtime check that picks this backend ever reaches it.
+ */
+async function bunFlockBackend(): Promise<FlockBackend> {
+  return symbolBackend(await resolveFlock(openFlockInLibc));
 }
 
 /** util-linux `flock(1)`'s exit code for "another process holds the lock". */
@@ -275,18 +354,84 @@ export async function nodeFlockBackend(bin = 'flock'): Promise<FlockBackend> {
 }
 
 /**
- * The backend for THIS runtime, resolved once.
+ * The backend for THIS runtime, resolved fresh.
  *
  * Bun reaches libc through its own FFI; Node has none, so the same kernel
  * lock comes from util-linux's `flock(1)`. The choice is the runtime's, made
- * once and cached — never a fallback: a platform with neither fails loud at
- * first use rather than pretending the workspace is free.
+ * once — never a fallback: a platform with neither fails loud at first use
+ * rather than pretending the workspace is free.
  */
+function createBackend(): Promise<FlockBackend> {
+  return 'bun' in process.versions ? bunFlockBackend() : nodeFlockBackend();
+}
+
+/** The resolved backend of THIS runtime, cached once it is known to work. */
 let backend: Promise<FlockBackend> | undefined;
 
 function loadBackend(): Promise<FlockBackend> {
-  backend ??= 'bun' in process.versions ? bunFlockBackend() : nodeFlockBackend();
+  backend ??= createBackend().catch((error: unknown) => {
+    // A failed resolution is not a verdict: the next attempt retries instead
+    // of replaying a dead one.
+    backend = undefined;
+    throw error;
+  });
   return backend;
+}
+
+/**
+ * The gate's Node-side check: util-linux's `flock(1)` must be reachable.
+ *
+ * The Node backend reaches the kernel through that binary, so a host without
+ * it can never enforce the one-run rule — the same hole the libc probe closes
+ * on Bun. Nothing is locked and no file is touched: this only asks whether
+ * the binary is there.
+ */
+function assertFlockCli(bin = 'flock'): void {
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (dir === '') continue;
+    try {
+      accessSync(join(dir, bin), fsConstants.X_OK);
+      return;
+    } catch {
+      // not this directory — keep looking
+    }
+  }
+  throw new WorkspaceError(
+    `cannot take the workspace ownership lock on ${process.platform}: ` +
+      `${bin}(1) is not on PATH — the workspace lock needs util-linux's flock`,
+  );
+}
+
+/**
+ * The BOOT GATE: resolve this host's `flock(2)` WITHOUT taking a lock.
+ *
+ * The workspace's one-run rule rests on a kernel-held lock. A host that cannot
+ * provide that backend can never enforce it — two servers would each believe
+ * they own the workspace — so the server refuses to come up instead. This
+ * runs BEFORE the workspace exists, before a config is read and before the MCP
+ * server starts.
+ *
+ * It RESOLVES the backend and nothing more: no file is opened, no `flock` is
+ * called, `<workspace>/owner.lock` is never created, and the acquire path's
+ * module cache is never written — an injected opener must not leak into the
+ * real one. A failed resolution is not cached either: the next attempt
+ * retries. A backend that failed outright (no FFI on this runtime) is
+ * reported as it is — never as a hunt through sonames it never opened.
+ *
+ * @param opener the libc seam to resolve through — the real one by default,
+ *   injectable so a failed resolution is testable. An injected opener probes
+ *   the libc candidates; without one, THIS runtime's own backend is resolved.
+ */
+export async function assertOwnerLockBackend(opener?: FlockOpener): Promise<void> {
+  if (opener !== undefined) {
+    await resolveFlock(opener);
+    return;
+  }
+  if ('bun' in process.versions) {
+    await bunFlockBackend(); // resolves libc's `flock(2)` — takes no lock
+    return;
+  }
+  assertFlockCli(); // Node has no FFI: util-linux's `flock(1)` is the backend
 }
 
 /**
@@ -339,12 +484,20 @@ const BUSY_RETRY_MS = 5;
  * An existing claim held by this same process (same pid + start ticks) is
  * re-entrant and reports `created: false`; any fresh take — an empty workspace
  * or one whose previous holder died — reports `created: true`.
+ *
+ * @param opener the backend to resolve `flock(2)` through — the real one by
+ *   default, injectable so a failed resolution is testable. An injected
+ *   opener resolves fresh on every call and never enters the module cache.
  */
 export async function acquireOwnerLock(
   lockPath: string,
   owner: OwnerLock,
+  opener?: FlockOpener,
 ): Promise<{ acquired: true; created: boolean } | { acquired: false; holder: OwnerLock }> {
-  const flock = await loadBackend();
+  // An INJECTED opener resolves fresh every time and never enters the module
+  // cache: a test's stub can never become the workspace's real lock backend.
+  const flock =
+    opener !== undefined ? symbolBackend(await resolveFlock(opener)) : await loadBackend();
   const held = holds.get(lockPath);
   if (held !== undefined && sameOwner(held.owner, owner)) {
     return { acquired: true, created: false }; // re-entrant: this process already owns it
@@ -391,6 +544,12 @@ export async function acquireOwnerLock(
 }
 
 /**
+ * The `flock(LOCK_UN)` on the held fd — injectable so a failing unlock is
+ * testable (the same seam doctrine as `emptyBoard`).
+ */
+export type UnlockFn = (fd: number) => void | Promise<void>;
+
+/**
  * Release the claim only when this process still holds it.
  *
  * Returns `false` when this process holds nothing here (or a different owner
@@ -407,11 +566,17 @@ export async function acquireOwnerLock(
  *   to truncating the file to nothing) — the same seam doctrine as `makeExec`'s
  *   `now`: a failure injected through the parameter never leaks into other
  *   test files the way a module mock does.
+ * @param unlock the `flock(LOCK_UN)` call, injectable for tests. Its failure
+ *   must not keep the fd open: closing it alone releases the flock, and a fd
+ *   left open would keep the kernel lock alive with no registry entry to
+ *   reach it by. Without an injected unlock, the backend that took the lock
+ *   gives it back — and disposes of the descriptor with it.
  */
 export async function releaseOwnerLock(
   lockPath: string,
   owner: OwnerLock,
   emptyBoard: (fd: number) => void = (fd) => ftruncateSync(fd, 0),
+  unlock?: UnlockFn,
 ): Promise<boolean> {
   const held = holds.get(lockPath);
   if (held === undefined || !sameOwner(held.owner, owner)) return false;
@@ -419,9 +584,20 @@ export async function releaseOwnerLock(
   try {
     emptyBoard(held.fd); // the board names no owner once we are out
   } finally {
-    // The backend that took the lock gives it back — and disposes of the
-    // descriptor, which alone releases the flock even after a failed write.
-    held.flock.release(held.fd);
+    if (unlock !== undefined) {
+      try {
+        await unlock(held.fd);
+      } finally {
+        // The fd closes even when the unlock fails: closing alone releases the
+        // flock, and a fd left open would keep the kernel lock alive with no
+        // registry entry to reach it by.
+        closeSync(held.fd);
+      }
+    } else {
+      // The backend that took the lock gives it back — and disposes of the
+      // descriptor, which alone releases the flock even after a failed write.
+      held.flock.release(held.fd);
+    }
   }
   return true;
 }

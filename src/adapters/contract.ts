@@ -5,8 +5,13 @@
  * same small interface, so the debug agent's loop is **adapter-blind**: the
  * inner tool belt (`observe`/`act`/`look`) hits these methods and never learns
  * which protocol is underneath. Web reads the DOM, desktop the a11y tree, mobile
- * the view hierarchy — but all three normalize to the {@link Node} shape below,
- * falling back to vision (screenshot + coordinates) when no tree exists.
+ * the view hierarchy — all three normalize to the {@link Node} shape below, and
+ * each adapter exposes exactly ONE structured tree (DOM / AT-SPI / uiautomator).
+ * There is no automatic vision/OCR fallback in this contract, and the adapter
+ * never switches to pixels: a read yields tree nodes or nothing. `screenshot`
+ * only captures a frame — for evidence, and for the agent-level `look` belt
+ * call, the one path by which pixels reach a model. `look` describes and judges
+ * a frame; it never yields elements an adapter could find, click or type into.
  *
  * Reads are **SQL-like**, not RPC: a handful of verbs with composable params
  * (`query`/`fields`/`filters`/`limit`/`within`) — see {@link Query}. The belt's
@@ -166,6 +171,15 @@ export interface ConsoleEntry {
   location?: string;
   /** Capture time, ms since epoch. */
   timestamp: number;
+  /**
+   * Stable label of the tab that produced the row (`tab-1`, `tab-2`, …).
+   *
+   * The label follows the PAGE for the whole run: it survives a tab switch and
+   * a closing tab shifting the positional indices, so the index a driver passes
+   * to `switch_tab` never has to name a tab. Absent on targets that have no
+   * tabs (desktop, mobile).
+   */
+  tab?: string;
 }
 
 /** One network exchange captured from the target (CDP responses + failures). */
@@ -211,7 +225,26 @@ export interface NetworkEntry {
    * (and from there, logs, findings, and the caller's transcript).
    */
   responseHeaders?: Record<string, string>;
+  /**
+   * Stable label of the tab that produced the exchange (`tab-1`, `tab-2`, …).
+   *
+   * Stamped when the response FIRED, not when its log line is written: the line
+   * lands only after the body/header await resolves, and by then the driver may
+   * have switched tabs. Same rationale as {@link ConsoleEntry.tab}.
+   */
+  tab?: string;
 }
+
+/**
+ * Where captured console/network lines are streamed — the seam between an
+ * adapter's capture and the run's durable log trail.
+ *
+ * Declared HERE, in the contract, because two adapters stream to it (the browser's
+ * CDP capture and the android logcat drain): a second declaration would be a second
+ * type identity for the same seam. `browser/cdp.ts` re-exports it, so every reader
+ * of the capture channel keeps its import path.
+ */
+export type CaptureSink = (channel: 'console' | 'network', line: string) => void;
 
 /** One open tab/window of a multi-tab target (web). */
 export interface TabInfo {
@@ -227,15 +260,58 @@ export interface TabInfo {
   url: string;
   /** Document title, empty while a fresh tab is still loading. */
   title: string;
-  /** Whether this is the tab the adapter currently drives. */
+  /**
+   * Stable label of this tab (`tab-1`, `tab-2`, …) — the same marker the
+   * console/network rows carry, so a `[tab-2]` line in the durable log resolves
+   * to the tab that produced it. The label follows the PAGE, so it stays valid
+   * after an earlier tab closes and the indices shift. Absent when the target
+   * has no tab registry.
+   */
+  id?: string;
+  /** Whether this is the tab the adapter currently drives, independent of visibility. */
   active: boolean;
+  /** Live document.visibilityState === 'visible', when measured; not OS-window focus. */
+  visible?: boolean;
 }
+
+/**
+ * Which selector grammar a target's `find({query})` parses — and therefore which
+ * grammar the belt must EMIT, since the driver copies a node's `target` verbatim
+ * into `act`.
+ *
+ *  - `web` — Playwright engines (`data-testid="…"`, `role=button[name="…" i]`,
+ *    `text=…`, `>> nth=N`), normalized by `adapters/browser/query.ts`.
+ *  - `native` — the desktop (AT-SPI) and android (uiautomator) parsers, which take
+ *    exactly two shapes and NOTHING else: `role "name"`, or a bare substring. The
+ *    substring matches the node's name on desktop, and the node's name OR its
+ *    `resource-id` on android — so a bare `resource-id` (android's `testid`)
+ *    resolves there too. An engine-prefixed web selector degrades to a literal
+ *    substring, matches nothing, and `act` throws `no element matched …`.
+ *
+ * DECLARED per adapter ({@link Adapter.selectorDialect}) — never inferred from
+ * the optional `tabs` capability, which says nothing about the grammar a target
+ * parses.
+ */
+export type SelectorDialect = 'web' | 'native';
 
 /**
  * One contract, three protocols. The agent loop calls only these methods; each
  * adapter wires them to its real backend (CDP / X11-Wayland / ADB).
  */
 export interface Adapter {
+  /**
+   * The selector grammar this adapter's `find`/`click`/`type` parse — DECLARED,
+   * never inferred.
+   *
+   * The belt emits every tree node's `target` in this dialect and the driver
+   * copies it verbatim, so a target in the wrong dialect makes every click and
+   * type fail. It used to be inferred from {@link Adapter.tabs}, which is a
+   * CAPABILITY, not a dialect marker: a target that grows a tab listing must not
+   * silently switch the grammar the belt hands the driver. A missing or unknown
+   * declaration now fails loud rather than falling back to `web`.
+   */
+  readonly selectorDialect: SelectorDialect;
+
   /**
    * Go to the app: navigate to a URL (web) · launch/focus the window (desktop) · start the activity (android).
    *
@@ -292,6 +368,9 @@ export interface Adapter {
    * List the target's open tabs, newest last. OPTIONAL — implemented by targets
    * that have a tab concept (web); absent elsewhere, and the belt says so rather
    * than pretending a single-window target has one tab.
+   *
+   * A CAPABILITY, not a dialect marker: it says nothing about
+   * {@link Adapter.selectorDialect}, which every adapter declares on its own.
    */
   tabs?(): Promise<TabInfo[]>;
 

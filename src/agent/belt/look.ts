@@ -24,6 +24,7 @@ import { generateText, tool } from 'ai';
 import { z } from 'zod';
 import type { Adapter } from '../../adapters/contract.js';
 import { AgentError, VisionUnavailableError } from '../../errors.js';
+import { VISUAL_SEVERITIES } from '../../findings/schema.js';
 import type { ActTrail } from './trail.js';
 
 /** `look` input — both optional: ask a `question`, and/or state the `expect`ed look. */
@@ -40,14 +41,11 @@ export const LookInputSchema = z.object({
 
 export type LookInput = z.infer<typeof LookInputSchema>;
 
-/** Severity of a visual issue — mirrors the findings `VisualIssue` scale. */
-const SEVERITIES = ['low', 'medium', 'high'] as const;
-
 /** One visual issue the vision guy flags: what, where, and how bad. */
 const LookIssueSchema = z.object({
   what: z.string().describe('the visual problem, e.g. "text is cut off"'),
   where: z.string().describe('where on screen, e.g. "top-right card header"'),
-  severity: z.enum(SEVERITIES).describe('low (polish) | medium (off) | high (broken)'),
+  severity: z.enum(VISUAL_SEVERITIES).describe('low (polish) | medium (off) | high (broken)'),
 });
 
 export type LookIssue = z.infer<typeof LookIssueSchema>;
@@ -107,7 +105,7 @@ Reply with ONLY this JSON object — no prose, no markdown fences:
   "description": "what you see, answering the question if one was asked",
   "matches": true,            // ONLY when an expected look was given: does it match?
   "issues": [                 // [] when there are none
-    { "what": "the problem", "where": "where on screen", "severity": "low" | "medium" | "high" }
+    { "what": "the problem", "where": "where on screen", "severity": ${VISUAL_SEVERITIES.map((s) => `"${s}"`).join(' | ')} }
   ]
 }
 
@@ -138,6 +136,36 @@ where a screenshot is a guess. Small text off pixels is what you are worst at �
 say you are unsure rather than guess a value.
 
 Output the JSON object and nothing else.`;
+
+/**
+ * The run's target preconditions, as the SEPARATE vision model must read them.
+ *
+ * Mirrors the driver's own section (`agent/prompts/compose.ts`): these are what
+ * the project says is EXPECTED of this app, so an expected empty state is not a
+ * visual defect — while a screen CONTRADICTING one still is. It is a posture,
+ * not a filter: nothing is dropped here, the vision guy is TOLD.
+ */
+const VISION_NOTES_SECTION = `\
+## Known about this app
+
+Stated by the project, not observed by you. Treat each as TRUE and EXPECTED.
+Expected conditions (including empty states) are not issues; never put one in
+\`issues\`. Screens that contradict these preconditions remain reportable.
+`;
+
+/**
+ * The vision guy's system prompt for this run: the base prompt, plus the run's
+ * preconditions when the target declares any.
+ *
+ * With no notes the base prompt stands ALONE — so it never mentions
+ * preconditions the run does not have: an empty state is a defect until the
+ * project says otherwise.
+ */
+function composeVisionSystem(notes: readonly string[] | undefined): string {
+  if (!notes || notes.length === 0) return VISION_SYSTEM_PROMPT;
+  const list = notes.map((note) => `- ${note}`).join('\n');
+  return `${VISION_SYSTEM_PROMPT}\n\n${VISION_NOTES_SECTION}\n${list}`;
+}
 
 /** Compose the driver's question + expectation into the vision guy's user prompt. */
 function buildPrompt({ question, expect }: LookInput): string {
@@ -272,10 +300,11 @@ export async function runLook(
   recorder: EvidenceRecorder,
   input: LookInput,
   abortSignal?: AbortSignal,
+  notes?: readonly string[],
 ): Promise<LookResult> {
   const frame = await captureForVision(adapter);
   const { text } = await generate({
-    system: VISION_SYSTEM_PROMPT,
+    system: composeVisionSystem(notes),
     messages: [
       {
         role: 'user',
@@ -304,12 +333,13 @@ export function createLookExecute(
   adapter: Adapter,
   generate: VisionGenerate,
   recorder: EvidenceRecorder,
+  notes?: readonly string[],
 ) {
   let unavailable: VisionUnavailableError | undefined;
   return async (input: LookInput, abortSignal?: AbortSignal): Promise<LookResult> => {
     if (unavailable) throw unavailable;
     try {
-      return await runLook(adapter, generate, recorder, input, abortSignal);
+      return await runLook(adapter, generate, recorder, input, abortSignal, notes);
     } catch (e) {
       if (e instanceof VisionUnavailableError) unavailable = e;
       throw e;
@@ -394,6 +424,7 @@ export function createLookTool(
   vision: LanguageModel,
   recorder: EvidenceRecorder,
   trail?: ActTrail,
+  notes?: readonly string[],
 ) {
   const modelId = typeof vision === 'string' ? vision : vision.modelId;
   // Forward the abort signal into the vision call: on end_session / wall-clock
@@ -411,7 +442,7 @@ export function createLookTool(
       throw e;
     }
   };
-  const execute = createLookExecute(adapter, generate, recorder);
+  const execute = createLookExecute(adapter, generate, recorder, notes);
   return tool({
     description:
       'Ask the vision model to look at the current screen. Captures a screenshot and sends it with your question/expect to the multimodal "eyes", which judges how it looks (layout, alignment, colour, overlap, cut-off text). Returns { description, matches?, issues[] } with the screenshot saved as evidence. Use only when structure (observe) cannot answer — vision is slow and costly.',
