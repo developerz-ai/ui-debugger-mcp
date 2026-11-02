@@ -19,7 +19,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "sass": "^1.83.0",
+    "sass": "^1.105.2",
     "stylelint": "^16.21.0",
     "stylelint-config-standard-scss": "^14.0.0",
     "typescript": "^7.0.2",
