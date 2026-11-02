@@ -894,7 +894,10 @@ test('withToolLog logs the input on call and returns the original output unchang
   });
 
   const wrapped = withToolLog('observe', t, (line) => lines.push(line));
-  const out = await wrapped.execute?.({ kind: 'tree' }, { toolCallId: 'c1', messages: [] });
+  const out = await wrapped.execute?.(
+    { kind: 'tree' },
+    { toolCallId: 'c1', messages: [], context: {} },
+  );
 
   expect(out).toEqual({ echoed: 'tree' });
   expect(lines).toEqual(['observe {"kind":"tree"}']);
@@ -913,7 +916,7 @@ test('withToolLog logs an ERROR line and rethrows when execute throws', async ()
 
   const wrapped = withToolLog('act', t, (line) => lines.push(line));
   await expect(
-    wrapped.execute?.({ action: 'click' }, { toolCallId: 'c1', messages: [] }),
+    wrapped.execute?.({ action: 'click' }, { toolCallId: 'c1', messages: [], context: {} }),
   ).rejects.toThrow(boom);
 
   expect(lines).toEqual(['act {"action":"click"}', 'act ERROR selector not found']);
