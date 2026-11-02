@@ -289,6 +289,27 @@ test('composeSystemPrompt: both eye modes share the rest of the prompt', () => {
   }
 });
 
+// Each check is independent: generic overlap severity cannot satisfy the checklist.
+for (const target of ['web', 'desktop', 'android'] as const) {
+  for (const selfLook of [false, true] as const) {
+    for (const inspection of [
+      'Inspect text overlapping neighboring elements.',
+      'Inspect borders striking through text.',
+      'On table-heavy pages, inspect table-column boundaries for text crossing into adjacent columns.',
+    ]) {
+      test(`composeSystemPrompt: ${target}, selfLook=${selfLook}: ${inspection}`, () => {
+        const prompt = composeSystemPrompt({ target, story: 'Test.', selfLook });
+        const checklist =
+          prompt.split('### Visual inspection checklist')[1]?.split('\n## ')[0] ?? '';
+        expect(checklist).toContain(inspection);
+        expect(checklist).toContain('Use `look` for these checks');
+        expect(checklist).toContain('screenshot path');
+        expect(checklist).toContain('uncertain or unverified');
+      });
+    }
+  }
+}
+
 // --- the budget section — what an unreported run actually costs ---------------
 
 // A step-capped run keeps the evidence the driver streamed along the way

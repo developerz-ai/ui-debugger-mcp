@@ -17,7 +17,13 @@
 
 import { z } from 'zod';
 import { FINDINGS_STATUSES } from '../../findings/schema.js';
-import type { Ack, DescribeResult, StartResult } from '../../services/debug-service.js';
+import type {
+  Ack,
+  DescribeResult,
+  RunInfo,
+  StartResult,
+  TargetInfo,
+} from '../../services/debug-service.js';
 
 /** `start_debug` output — the id every later call is keyed by. */
 export const StartResultSchema = z.object({
@@ -66,7 +72,7 @@ const TargetInfoSchema = z.object({
         'empty tables are expected"). Composed into the driver\'s prompt, so it treats these ' +
         'as expected rather than reporting them as defects.',
     ),
-});
+}) satisfies z.ZodType<TargetInfo>;
 
 /** The run this server holds for the project — how a caller that lost its session id gets back in. */
 const RunInfoSchema = z.object({
@@ -78,7 +84,7 @@ const RunInfoSchema = z.object({
     .enum(FINDINGS_STATUSES)
     .describe('running, or the verdict it settled on (still readable, still holding the project).'),
   goal: z.string().describe('The goal this run was started with.'),
-});
+}) satisfies z.ZodType<RunInfo>;
 
 /** `describe` output — the target catalog plus the resolved models + workspace. */
 export const DescribeResultSchema = z.object({

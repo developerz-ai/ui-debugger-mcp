@@ -6,7 +6,8 @@
  *     profile; we OWN start/stop. `executablePath` picks the binary, else system
  *     Chrome (`channel`) — `playwright-core` ships no bundled browser.
  *   - **attach**: connect to an already-running browser over CDP (`cdpUrl`) and
- *     NEVER start/stop it — `close()` only disconnects.
+ *     NEVER start/stop it — `close()` returns the adopted tab to its pre-run
+ *     URL (best-effort) and then disconnects.
  *
  * Split out of `browser-adapter.ts` (500-LOC cap): this module only ASSEMBLES the
  * raw {@link AdapterHandles}; the adapter class alone turns them into a

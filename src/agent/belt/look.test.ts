@@ -85,6 +85,25 @@ const cleanReply = JSON.stringify({
   issues: [{ what: 'low contrast label', where: 'primary button', severity: 'low' }],
 });
 
+const visualInspectionRequirements = [
+  'Inspect text overlapping neighboring elements.',
+  'Inspect borders striking through text.',
+  'On table-heavy pages, inspect column boundaries for text crossing into adjacent columns.',
+] as const;
+
+for (const requirement of visualInspectionRequirements) {
+  test(`vision prompt requires: ${requirement}`, () => {
+    expect(VISION_SYSTEM_PROMPT).toContain(requirement);
+  });
+}
+
+test('vision inspection stays screenshot-only and leaves uncertain defects out of issues', () => {
+  expect(VISION_SYSTEM_PROMPT).toContain('## Report only what is ON this screenshot');
+  expect(VISION_SYSTEM_PROMPT).toContain('One viewport, not the whole page.');
+  expect(VISION_SYSTEM_PROMPT).toContain('Unsure whether it is a defect or the design?');
+  expect(VISION_SYSTEM_PROMPT).toContain('leave it\n  out of `issues`');
+});
+
 test('captures the frame and sends it to the vision model with the question', async () => {
   const adapter = fakeAdapter(PNG);
   const { generate, seen } = fakeVision(cleanReply);
@@ -118,7 +137,7 @@ for (const [label, notes] of [
     const look = createLookTool(fakeAdapter(PNG), model, fakeRecorder().recorder, undefined, notes);
     await look.execute?.(
       { question: 'How does it look?', expect: 'a readable table' },
-      { toolCallId: 'boundary', messages: [] },
+      { toolCallId: 'boundary', messages: [], context: {} },
     );
     const prompt = model.doGenerateCalls[0]?.prompt;
     const hasNotes = notes !== undefined && notes.length > 0;
@@ -126,6 +145,17 @@ for (const [label, notes] of [
       role: 'system',
       content: hasNotes ? expect.stringContaining('## Known about this app') : VISION_SYSTEM_PROMPT,
     });
+    // [bot] Fake bytes and canned replies prove prompt transport, not visual detection.
+    const systemMessage = prompt?.[0];
+    expect(systemMessage?.role).toBe('system');
+    const systemText = systemMessage?.role === 'system' ? systemMessage.content : '';
+    for (const requirement of visualInspectionRequirements) {
+      expect(systemText).toContain(requirement);
+    }
+    expect(systemText).toContain('## Report only what is ON this screenshot');
+    expect(systemText).toContain('One viewport, not the whole page.');
+    expect(systemText).toContain('Unsure whether it is a defect or the design?');
+    expect(systemText).toContain('leave it\n  out of `issues`');
     if (hasNotes) {
       const system = JSON.stringify(prompt?.[0]);
       for (const note of notes) expect(system).toContain(note);
@@ -195,13 +225,15 @@ for (const contradictory of [false, true]) {
       ]);
       // `look.execute` may stream, so its result is a union — narrow it to the
       // one shape this tool returns (same cast as the abort-signal test below).
-      const result = (await look.execute?.({}, { toolCallId: 'look', messages: [] })) as
-        | LookResult
-        | undefined;
+      const result = (await look.execute?.(
+        {},
+        { toolCallId: 'look', messages: [], context: {} },
+      )) as LookResult | undefined;
       const report = createReportTool(store, () => trail.settled());
       await report.execute?.(ReportInputSchema.parse({ status: 'passed' }), {
         toolCallId: 'report',
         messages: [],
+        context: {},
       });
       const findings = await store.readFindings();
       expect(findings.visual).toEqual(
@@ -394,7 +426,7 @@ test('createLookTool threads the tool abort signal into the vision generateText 
   const controller = new AbortController();
   const result = await look.execute?.(
     { question: 'q' },
-    { toolCallId: 't1', messages: [], abortSignal: controller.signal },
+    { toolCallId: 't1', messages: [], abortSignal: controller.signal, context: {} },
   );
   // Without the signal a stalled vision provider would block session teardown.
   expect(seenSignals).toEqual([controller.signal]);
@@ -542,7 +574,7 @@ test('createSelfLookTool returns the frame itself and maps it to multimodal tool
   const selfLook = createSelfLookTool(adapter, recorder);
   const output = (await selfLook.execute?.(
     { question: 'is the button centred?' },
-    { toolCallId: 't1', messages: [] },
+    { toolCallId: 't1', messages: [], context: {} },
   )) as {
     screenshot: string;
     bytes: number;
@@ -576,7 +608,7 @@ async function callLook(
   look: ReturnType<typeof createLookTool>,
   input: { question?: string } = { question: 'q' },
 ): Promise<unknown> {
-  return look.execute?.(input, { toolCallId: 't1', messages: [] });
+  return look.execute?.(input, { toolCallId: 't1', messages: [], context: {} });
 }
 
 test('a look whose vision reply flags issues records each as a VisualIssue with the saved screenshot', async () => {

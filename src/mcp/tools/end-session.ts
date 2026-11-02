@@ -2,7 +2,9 @@
  * `end_session` — stop and tear down the active run.
  *
  * Aborts the loop, closes the target adapter (managed: stops Chrome; attach:
- * disconnects only), and frees the project's profile lock. Thin handler:
+ * disconnects only — web attach first returns its adopted tab to its pre-run
+ * URL, best-effort: skipped when the run never moved the tab and a failed
+ * navigation is swallowed), and frees the project's profile lock. Thin handler:
  * Zod-validate, call {@link DebugApi.end}, ack.
  */
 
@@ -23,8 +25,10 @@ export function endSessionTool(service: DebugApi): McpTool {
           title: 'End the debug run',
           description:
             'Close the active run: abort the loop, release the target (managed Chrome is stopped; an ' +
-            'attached browser is only disconnected), and free the project lock so a new start_debug can ' +
-            'run. The last get_findings snapshot remains on disk.',
+            'attached browser is only disconnected — web attach first returns its adopted tab to its ' +
+            'pre-run URL, best-effort: skipped when the run never moved the tab and a failed navigation ' +
+            'is swallowed), and free the project lock so a new start_debug can run. The last ' +
+            'get_findings snapshot remains on disk.',
           annotations: {
             idempotentHint: true,
           },

@@ -245,19 +245,36 @@ Rules:
 
 ## Resolution order
 
-1. message from the smart agent (overrides per session)
-2. project file — `.dz/ui-debugger/ui-debugger-mcp.json` first, falling back to
+Implemented layers — resolved ONCE, when the server boots (`config/load.ts`):
+
+1. project file — `.dz/ui-debugger/ui-debugger-mcp.json` first, falling back to
    the root `.ui-debugger-mcp.json` (legacy). Both present → `.dz/` wins, with a
    one-line notice naming the ignored root file; a bad `.dz/` copy errors without
    reading root.
-3. env (`OPENAI_API_KEY` or `OPENROUTER_API_KEY` — the first wins when both are
+2. env (`OPENAI_API_KEY` or `OPENROUTER_API_KEY` — the first wins when both are
    set — plus `OPENAI_BASE_URL`)
-4. built-in defaults — managed + headless web, OpenRouter base url, and:
+3. built-in defaults — managed + headless web, OpenRouter base url, and:
    - `driver` → `deepseek/deepseek-v4-flash` (text)
    - `vision` → `qwen/qwen3-vl-32b-instruct` (image)
    - `summary` → `deepseek/deepseek-v4-flash` (text)
 
+The layers govern disjoint fields, so no two of them compete for one key: the
+project file owns models / workspace / targets, env owns only provider
+credentials (the file has no provider section), the built-ins fill the rest.
+
 All Zod-validated. Bad config fails fast and loud.
+
+### Proposed, not shipped
+
+- **Per-session config overrides.** A smart-agent message overriding config per
+  session is a proposal; nothing reads one. `start_debug` takes no model,
+  target or workspace override. The single per-run override that ships is
+  `start_debug({ url })` for web targets — it replaces the target's configured
+  url for THAT run only; a tool argument, not a config layer.
+- **Per-call reloading.** Config is never re-read: a file edited after boot does
+  not take effect in the running server. The next `start_debug` refuses to start
+  on stale wiring and names the restart that picks the edit up
+  (`config/fingerprint.ts`).
 
 ## Why split
 

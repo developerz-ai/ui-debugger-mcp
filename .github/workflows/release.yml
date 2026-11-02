@@ -30,11 +30,11 @@ jobs:
       # Pin the checkout to the ref the event fired on, so the tree that is
       # validated below is provably the tree `npm publish` publishes from
       # (an unpinned checkout floats to whatever the runner resolves).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.ref }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org

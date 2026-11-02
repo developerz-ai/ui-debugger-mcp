@@ -64,6 +64,10 @@ function fakePage(opts: FakePageOpts = {}) {
   return {
     on: () => undefined,
     off: () => undefined,
+    // The constructor snapshots this when attaching (restore-at-teardown); the
+    // value never changes here, so every attach close() below skips the restore
+    // goto — the assertions in this file are unaffected by the snapshot itself.
+    url: () => 'about:blank',
     viewportSize: () => opts.viewport ?? { width: 1280, height: 720 },
     evaluate: async () => opts.evaluate?.() ?? { width: 1280, height: 720 },
     frames: () => [main, ...(opts.extraFrames ?? [])],

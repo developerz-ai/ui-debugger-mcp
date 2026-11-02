@@ -272,7 +272,8 @@ readState · screenshot · waitFor · console · network · close`;
 optional — `tabs · selectTab · takeUnrequestedLoads` (web only: the belt says
 "unsupported" for `tabs`/`switch_tab` off web, and skips the load queue
 silently). `selectorDialect` is a readonly PROPERTY (`'web' | 'native'`), never
-a method. `close()` stops a managed target; for attach it disconnects only.
+a method. `close()` stops a managed target; for attach it disconnects only —
+web attach first returns the adopted tab to its pre-run URL (best-effort).
 Web → DOM. Desktop/mobile → a11y tree / view hierarchy — there is
 no automatic vision/OCR fallback: the adapter never switches to pixels. The
 only vision is the agent-level `look` (the vision model on a captured frame).

@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=https://developerz.ai/schemas/maintainer.v1.json
+# developerz.ai maintainer policy: developerz-ai/ui-debugger-mcp
+#
+# AI-maintained since 2026-09-11, authorized by the repo owner. Only the values below are pinned;
+# everything else rides the schema defaults. What stands behind a merge is this repo's own CI and
+# ruleset, not this file: read them before trusting a sentence here about them.
+version: 1
+
+pr:
+  auto_merge: true
+  # An outside contributor's pull request and a member's wait for a member.
+  auto_merge_scope: own_and_dependency_bots
+  # The two bots that review code here. Dependabot opens update PRs but reviews nothing.
+  wait_for_other_bots: [coderabbit, copilot]
+
+handoff:
+  # The bot scopes a qualified issue and hands it to the fleet without asking the reporter first.
+  mode: fleet
+  ask_reporter_first: false
+
+review:
+  # Native review on, beside CodeRabbit (`force` beats an active incumbent). Advisory: it comments,
+  # never requests changes and never approves, so green CI and the ruleset stay the gate.
+  enabled: true
+  force: true
+  request_changes: false
+  approval: false
+
+release:
+  # release.yml owns the release lane (`on: release: published` -> npm + MCP registry), so there is
+  # no release manager and no channel for the agent to publish on.
+  manager: "none"
+  channels: []
