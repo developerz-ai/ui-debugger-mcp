@@ -492,6 +492,7 @@ test('createReportTool awaits an async trail read before it writes the verdict',
     {
       toolCallId: 't1',
       messages: [],
+      context: {},
     },
   )) as ReportResult;
   expect(result.counts.steps).toBe(1);
