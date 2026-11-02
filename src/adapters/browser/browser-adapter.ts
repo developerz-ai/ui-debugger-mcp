@@ -411,7 +411,7 @@ export class BrowserAdapter implements Adapter {
       if (offset === null) continue;
       let found: RawNode[];
       try {
-        found = await frame.locator(selector).evaluateAll<RawNode[]>(NODE_EXTRACTOR);
+        found = await frame.locator(selector).evaluateAll<RawNode[], void>(NODE_EXTRACTOR);
       } catch (error) {
         // Only a vanished frame is skippable — a bad selector must fail loud.
         if (isFrameGone(error, frame.isDetached())) continue;
