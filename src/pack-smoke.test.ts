@@ -687,7 +687,7 @@ test('the pack-smoke job pins setup-node to the floor the manifest declares', ()
 
   // Mutation: the job runs the smoke on the dev node instead of the floor.
   expect(
-    pinsNodeFloor(mutateJob(workflowText, 'node-version: "20"', 'node-version: "24"'), FLOOR),
+    pinsNodeFloor(mutateJob(workflowText, 'node-version: "22"', 'node-version: "24"'), FLOOR),
   ).toBe(false);
   // Mutation: setup-node is dropped from the job.
   expect(

@@ -146,12 +146,12 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      # The floor from package.json engines.node (">=20"). bin/smoke-packed
+      # The floor from package.json engines.node (">=22"). bin/smoke-packed
       # installs the tarball with npm_config_engine_strict=true, so a package
       # that needs a newer node fails here, by name.
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: install
         run: bun install --frozen-lockfile
