@@ -155,7 +155,15 @@ test('end_session forgets a timed-out run (acks once, then the id is unknown)', 
   const { build, log } = fakeBuilder({ run: partialRun });
   const svc = makeService(build, { defaultTimeoutMs: 20 });
   const { session_id } = await svc.start({ target: 'web', goal: 'x' });
-  await tick(60);
+  // The timer releases the active slot before async findings persistence and
+  // adapter teardown finish. Test the retained-run ack only after both settle.
+  const deadline = Date.now() + 2_000;
+  while ((manager.has(CWD) || manager.closingId(CWD) !== undefined) && Date.now() < deadline) {
+    await tick(10);
+  }
+  expect(manager.has(CWD)).toBe(false);
+  expect(manager.closingId(CWD)).toBeUndefined();
+  expect(log.adapters[0]?.closeCalls).toBe(1);
 
   expect(await svc.end({ session_id })).toEqual({ ok: true, session_id });
   expect(log.adapters[0]?.closeCalls).toBe(1); // already closed by the auto-end; not re-closed

@@ -201,6 +201,15 @@ beats a long one padded with noise.
 - \`medium\` — misalignment, bad spacing, contrast issue.
 - \`low\` — polish (rounding, colour shade, icon size).
 
+### Visual inspection checklist
+
+Use \`look\` for these checks (ask it explicitly in separate-eye mode):
+- Inspect text overlapping neighboring elements.
+- Inspect borders striking through text.
+- On table-heavy pages, inspect table-column boundaries for text crossing into adjacent columns.
+Report only what the screenshot supports, with the affected area and screenshot path.
+If unclear or not inspected, say uncertain or unverified — never claim it passed.
+
 ## Verdict
 
 With \`criteria\`: \`status:"passed"\` only when ALL pass; any failure → \`"failed"\`.
