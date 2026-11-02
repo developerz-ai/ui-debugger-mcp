@@ -396,7 +396,7 @@ test('createLookTool threads the tool abort signal into the vision generateText 
   const controller = new AbortController();
   const result = await look.execute?.(
     { question: 'q' },
-    { toolCallId: 't1', messages: [], context: {}, abortSignal: controller.signal },
+    { toolCallId: 't1', messages: [], abortSignal: controller.signal, context: {} },
   );
   // Without the signal a stalled vision provider would block session teardown.
   expect(seenSignals).toEqual([controller.signal]);

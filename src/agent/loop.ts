@@ -86,9 +86,13 @@ export interface FinishedStep {
  * into `standing` — the run-long list of caller instructions — then, while any
  * exist, appends ONE user message rebuilt from the whole list.
  *
- * Rebuilt on EVERY step, not just the drain step. The caller removes the previous
- * generated block before folding: AI SDK 7 persists `prepareStep` overrides.
- * Returns `{}` when no instructions exist.
+ * Rebuilt on EVERY step, not just the drain step: an instruction injected once
+ * must reach the driver on every later step too. AI SDK 7 persists the previous
+ * step's `prepareStep` override into the running transcript
+ * (`messagesForNextStep = [...stepMessages, ...stepResponseMessages]`), so the
+ * caller strips last step's fold/nudge first ({@link stripInjectedStepMessages})
+ * and this re-appends exactly one fresh block — never accumulation. Returns
+ * `{}` when no instructions exist.
  */
 export function foldInstructionsIntoStep(
   inbox: LoopInbox,
@@ -104,6 +108,41 @@ export function foldInstructionsIntoStep(
       .join('\n')}\nFold these in, then continue.`,
   };
   return { messages: [...messages, injected] };
+}
+
+/** The exact prefixes of every user message `prepareStep` itself injects. */
+const INJECTED_PREFIXES = [
+  'Mid-run instructions from the caller',
+  'Step budget almost spent',
+  'This is your final step',
+] as const;
+
+/**
+ * True for the fold/nudge messages `prepareStep` appends — and ONLY those: the
+ * content must be a plain string starting with one of the exact prefixes above,
+ * so a driver-authored message that merely mentions them never matches.
+ */
+function isInjectedStepMessage(message: ModelMessage): boolean {
+  const { content } = message;
+  if (message.role !== 'user' || typeof content !== 'string') return false;
+  return INJECTED_PREFIXES.some((prefix) => content.startsWith(prefix));
+}
+
+/**
+ * Drop the fold/nudge messages a PREVIOUS step's `prepareStep` injected.
+ *
+ * AI SDK 7 persists the override into the running transcript
+ * (`messagesForNextStep = [...stepMessages, ...stepResponseMessages]` in
+ * `generateText`); AI SDK 6 rebuilt each step's prompt from response messages
+ * alone and discarded it. Without stripping, the re-appended instruction fold
+ * duplicates one copy per step, and a stale earlier nudge precedes the fresh
+ * one (breaking fold-before-nudge ordering). Stripping first restores exactly
+ * the AI SDK 6 chain this loop was written against, so the rebuilt override is
+ * correct whether the SDK persists it or not.
+ */
+export function stripInjectedStepMessages(messages: ModelMessage[]): ModelMessage[] {
+  if (!messages.some(isInjectedStepMessage)) return messages;
+  return messages.filter((message) => !isInjectedStepMessage(message));
 }
 
 /** What a pruned frame collapses to — tells the driver how to get a fresh one. */
@@ -185,7 +224,7 @@ function collapseStaleFrames(part: unknown, staleValues: ReadonlySet<number>): u
  * Keep only the NEWEST self-look frame in the transcript. The SDK re-sends every
  * tool result on every step, so each `look` image would otherwise ride along for
  * the rest of the run — N looks × M steps of image tokens. Rebuilt per step in
- * `prepareStep` (overrides never persist), like the instruction fold.
+ * `prepareStep`, over the stripped chain (see {@link stripInjectedStepMessages}).
  *
  * Counts FRAMES, not messages: AI SDK 6 collects ALL of a step's tool results
  * into ONE `tool`-role message, so a step that looked twice holds two frames in
@@ -394,9 +433,9 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
   } = options;
   let stepIndex = 0;
   // Run-long list of mid-run caller instructions: drained from the inbox once,
-  // re-folded into EVERY step's prompt after removing the previous generated messages.
+  // re-folded into EVERY step's prompt (AI SDK 7 persists the previous override;
+  // `stripInjectedStepMessages` drops it before the re-fold).
   const standing: string[] = [];
-  let generated = new Set<string>();
   // What the running flush has already persisted. The trail's arrays only grow,
   // so growth past these lengths is exactly "this step surfaced something new".
   let flushed: TrailEvidence = EMPTY_EVIDENCE;
@@ -416,25 +455,18 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
       ({ steps }) => steps.at(-1)?.toolResults.some((r) => r.toolName === 'report') ?? false,
     ],
     prepareStep: ({ messages, stepNumber }) => {
-      // SDK 7 retains overrides. Replace only our exact generated user messages,
-      // keeping the kickoff, caller transcript and tool results intact.
-      const clean = messages.filter(
-        (message) =>
-          message.role !== 'user' ||
-          typeof message.content !== 'string' ||
-          !generated.has(message.content),
-      );
-      const pruned = pruneStaleFrames(clean);
+      // AI SDK 7 persists the previous step's override into `messages` — strip
+      // its fold/nudge so both rebuild fresh: the fold never duplicates, the
+      // nudge reflects THIS step's remaining budget.
+      const stripped = stripInjectedStepMessages(messages);
+      // Self-look frame hygiene first: only the newest screenshot stays live.
+      const pruned = pruneStaleFrames(stripped);
       const withInbox = foldInstructionsIntoStep(inbox, standing, pruned);
       const base = 'messages' in withInbox ? withInbox.messages : pruned;
       const nudge = budgetNudge(stepNumber, maxSteps);
-      const next: ModelMessage[] = nudge ? [...base, { role: 'user', content: nudge }] : base;
-      generated = new Set(
-        next
-          .slice(pruned.length)
-          .flatMap((message) => (typeof message.content === 'string' ? [message.content] : [])),
-      );
-      return { messages: next };
+      if (nudge) return { messages: [...base, { role: 'user', content: nudge }] };
+      if (base === stripped) return {};
+      return { messages: base };
     },
     onStepFinish: async (step) => {
       stepIndex += 1;
