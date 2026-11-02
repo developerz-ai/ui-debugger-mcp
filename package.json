@@ -41,7 +41,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "ai": "^6.0.214",
+    "ai": "^7.0.143",
     "@openrouter/ai-sdk-provider": "^2.10.0",
     "zod": "^4.4.3",
     "playwright-core": "^1.61.1"
