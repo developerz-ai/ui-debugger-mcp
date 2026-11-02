@@ -55,7 +55,7 @@ jobs:
       # launch needs (run 34583721201). v2 lets the first run save a complete
       # set; the prefix restore-key still falls back to v1.
       - name: cache Playwright Chromium
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-v2-${{ hashFiles('bun.lock') }}
