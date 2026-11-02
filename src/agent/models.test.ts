@@ -1,14 +1,52 @@
 import { expect, test } from 'bun:test';
-import type { LanguageModelV3 } from '@openrouter/ai-sdk-provider';
-import type { LanguageModel } from 'ai';
+import type { LanguageModelV4 } from '@openrouter/ai-sdk-provider';
+import { generateText, type LanguageModel } from 'ai';
 import { DEFAULT_MODELS } from '../config/load.js';
 import { resolveModels } from './models.js';
 import { createOpenRouterProvider } from './provider.js';
 
 const provider = createOpenRouterProvider({ apiKey: 'test-key' });
 
+test('resolved OpenRouter models generate text through the installed AI SDK', async () => {
+  const requestedModels: string[] = [];
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      const body = (await request.json()) as { model: string };
+      requestedModels.push(body.model);
+      return Response.json({
+        id: 'test-completion',
+        object: 'chat.completion',
+        created: 0,
+        model: body.model,
+        choices: [
+          { index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+    },
+  });
+  try {
+    const models = resolveModels(
+      createOpenRouterProvider({ apiKey: 'test-key', baseURL: `${server.url}api/v1` }),
+    );
+    for (const model of [models.driver, models.vision, models.summary]) {
+      const result = await generateText({ model, prompt: 'Reply OK', maxRetries: 0 });
+      expect(result.text).toBe('OK');
+    }
+    expect(requestedModels).toEqual([
+      DEFAULT_MODELS.driver,
+      DEFAULT_MODELS.vision,
+      DEFAULT_MODELS.summary,
+    ]);
+  } finally {
+    await server.stop(true);
+  }
+});
+
 /** Read the bound model id off a resolved role model. */
-const modelId = (m: LanguageModel): string => (m as LanguageModelV3).modelId;
+const modelId = (m: LanguageModel): string => (m as LanguageModelV4).modelId;
 
 test('resolveModels: falls back to per-role defaults when config omits roles', () => {
   const models = resolveModels(provider);

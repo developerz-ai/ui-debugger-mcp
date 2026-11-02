@@ -27,7 +27,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "dev": "bun --watch src/main.ts",
@@ -41,10 +41,10 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@openrouter/ai-sdk-provider": "^3.1.0",
     "ai": "^7.0.143",
-    "@openrouter/ai-sdk-provider": "^2.10.0",
-    "zod": "^4.4.3",
-    "playwright-core": "^1.61.1"
+    "playwright-core": "^1.61.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.15",
