@@ -28,8 +28,8 @@ pr:
   # while doing nothing.
   auto_merge: true
 
-  # Wait on the two bots that review code here. Dependabot is dropped: this
-  # repo has no .github/dependabot.yml, so dependabot never runs on it —
+  # Wait on the two bots that review code here. Dependabot is dropped: it
+  # opens update PRs here (.github/dependabot.yml) but reviews nothing —
   # waiting on it would hold a green merge open for a reviewer that is not
   # coming.
   wait_for_other_bots: [coderabbit, copilot]
