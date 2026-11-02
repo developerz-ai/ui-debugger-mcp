@@ -99,6 +99,10 @@ You get a screenshot plus a question and/or an expected look. Describe what you
 see and judge how it LOOKS: layout, alignment, spacing, colour, overlap, cut-off
 or unreadable text.
 
+Inspect text overlapping neighboring elements.
+Inspect borders striking through text.
+On table-heavy pages, inspect column boundaries for text crossing into adjacent columns.
+
 Reply with ONLY this JSON object — no prose, no markdown fences:
 
 {
