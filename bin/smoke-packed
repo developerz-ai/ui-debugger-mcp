@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# Smoke the DISTRIBUTABLE, not the checkout.
+#
+# The repo's suite runs the SOURCE under bun; nothing proved that the copy a
+# user installs from npm works on the node floor the manifest declares. This
+# script packs the package with npm, checks the tarball carries the manifest's
+# bin and exports targets, installs the tarball into an empty directory and
+# runs the INSTALLED CLI with node.
+#
+# Everything below runs against the packed copy: never bun, never src/, never
+# the repo's own dist/.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+fail() {
+  echo "::error::$*" >&2
+  exit 1
+}
+
+command -v npm >/dev/null 2>&1 || fail "npm is not on PATH — the packed artifact is installed with npm"
+command -v node >/dev/null 2>&1 || fail "node is not on PATH — the installed CLI runs on node"
+
+PACKAGE_JSON=$(cat package.json)
+
+# The manifest decides what the tarball must carry: the bin target, the
+# exports target and the manifest itself. Reading them from package.json keeps
+# the check honest — a path hardcoded here would keep passing after the
+# package moved its entry point.
+manifest=$(node -e '
+  const pkg = JSON.parse(process.argv[1]);
+  const out = ["name=" + pkg.name, "version=" + pkg.version];
+  const bin = pkg.bin ?? {};
+  const binTargets = typeof bin === "string" ? [bin] : Object.values(bin);
+  for (const target of binTargets) {
+    if (typeof target === "string") out.push("bin=" + target);
+  }
+  for (const value of Object.values(pkg.exports ?? {})) {
+    const targets = typeof value === "string" ? [value] : Object.values(value);
+    for (const target of targets) {
+      if (typeof target === "string") out.push("exports=" + target);
+    }
+  }
+  console.log(out.join("\n"));
+' "$PACKAGE_JSON")
+
+pkg_name=$(printf '%s\n' "$manifest" | sed -n 's/^name=//p')
+pkg_version=$(printf '%s\n' "$manifest" | sed -n 's/^version=//p')
+bin_targets=$(printf '%s\n' "$manifest" | sed -n 's/^bin=//p')
+export_targets=$(printf '%s\n' "$manifest" | sed -n 's/^exports=//p')
+
+[ -n "$pkg_name" ] || fail "package.json has no name"
+[ -n "$pkg_version" ] || fail "package.json has no version"
+[ -n "$bin_targets" ] || fail "package.json has no bin target — the smoke check runs the published CLI"
+
+# One entry point: the CLI the tarball ships.
+bin_count=$(printf '%s\n' "$bin_targets" | grep -c . || true)
+if [ "$bin_count" -ne 1 ]; then
+  fail "expected exactly one bin target in package.json, found $bin_count"
+fi
+bin_target=$(printf '%s\n' "$bin_targets" | sed -n '1p')
+
+PACK_DIR=$(mktemp -d)
+INSTALL_DIR=$(mktemp -d)
+trap 'rm -rf "$PACK_DIR" "$INSTALL_DIR"' EXIT
+
+echo "==> npm pack"
+if ! pack_output=$(npm pack --pack-destination "$PACK_DIR"); then
+  fail "npm pack failed — the package does not pack"
+fi
+
+# npm names the tarball it wrote; fall back to the destination listing so a
+# quieter npm still leaves the script a file to work with.
+tarball=""
+if [ -n "$pack_output" ]; then
+  candidate="$PACK_DIR/$(printf '%s\n' "$pack_output" | tail -n 1)"
+  if [ -f "$candidate" ]; then
+    tarball="$candidate"
+  fi
+fi
+if [ -z "$tarball" ]; then
+  shopt -s nullglob
+  packed=("$PACK_DIR"/*.tgz)
+  shopt -u nullglob
+  if [ "${#packed[@]}" -ne 1 ]; then
+    fail "expected one packed tarball in $PACK_DIR, found ${#packed[@]}"
+  fi
+  tarball="${packed[0]}"
+fi
+tarball_name=$(basename "$tarball")
+
+echo "==> check what $tarball_name carries"
+# npm packs the package under package/ — the manifest's targets, prefixed.
+required=$(printf '%s\n%s\n' "$bin_targets" "$export_targets" | sed '/^$/d; s|^\./||; s|^|package/|')
+required=$(printf '%s\n%s\n' "$required" "package/package.json" | sed '/^$/d')
+if ! entries=$(tar -tzf "$tarball" 2>&1); then
+  printf '%s\n' "$entries" >&2
+  fail "cannot read the packed tarball $tarball_name"
+fi
+missing=""
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  if ! printf '%s\n' "$entries" | grep -qxF "$entry"; then
+    missing="$missing $entry"
+  fi
+done <<< "$required"
+if [ -n "$missing" ]; then
+  fail "$tarball_name is missing:$missing"
+fi
+
+echo "==> npm install into an empty directory"
+# engine-strict makes the floor bite: the installed package (and every
+# dependency) must run on this node, or the install fails naming what.
+if ! install_log=$(cd "$INSTALL_DIR" && npm_config_engine_strict=true npm install "$tarball" --no-save --no-package-lock --no-audit --no-fund --ignore-scripts 2>&1); then
+  printf '%s\n' "$install_log" >&2
+  fail "npm install of $tarball_name failed under npm_config_engine_strict=true"
+fi
+printf '%s\n' "$install_log"
+
+installed_main="$INSTALL_DIR/node_modules/$pkg_name/${bin_target#./}"
+if [ ! -f "$installed_main" ]; then
+  fail "the installed package has no $bin_target at node_modules/$pkg_name"
+fi
+
+echo "==> run the installed CLI"
+if ! help_output=$(node "$installed_main" --help 2>&1); then
+  printf '%s\n' "$help_output" >&2
+  fail "the installed CLI exited non-zero on --help"
+fi
+if [ -z "$help_output" ]; then
+  fail "the installed CLI printed nothing on --help"
+fi
+
+if ! version_output=$(node "$installed_main" --version 2>&1); then
+  printf '%s\n' "$version_output" >&2
+  fail "the installed CLI exited non-zero on --version"
+fi
+version_line=$(printf '%s\n' "$version_output" | tail -n 1)
+case "$version_line" in
+  *v"$pkg_version" | "$pkg_version") ;;
+  *) fail "the installed CLI reported '$version_line', expected version $pkg_version" ;;
+esac
+
+echo "==> packed artifact OK: $tarball_name ($pkg_name@$pkg_version)"
