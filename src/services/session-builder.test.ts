@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
@@ -137,35 +137,77 @@ test('buildSession writes story.md with goal, criteria, and target', async () =>
   expect(content).toContain('settings dialog is visible');
 });
 
-/**
- * Budget for the two `story.md` address tests.
- *
- * They assert on file CONTENT, not on speed, but building a web target
- * constructs the real adapter — and CI runs the whole suite in parallel on a
- * 2-vCPU runner alongside a real-browser e2e file. Locally these take ~0.4s;
- * starved, one crossed Bun's 5s default and failed a green branch. The cap only
- * exists to bound a hang, so give it room rather than let load decide.
- */
-const STORY_TIMEOUT_MS = 30_000;
+// --- story.md address, without a browser -------------------------------------
+// Building a WEB target constructs the real adapter — `BrowserAdapter.create()`
+// LAUNCHES a headless Chromium — so these tests used to need a browser binary
+// on the machine just to assert on a file's CONTENT. The builder's
+// adapter-factory seam (`SessionBuilderDeps.createAdapter`) injects an
+// in-memory adapter instead: the story path still runs end to end (target
+// resolution, url override, story.md render, write), minus the browser.
+
+/** An in-memory {@link Adapter}: the whole contract, answered with no-ops. */
+function fakeAdapter(overrides: Partial<Adapter> = {}): Adapter {
+  return {
+    selectorDialect: 'web',
+    open: async () => {},
+    find: async () => null,
+    click: async () => {},
+    type: async () => {},
+    pressKey: async () => {},
+    scroll: async () => {},
+    readState: async () => [],
+    screenshot: async () => new Uint8Array(),
+    waitFor: async () => {},
+    console: async () => [],
+    network: async () => [],
+    close: async () => {},
+    ...overrides,
+  };
+}
+
+/** Deps whose adapter factory is the fake — no browser, no process. */
+function storyDeps(): SessionBuilderDeps {
+  return { ...deps(), createAdapter: async () => fakeAdapter() };
+}
 
 // A run's own record has to say WHICH app it drove: findings from a run that
 // wandered off-target are otherwise indistinguishable, after the fact, from
 // findings about the app that was actually asked for.
-test(
-  'buildSession records the app address in story.md for a web run',
-  async () => {
-    const d = deps();
+describe('story.md address for a web run — without a browser', () => {
+  /** Trap any attempt to construct a real browser: this path must never do it. */
+  function trapBrowserCreation() {
+    return spyOn(BrowserAdapter, 'create').mockImplementation(() => {
+      throw new AdapterError('the story.md path must not construct a browser');
+    });
+  }
+
+  // The trap covers EVERY build in this describe, not only the guard's own.
+  // The address tests build a WEB target, and the real factory LAUNCHES a
+  // Chromium to do it: if the seam ever stopped being honoured, those builds
+  // would need a browser binary again — green where one is installed, an
+  // unrelated failure where one is not — and a trap installed inside the
+  // guard alone would never notice. Armed here, the first build that reaches
+  // the real factory fails loudly, with no browser in sight.
+  let trap: ReturnType<typeof trapBrowserCreation> | undefined;
+
+  beforeEach(() => {
+    trap = trapBrowserCreation();
+  });
+
+  afterEach(() => {
+    trap?.mockRestore();
+    trap = undefined;
+  });
+
+  test('buildSession records the app address in story.md for a web run', async () => {
+    const d = storyDeps();
     await buildSession(d, { id: 'story-addr', target: 'web', goal: 'check the home page' });
     const content = await readFile(sessionPaths(d.workspace, 'story-addr').storyMd, 'utf8');
     expect(content).toContain('**Address:** http://localhost:3000');
-  },
-  STORY_TIMEOUT_MS,
-);
+  });
 
-test(
-  'buildSession honors a per-run url override in story.md',
-  async () => {
-    const d = deps();
+  test('buildSession honors a per-run url override in story.md', async () => {
+    const d = storyDeps();
     await buildSession(d, {
       id: 'story-addr2',
       target: 'web',
@@ -174,9 +216,32 @@ test(
     });
     const content = await readFile(sessionPaths(d.workspace, 'story-addr2').storyMd, 'utf8');
     expect(content).toContain('**Address:** https://staging.example.com/app');
-  },
-  STORY_TIMEOUT_MS,
-);
+  });
+
+  test('the story.md address path never constructs a real browser', async () => {
+    // The regression this guards: the address tests build a WEB target, and the
+    // real factory LAUNCHES a Chromium to do it. If the seam ever stopped being
+    // honoured, those tests would need a browser binary again — and on a machine
+    // without one they would fail for a reason that has nothing to do with what
+    // they assert. The trap fires here instead, loudly.
+    const d = storyDeps();
+    await buildSession(d, { id: 'story-guard', target: 'web', goal: 'check the home page' });
+    expect(trap).not.toHaveBeenCalled();
+    // The path still did its job — a browser-free run is not a broken run.
+    const content = await readFile(sessionPaths(d.workspace, 'story-guard').storyMd, 'utf8');
+    expect(content).toContain('**Address:** http://localhost:3000');
+  });
+});
+
+/**
+ * Budget for the two REAL-browser persona tests.
+ *
+ * They drive a live Chromium through a login form — the launch, the page load
+ * and the credential POST all happen inside the test — and CI runs the whole
+ * suite in parallel on a 2-vCPU runner alongside a real-browser e2e file. The
+ * cap only exists to bound a hang, so give it room rather than let load decide.
+ */
+const BROWSER_TIMEOUT_MS = 30_000;
 
 test('buildSession prunes old session dirs, keeping the newest 5 including this run', async () => {
   // Nothing ever removed a session dir: every run leaves story.md, findings.json,
@@ -521,23 +586,11 @@ for (const selected of [true, false]) {
     ];
     const errorText = `POST /checkout rejected: ${spellings.join(' | ')}; retry disabled`;
     const redact = createSecretRedactor(selected ? [secret] : []);
-    const adapter: Adapter = {
-      selectorDialect: 'web',
-      open: async () => {},
+    const adapter = fakeAdapter({
       find: async () => {
         throw new AdapterError(errorText);
       },
-      click: async () => {},
-      type: async () => {},
-      pressKey: async () => {},
-      scroll: async () => {},
-      readState: async () => [],
-      screenshot: async () => new Uint8Array(),
-      waitFor: async () => {},
-      console: async () => [],
-      network: async () => [],
-      close: async () => {},
-    };
+    });
     const create = spyOn(BrowserAdapter, 'create').mockResolvedValue(adapter as BrowserAdapter);
     const reachedReport = Promise.withResolvers<void>();
     const releaseReport = Promise.withResolvers<void>();
@@ -740,7 +793,7 @@ function serveLoginApp(credentials: { email: string; password: string }) {
       server.stop(true);
     }
   },
-  STORY_TIMEOUT_MS,
+  BROWSER_TIMEOUT_MS,
 );
 
 (CHROME ? test : test.skip)(
@@ -797,7 +850,7 @@ function serveLoginApp(credentials: { email: string; password: string }) {
       server.stop(true);
     }
   },
-  STORY_TIMEOUT_MS,
+  BROWSER_TIMEOUT_MS,
 );
 
 // --- the run's capture sink (redaction before disk) --------------------------
