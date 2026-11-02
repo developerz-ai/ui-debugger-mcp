@@ -66,6 +66,16 @@ export interface SessionBuilderDeps {
   config: ResolvedConfig;
   models: BuilderModels;
   workspace: WorkspacePaths;
+  /**
+   * Adapter factory seam — the default is the real one ({@link createAdapter}),
+   * so every production caller is unchanged.
+   *
+   * A test injects a fake here to build a WEB target's session without a
+   * browser: `createAdapter` for a browser target LAUNCHES a headless Chromium,
+   * so asserting on what the builder wrote to disk used to need a browser
+   * binary on the machine.
+   */
+  createAdapter?: typeof createAdapter;
 }
 
 /** The per-run inputs `start_debug` hands over. */
@@ -324,7 +334,11 @@ export async function buildSession(
   const profileDir = resolveProfileDir(workspace, profile);
   if (profile) await mkdir(profileDir, { recursive: true });
 
-  const adapter = await createAdapter(target, effectiveConfig, profileDir, onLog, params.timeoutMs);
+  // The adapter factory seam: the real factory by default, a fake in tests that
+  // only care about what the builder WROTE (a web target's story.md) and not
+  // about the browser that would drive it.
+  const factory = deps.createAdapter ?? createAdapter;
+  const adapter = await factory(target, effectiveConfig, profileDir, onLog, params.timeoutMs);
   // The prompt's eye mode MUST match the `look` tool bound below — self-look tells
   // the driver to judge the attached frame itself; the vision variant tells it to ask
   // the vision guy (and how to cope when that model turns out to be text-only).
