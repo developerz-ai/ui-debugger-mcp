@@ -9,6 +9,7 @@ import { MockLanguageModelV3 } from 'ai/test';
 import { chromium } from 'playwright-core';
 import { z } from 'zod';
 import { BrowserAdapter } from '../adapters/browser/browser-adapter.js';
+import { BODY_WAIT_MS } from '../adapters/browser/cdp.js';
 import type { Adapter } from '../adapters/contract.js';
 import { DesktopAdapter } from '../adapters/desktop/desktop-adapter.js';
 import type { ResolvedConfig } from '../config/load.js';
@@ -710,12 +711,23 @@ function serveLoginApp(credentials: { email: string; password: string }) {
       // Reaching here at all is the first assertion: `open` only resolves once the
       // login left `/login`, so the driver's first step starts INSIDE the app.
       const paths = sessionPaths(d.workspace, 'auth-e2e');
-      const logs = await Promise.all(
-        ['agent.log', 'network.log', 'console.log'].map((name) =>
-          readFile(join(paths.logs, name), 'utf8').catch(() => ''),
+      // The network line for the login POST is written once its body read settles,
+      // and that read is bounded by the capture's BODY_WAIT_MS: on the pinned
+      // Chromium the page navigates away mid-read, so the read runs to the cap
+      // (response.text() hangs rather than throwing) and the line can land just
+      // AFTER open() returns. Wait for it — the cap plus margin — instead of
+      // failing on the sink's fire-and-forget lag. The assertion is unchanged:
+      // the redacted POST must be IN the durable trail.
+      const [agent, network, consoleLog] = await Promise.all([
+        readFile(join(paths.logs, 'agent.log'), 'utf8').catch(() => ''),
+        readWhenWritten(
+          join(paths.logs, 'network.log'),
+          '<redacted, 8 chars>',
+          BODY_WAIT_MS + 2_000,
         ),
-      );
-      const written = logs.join('\n');
+        readFile(join(paths.logs, 'console.log'), 'utf8').catch(() => ''),
+      ]);
+      const written = [agent, network, consoleLog].join('\n');
       // The whole run's durable trail, and not one credential in it.
       expect(written).toContain('auth: signed in as "admin"');
       expect(written).not.toContain(credentials.password);
@@ -791,12 +803,14 @@ function serveLoginApp(credentials: { email: string; password: string }) {
 // --- the run's capture sink (redaction before disk) --------------------------
 
 /**
- * Read a log file once it carries `marker`, bounded: the sink writes
- * fire-and-forget, so a sink that never writes must fail the assertion below
- * rather than hang the suite.
+ * Read a log file once it carries `marker`, bounded (default 2s, enough for the
+ * sink's fire-and-forget write): a sink that never writes must fail the assertion
+ * rather than hang the suite. Pass a larger bound for a channel whose line lands
+ * behind a capped capture read — the network row's body read runs to the capture's
+ * BODY_WAIT_MS cap when the page navigates away mid-read.
  */
-async function readWhenWritten(file: string, marker: string): Promise<string> {
-  const deadline = Date.now() + 2_000;
+async function readWhenWritten(file: string, marker: string, boundMs = 2_000): Promise<string> {
+  const deadline = Date.now() + boundMs;
   for (;;) {
     const content = await readFile(file, 'utf8').catch(() => '');
     if (content.includes(marker)) return content;
