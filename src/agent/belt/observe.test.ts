@@ -575,7 +575,7 @@ function wiredObserve(console: ConsoleEntry[], trail = createActTrail()) {
   return {
     trail,
     read: (input: Parameters<typeof runObserve>[2]) =>
-      observe.execute?.(input, { toolCallId: 't1', messages: [] }),
+      observe.execute?.(input, { toolCallId: 't1', messages: [], context: {} }),
   };
 }
 
@@ -629,7 +629,7 @@ test('tree/screenshot/network/tabs kinds record nothing', async () => {
   };
   const observe = createObserveTool(withTabs, recorder(), trail);
   const call = (input: Parameters<typeof runObserve>[2]) =>
-    observe.execute?.(input, { toolCallId: 't1', messages: [] });
+    observe.execute?.(input, { toolCallId: 't1', messages: [], context: {} });
   await call({ kind: 'tree' });
   await call({ kind: 'screenshot' });
   await call({ kind: 'network' });
@@ -647,7 +647,7 @@ test('a throwing read records nothing and releases the gate', async () => {
   };
   const observe = createObserveTool(adapter, recorder(), trail);
   await expect(
-    observe.execute?.({ kind: 'console' }, { toolCallId: 't1', messages: [] }),
+    observe.execute?.({ kind: 'console' }, { toolCallId: 't1', messages: [], context: {} }),
   ).rejects.toThrow(AdapterError);
   const evidence = await trail.settled();
   expect(evidence.bugs).toEqual([]);
@@ -691,7 +691,7 @@ test('a wired redactor keeps persona values out of the trail: bug detail AND evi
   const { adapter } = fakeAdapter({ console: leaked });
   const trail = createActTrail();
   const observe = createObserveTool(adapter, recorder(), trail, REDACT);
-  await observe.execute?.({ kind: 'console' }, { toolCallId: 't1', messages: [] });
+  await observe.execute?.({ kind: 'console' }, { toolCallId: 't1', messages: [], context: {} });
   expect(trail.bugs).toEqual([
     {
       kind: 'console',
@@ -714,7 +714,7 @@ test('the persisted findings carry no raw persona value: runReport over the sett
   const { adapter } = fakeAdapter({ console: leaked });
   const trail = createActTrail();
   const observe = createObserveTool(adapter, recorder(), trail, REDACT);
-  await observe.execute?.({ kind: 'console' }, { toolCallId: 't1', messages: [] });
+  await observe.execute?.({ kind: 'console' }, { toolCallId: 't1', messages: [], context: {} });
   const written: Findings[] = [];
   const writer: FindingsWriter = {
     writeFindings: async (findings) => {
@@ -787,7 +787,10 @@ test('a trail.settled() opened while the console read is in flight waits out the
   // which is only after the read has recorded its error rows.
   const trail = createActTrail();
   const { open, observe } = heldObserve(trail);
-  const executing = observe.execute?.({ kind: 'console' }, { toolCallId: 't1', messages: [] });
+  const executing = observe.execute?.(
+    { kind: 'console' },
+    { toolCallId: 't1', messages: [], context: {} },
+  );
   const drained = snapshotAtDrain(trail.settled());
   // Give settled() the one turn its own yield takes — every chance a missing
   // gate would need to resolve it early, while the read is provably in flight.
@@ -814,7 +817,10 @@ test('a concurrent trail.settled() started BEFORE the read finishes still sees t
   const trail = createActTrail();
   const { open, observe } = heldObserve(trail);
   const drained = snapshotAtDrain(trail.settled());
-  const executing = observe.execute?.({ kind: 'console' }, { toolCallId: 't1', messages: [] });
+  const executing = observe.execute?.(
+    { kind: 'console' },
+    { toolCallId: 't1', messages: [], context: {} },
+  );
   await new Promise((resolve) => setTimeout(resolve, 0));
   open();
   await executing;
@@ -829,7 +835,7 @@ test('no trail wired — observe behaves exactly as before', async () => {
   const observe = createObserveTool(adapter, recorder());
   const res = (await observe.execute?.(
     { kind: 'console' },
-    { toolCallId: 't1', messages: [] },
+    { toolCallId: 't1', messages: [], context: {} },
   )) as { kind: string; count: number };
   expect(res.kind).toBe('console');
   expect(res.count).toBe(5);

@@ -86,12 +86,9 @@ export interface FinishedStep {
  * into `standing` — the run-long list of caller instructions — then, while any
  * exist, appends ONE user message rebuilt from the whole list.
  *
- * Rebuilt on EVERY step, not just the drain step: the SDK composes each step's
- * prompt fresh from `[...initialMessages, ...responseMessages]` and never persists
- * a `prepareStep` messages override, so an instruction injected once would reach
- * the driver for exactly one step and then vanish. Because the base `messages`
- * arrive without the previous step's injection, re-appending the single rebuilt
- * block never accumulates duplicates. Returns `{}` when no instructions exist.
+ * Rebuilt on EVERY step, not just the drain step. The caller removes the previous
+ * generated block before folding: AI SDK 7 persists `prepareStep` overrides.
+ * Returns `{}` when no instructions exist.
  */
 export function foldInstructionsIntoStep(
   inbox: LoopInbox,
@@ -397,8 +394,9 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
   } = options;
   let stepIndex = 0;
   // Run-long list of mid-run caller instructions: drained from the inbox once,
-  // re-folded into EVERY step's prompt (the SDK never persists a prepareStep override).
+  // re-folded into EVERY step's prompt after removing the previous generated messages.
   const standing: string[] = [];
+  let generated = new Set<string>();
   // What the running flush has already persisted. The trail's arrays only grow,
   // so growth past these lengths is exactly "this step surfaced something new".
   let flushed: TrailEvidence = EMPTY_EVIDENCE;
@@ -418,14 +416,25 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
       ({ steps }) => steps.at(-1)?.toolResults.some((r) => r.toolName === 'report') ?? false,
     ],
     prepareStep: ({ messages, stepNumber }) => {
-      // Self-look frame hygiene first: only the newest screenshot stays live.
-      const pruned = pruneStaleFrames(messages);
+      // SDK 7 retains overrides. Replace only our exact generated user messages,
+      // keeping the kickoff, caller transcript and tool results intact.
+      const clean = messages.filter(
+        (message) =>
+          message.role !== 'user' ||
+          typeof message.content !== 'string' ||
+          !generated.has(message.content),
+      );
+      const pruned = pruneStaleFrames(clean);
       const withInbox = foldInstructionsIntoStep(inbox, standing, pruned);
       const base = 'messages' in withInbox ? withInbox.messages : pruned;
       const nudge = budgetNudge(stepNumber, maxSteps);
-      if (nudge) return { messages: [...base, { role: 'user', content: nudge }] };
-      if (base === messages) return {};
-      return { messages: base };
+      const next: ModelMessage[] = nudge ? [...base, { role: 'user', content: nudge }] : base;
+      generated = new Set(
+        next
+          .slice(pruned.length)
+          .flatMap((message) => (typeof message.content === 'string' ? [message.content] : [])),
+      );
+      return { messages: next };
     },
     onStepFinish: async (step) => {
       stepIndex += 1;
