@@ -1,7 +1,14 @@
 /**
  * Integration tests for the Android adapter — require a real attached device
  * or running emulator. Skipped unless `ANDROID_INTEGRATION_TESTS=1` is set
- * **and** `adb devices` shows at least one device.
+ * **and** (`ANDROID_SERIAL` is set **or** `adb devices` shows at least one
+ * device).
+ *
+ * Prerequisites are evaluated ONCE at registration time: gate off → the suite
+ * registers as `describe.skip` (bun counts all 8 tests as skipped, never as
+ * passes) and no `adb` probe runs at all — a disabled run performs no
+ * real-device operations. Gate on → one sync `adb devices` probe (skipped
+ * entirely when `ANDROID_SERIAL` names the device) decides run vs skip.
  *
  * Run against a real emulator:
  *   ANDROID_INTEGRATION_TESTS=1 bun test src/adapters/android/android-adapter.integration.test.ts
@@ -14,24 +21,21 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { execSync } from 'node:child_process';
 import { AdapterError } from '../../errors.js';
 import { AndroidAdapter } from './android-adapter.js';
 
-const pExecFile = promisify(execFile);
-
-const SKIP = process.env.ANDROID_INTEGRATION_TESTS !== '1';
+const GATE_ON = process.env.ANDROID_INTEGRATION_TESTS === '1';
 const SERIAL = process.env.ANDROID_SERIAL ?? null;
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Prerequisites — evaluated once, at registration time (like the desktop suite)
 // ---------------------------------------------------------------------------
 
-/** Returns the first online device serial, or null. */
-async function firstOnlineDevice(): Promise<string | null> {
+/** Sync `adb devices` probe: the first online device serial, or null. */
+function firstOnlineDevice(): string | null {
   try {
-    const { stdout } = await pExecFile('adb', ['devices']);
+    const stdout = execSync('adb devices', { stdio: 'pipe' }).toString();
     const lines = stdout.split('\n').slice(1); // skip header
     for (const line of lines) {
       const [serial, state] = line.trim().split(/\s+/);
@@ -39,37 +43,44 @@ async function firstOnlineDevice(): Promise<string | null> {
     }
     return null;
   } catch {
-    return null;
+    return null; // adb missing or failed → treat as no device
   }
 }
 
+/**
+ * The device this suite targets, or null. Gate off → null without ANY adb
+ * probe; gate on → `ANDROID_SERIAL` wins without a probe, else one sync
+ * `adb devices` probe decides.
+ */
+function resolveDevice(): string | null {
+  if (!GATE_ON) return null;
+  if (SERIAL) return SERIAL;
+  return firstOnlineDevice();
+}
+
+const DEVICE = resolveDevice();
+const RUNNABLE = DEVICE !== null;
+
 // ---------------------------------------------------------------------------
-// Suite — skipped unless opted in and a device is present
+// Suite — registered as skipped unless opted in and a device is present
 // ---------------------------------------------------------------------------
 
-describe('AndroidAdapter integration', () => {
+(RUNNABLE ? describe : describe.skip)('AndroidAdapter integration', () => {
   let adapter: AndroidAdapter;
   let serial: string;
 
-  beforeAll(async () => {
-    if (SKIP) return;
-    serial = SERIAL ?? (await firstOnlineDevice()) ?? '';
-    if (!serial) return;
+  beforeAll(() => {
+    serial = DEVICE ?? ''; // RUNNABLE ⇒ DEVICE holds a non-empty serial
     adapter = AndroidAdapter.create({
       config: { adapter: 'android', headless: true, avd: 'integration_avd', adbSerial: serial },
     });
   });
 
   afterAll(async () => {
-    if (SKIP || !serial) return;
-    await adapter.close().catch(() => undefined);
+    await adapter?.close().catch(() => undefined);
   });
 
-  // Helper: skip individual tests when no device is available.
-  const skipIf = () => SKIP || !serial;
-
   test('screenshot returns non-empty Uint8Array', async () => {
-    if (skipIf()) return;
     const bytes = await adapter.screenshot();
     expect(bytes).toBeInstanceOf(Uint8Array);
     // PNG magic bytes: 89 50 4E 47
@@ -80,7 +91,6 @@ describe('AndroidAdapter integration', () => {
   });
 
   test('readState returns a non-empty tree', async () => {
-    if (skipIf()) return;
     const nodes = await adapter.readState({});
     expect(nodes.length).toBeGreaterThan(0);
     for (const n of nodes) {
@@ -91,36 +101,30 @@ describe('AndroidAdapter integration', () => {
   });
 
   test('readState with limit=1 returns at most one node', async () => {
-    if (skipIf()) return;
     const nodes = await adapter.readState({ limit: 1 });
     expect(nodes.length).toBeLessThanOrEqual(1);
   });
 
   test('console drains logcat without throwing', async () => {
-    if (skipIf()) return;
     const entries = await adapter.console({ limit: 10 });
     expect(Array.isArray(entries)).toBe(true);
     expect(entries.length).toBeLessThanOrEqual(10);
   });
 
   test('network always throws AdapterError (no ADB channel)', async () => {
-    if (skipIf()) return;
     await expect(adapter.network()).rejects.toThrow(AdapterError);
   });
 
   test('waitFor networkIdle throws AdapterError', async () => {
-    if (skipIf()) return;
     await expect(adapter.waitFor({ networkIdle: true })).rejects.toThrow(AdapterError);
   });
 
   test('find returns null for a query that matches nothing', async () => {
-    if (skipIf()) return;
     const node = await adapter.find({ query: '___nothing_matches_this_xyzzy___' });
     expect(node).toBeNull();
   });
 
   test('close in attach mode is a no-op (does not throw)', async () => {
-    if (skipIf()) return;
     await expect(adapter.close()).resolves.toBeUndefined();
   });
 });
