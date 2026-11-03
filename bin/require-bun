@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+# Select and verify the Bun runtime this repo's CI runs on.
+#
+# The authoritative version is the one .github/workflows/ci.yml pins in its
+# `oven-sh/setup-bun*` steps — NOT mise.toml (a hand-maintained duplicate that
+# can drift) and NOT whatever bun happens to be on PATH. This script DERIVES
+# that version, SELECTS a runtime at exactly it, VERIFIES the runtime's own
+# `--version`, and prints the two lines `bin/setup` consumes:
+#
+#   BUN_VERSION=<required version>
+#   BUN_PATH=<absolute path of the verified bun>
+#
+# On stdout: exactly those two lines, nothing else.
+# On failure: a named `X_BUN_*:` diagnostic on stderr and exit 1 —
+#   X_BUN_VERSION_UNRESOLVED: ci.yml pins no single bun version (none, or they disagree)
+#   X_BUN_VERSION_MISMATCH:   a bun was found, but its version differs from the required one
+#   X_BUN_MISSING:            no bun at the required version could be obtained
+#
+# It never touches the network and never mutates state outside the repo (and
+# mise's own cache): it SELECTS and VERIFIES a runtime that is already
+# installed. When the required runtime is absent it fails loud, naming how to
+# obtain it — it never downloads.
+#
+# It also resolves the NODE it needs to read that configuration: from PATH, or
+# from mise when node is INSTALLED there but absent from PATH — the mise
+# activation this script replaced put it there. That resolution never
+# downloads either: `mise where` / `mise which` only resolve an already
+# installed tool.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+WORKFLOW=".github/workflows/ci.yml"
+
+# mise's auto-install is OFF for this script. A mise-managed `bun` on PATH is
+# a SHIM that installs the pinned version when it is missing — a network
+# fetch this script must never make (it SELECTS and VERIFIES a runtime that
+# is already installed; it never downloads one). With auto-install disabled a
+# missing runtime stays missing and is reported, not fetched.
+export MISE_AUTO_INSTALL=0
+
+fail() {
+  echo "$1" >&2
+  exit 1
+}
+
+# --- 1. derive the required version from the CI configuration --------------
+#
+# Every step that uses `oven-sh/setup-bun*` must carry a `bun-version:` under
+# its `with:` block. The pins are read from the workflow TEXT (not from
+# mise.toml), so the version CI actually installs is the version this script
+# requires. A setup-bun step with no `bun-version:` counts as a disagreement —
+# CI would then install whatever setup-bun defaults to.
+#
+# Parsing is done with node (the repo convention — bin/setup uses it for the
+# playwright manifest, bin/smoke-packed for package.json), because a YAML
+# parser is not a dependency this repo may assume.
+if [ ! -f "$WORKFLOW" ]; then
+  fail "X_BUN_VERSION_UNRESOLVED: required bun version unknown — $WORKFLOW is missing; restore the CI workflow (it is the source of truth for the bun version)"
+fi
+
+# node reads the workflow (the repo convention — bin/setup uses it for the
+# playwright manifest, bin/smoke-packed for package.json). Without it the pin
+# cannot be read, so the required version stays unresolved.
+#
+# A host that manages its runtimes with mise commonly has node INSTALLED but
+# NOT on PATH — the mise activation this script replaced put it there, and a
+# checkout that has every runtime it needs must not be blocked by that. So an
+# installed mise-managed node is resolved BEFORE giving up: `mise where` and
+# `mise which` RESOLVE an already-installed tool, they never fetch one (mise's
+# auto-install is off above), so this stays offline.
+node_bin=$(command -v node 2>/dev/null || true)
+if [ -z "$node_bin" ] && command -v mise >/dev/null 2>&1; then
+  mise_node_dir=$(mise where node 2>/dev/null || true)
+  if [ -n "$mise_node_dir" ] && [ -x "${mise_node_dir}/bin/node" ]; then
+    node_bin="${mise_node_dir}/bin/node"
+  else
+    mise_node_path=$(mise which node 2>/dev/null || true)
+    if [ -n "$mise_node_path" ] && [ -x "$mise_node_path" ]; then
+      node_bin="$mise_node_path"
+    fi
+  fi
+fi
+
+if [ -z "$node_bin" ]; then
+  fail "X_BUN_VERSION_UNRESOLVED: required bun version unknown — node is not on PATH and mise resolves no installed node, so the bun version CI pins cannot be read from $WORKFLOW; install node (e.g. 'mise install node') and re-run"
+fi
+
+pins=$(REQUIRE_BUN_WORKFLOW="$WORKFLOW" "$node_bin" <<'NODE'
+  const fs = require("node:fs");
+  const text = fs.readFileSync(process.env.REQUIRE_BUN_WORKFLOW, "utf8");
+  const lines = text.split("\n");
+
+  const steps = [];
+  let step = null;
+  let inWith = false;
+  let withIndent = 0;
+
+  const indentOf = (line) => line.length - line.trimStart().length;
+
+  // A YAML scalar — quoted or plain. A trailing `# comment` is NOT part of
+  // the value: the comment starts at a `#` OUTSIDE the quotes that is
+  // preceded by whitespace (or that is the whole value). So
+  // `bun-version: "1.4.3" # CI runtime` pins 1.4.3 — NOT `1.4.3 # CI
+  // runtime`, a version no runtime ever reports.
+  const parseScalar = (raw) => {
+    const scalar = raw.trim();
+    const quote = scalar[0];
+    if (quote === '"' || quote === "'") {
+      let value = "";
+      for (let i = 1; i < scalar.length; i += 1) {
+        const ch = scalar[i];
+        if (quote === '"' && ch === "\\") {
+          value += scalar[i + 1] || "";
+          i += 1;
+          continue;
+        }
+        if (ch === quote) {
+          // A single-quoted scalar escapes a quote by doubling it.
+          if (quote === "'" && scalar[i + 1] === "'") {
+            value += "'";
+            i += 1;
+            continue;
+          }
+          return value.trim();
+        }
+        value += ch;
+      }
+      return value.trim();
+    }
+    const commentAt = scalar.search(/(?:^|\s)#/);
+    return (commentAt === -1 ? scalar : scalar.slice(0, commentAt)).trim();
+  };
+
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, "");
+    const trimmed = line.trim();
+
+    // A step header starts a new list item. `uses:` may come first or after
+    // another key such as `name:`, so the step boundary — not the key order —
+    // defines where a step begins.
+    if (/^-\s+\S/.test(trimmed)) {
+      if (step) steps.push(step);
+      step = { uses: "", version: null };
+      inWith = false;
+    }
+
+    if (!step) continue;
+
+    // `uses:` identifies the action, wherever it appears within its step.
+    const usesMatch = trimmed.match(/^(?:-\s+)?uses:\s*(.*)$/);
+    if (usesMatch) {
+      step.uses = parseScalar(usesMatch[1]);
+      continue;
+    }
+
+    // A `with:` block opens the step inputs; `bun-version:` lives there.
+    if (/^(?:-\s+)?with:\s*$/.test(trimmed)) {
+      inWith = true;
+      withIndent = indentOf(line);
+      continue;
+    }
+
+    // Inside a `with:` block, a key at the SAME indentation as `with:` ends
+    // the block; a deeper one is one of its inputs.
+    if (inWith) {
+      if (indentOf(line) <= withIndent) {
+        inWith = false;
+        continue;
+      }
+      const versionMatch = trimmed.match(/^(?:-\s+)?bun-version:\s*(.*)$/);
+      if (versionMatch) {
+        step.version = parseScalar(versionMatch[1]);
+      }
+      continue;
+    }
+  }
+  if (step) steps.push(step);
+
+  const setupBun = steps.filter((s) => s.uses.startsWith("oven-sh/setup-bun"));
+  const versions = [...new Set(setupBun.map((s) => s.version))];
+  if (setupBun.length === 0) {
+    console.log("NONE");
+  } else if (versions.length !== 1 || versions[0] === null || versions[0] === "") {
+    console.log("DISAGREE:" + JSON.stringify(setupBun));
+  } else {
+    console.log(versions[0]);
+  }
+NODE
+)
+
+case "$pins" in
+  NONE)
+    fail "X_BUN_VERSION_UNRESOLVED: required bun version unknown — $WORKFLOW has no oven-sh/setup-bun step; add the bun-version pin CI uses"
+    ;;
+  DISAGREE:*)
+    fail "X_BUN_VERSION_UNRESOLVED: required bun version unknown — the oven-sh/setup-bun steps in $WORKFLOW do not pin one bun version: ${pins#DISAGREE:}; pin the same version in every step"
+    ;;
+esac
+
+required_version="$pins"
+
+# --- 2. select a runtime at exactly that version ----------------------------
+#
+# Preference order:
+#   1. mise, asked for that EXACT version (`mise where bun@<version>`). mise
+#      resolves an ALREADY-INSTALLED version; it is not asked to download, so
+#      this path stays offline.
+#   2. the ambient `bun` on PATH.
+#
+# A candidate whose own `--version` differs from the required one is never
+# used: an incompatible runtime must not be carried into `bin/setup`'s later
+# stages. There is exactly ONE version comparison in this script (below), so
+# the accept/reject decision lives in one place.
+candidates=()
+if command -v mise >/dev/null 2>&1; then
+  mise_dir=$(mise where "bun@${required_version}" 2>/dev/null || true)
+  if [ -n "$mise_dir" ] && [ -x "${mise_dir}/bin/bun" ]; then
+    candidates+=("${mise_dir}/bin/bun")
+  fi
+fi
+
+ambient=$(command -v bun 2>/dev/null || true)
+if [ -n "$ambient" ]; then
+  candidates+=("$ambient")
+fi
+
+if [ "${#candidates[@]}" -eq 0 ]; then
+  fail "X_BUN_MISSING: no bun ${required_version} found — CI pins bun ${required_version}; install it with 'mise install bun@${required_version}' (or put a bun ${required_version} on PATH)"
+fi
+
+# --- 3. verify the selected runtime ----------------------------------------
+#
+# The candidate binary's OWN `--version` is the ground truth. A leading `v` and
+# surrounding whitespace are tolerated; anything else is a mismatch.
+#
+# The FIRST candidate that reports exactly the required version wins; the
+# candidates are tried in preference order, so mise wins over the ambient bun.
+# If none of them matches, the first one tried is the one reported — it is
+# the runtime the caller would otherwise have used.
+selected=""
+mismatch_version=""
+mismatch_path=""
+for candidate in "${candidates[@]}"; do
+  actual_version=$("$candidate" --version 2>/dev/null || true)
+  actual_version=${actual_version#v}
+  actual_version=${actual_version//[[:space:]]/}
+  if [ "$actual_version" = "$required_version" ]; then
+    selected="$candidate"
+    break
+  fi
+  if [ -z "$mismatch_path" ]; then
+    mismatch_version="$actual_version"
+    mismatch_path="$candidate"
+  fi
+done
+
+if [ -z "$selected" ]; then
+  if [ -z "$mismatch_version" ]; then
+    fail "X_BUN_VERSION_MISMATCH: ${mismatch_path} reported no bun version, but CI pins bun ${required_version}; install bun ${required_version} (e.g. 'mise install bun@${required_version}') or put it on PATH"
+  fi
+  fail "X_BUN_VERSION_MISMATCH: found bun ${mismatch_version} at ${mismatch_path}, but CI pins bun ${required_version}; install bun ${required_version} (e.g. 'mise install bun@${required_version}') or put it on PATH"
+fi
+
+# Absolute path: the caller exports this directory onto PATH, so a relative
+# path would resolve against whatever cwd the caller happens to have.
+bun_path=$(cd "$(dirname "$selected")" && pwd)/$(basename "$selected")
+
+printf 'BUN_VERSION=%s\n' "$required_version"
+printf 'BUN_PATH=%s\n' "$bun_path"

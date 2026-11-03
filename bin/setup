@@ -8,7 +8,16 @@
 # script works no matter where it is invoked from.
 #
 # Stages:
-#   1. mise (if installed)  — pin bun + node from .mise.toml / .tool-versions
+#   1. bun runtime         — `bin/require-bun` derives the bun version CI pins
+#                             in .github/workflows/ci.yml, selects a runtime at
+#                             exactly that version (mise first, the ambient
+#                             bun only when its own --version already matches)
+#                             and verifies it. The verified bun's directory is
+#                             exported onto PATH FIRST, so every later stage
+#                             runs on that runtime and not on an arbitrary
+#                             ambient bun. Fails loud when the required
+#                             version cannot be obtained — setup never runs on
+#                             a bun CI would not run on.
 #   2. bun install          — root deps, so `bunx tsc` resolves and
 #                             node_modules/playwright-core/cli.js exists
 #   3. dummy/web fixture    — `bun install --frozen-lockfile && bun run build`
@@ -35,18 +44,59 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Guard mise activation the way wurk's bin/setup does: skip cleanly when mise
-# is absent (a laptop without mise still works), activate it when present so a
-# repo-pinned bun version wins over the system one.
-if command -v mise >/dev/null 2>&1; then
-  echo "==> mise install"
-  mise install
-  # `mise env -s bash` emits `export FOO=bar ...` for the current shell; eval
-  # it into THIS shell so the `bun` below is the mise-managed one, not PATH.
-  eval "$(mise env -s bash)"
-fi
+# Runtime gate, stage 1: pin the bun version CI runs on. `bin/require-bun`
+# DERIVES that version from .github/workflows/ci.yml (the CI configuration is
+# the source of truth — mise.toml is a hand-maintained duplicate of it), SELECTS
+# a runtime at exactly that version and VERIFIES the runtime's own --version.
+# It fails loud with a named `X_BUN_*:` diagnostic when the required runtime
+# cannot be obtained, so setup never proceeds on an arbitrary ambient bun.
+# It resolves the node it needs to read the CI configuration the same way:
+# from PATH, or from mise when node is installed there but not on PATH.
+#
+# The verified bun's directory goes FIRST on PATH — ahead of every other entry
+# that could hold a `bun`, so the root install, the dummy/web install, the
+# chromium library check and the launch check all run on the verified runtime.
+# Nothing below may put another directory AHEAD of it — a bun installed beside
+# mise's node would shadow the verified runtime for every stage that follows.
+bun_env=$(bin/require-bun)
+BUN_VERSION=$(printf '%s\n' "$bun_env" | sed -n 's/^BUN_VERSION=//p')
+BUN_PATH=$(printf '%s\n' "$bun_env" | sed -n 's/^BUN_PATH=//p')
+[ -n "$BUN_VERSION" ] || { echo "X_BUN_MISSING: bin/require-bun did not report a bun version" >&2; exit 1; }
+[ -n "$BUN_PATH" ] || { echo "X_BUN_MISSING: bin/require-bun did not report a bun path" >&2; exit 1; }
+export PATH="$(dirname "$BUN_PATH"):$PATH"
+echo "==> bun $BUN_VERSION ($BUN_PATH)"
 
-command -v bun >/dev/null || { echo "X_BUN_MISSING: install bun — https://bun.sh"; exit 1; }
+# node is needed by the stages below (playwright-core's manifest, its CLI).
+# A host that manages its runtimes with mise commonly has node INSTALLED but
+# NOT on PATH — the mise activation this script replaced put it there, and a
+# checkout that has every runtime it needs must not be blocked by that. So an
+# installed mise-managed node is resolved here as well and put on PATH: `mise
+# where` / `mise which` RESOLVE an already-installed tool, they never fetch
+# one. Without a node the setup cannot continue, so it fails loud HERE rather
+# than dying later with a bare "node: command not found".
+# The node directory goes AFTER the verified bun directory, in BOTH resolution
+# branches: a bun installed BESIDE mise's node (a global bun in the node bin
+# dir) would otherwise sit ahead of the verified runtime on PATH, and every
+# stage below would run on a runtime this script never verified.
+if ! command -v node >/dev/null 2>&1; then
+  node_bin_dir=""
+  node_dir=$(mise where node 2>/dev/null || true)
+  if [ -n "$node_dir" ] && [ -x "${node_dir}/bin/node" ]; then
+    node_bin_dir="${node_dir}/bin"
+  else
+    node_bin=$(mise which node 2>/dev/null || true)
+    if [ -n "$node_bin" ] && [ -x "$node_bin" ]; then
+      node_bin_dir="$(dirname "$node_bin")"
+    fi
+  fi
+  if [ -n "$node_bin_dir" ]; then
+    export PATH="$(dirname "$BUN_PATH"):${node_bin_dir}:$PATH"
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    echo "X_NODE_MISSING: node is not on PATH and mise resolves no installed node — the playwright manifest and CLI need it; install node (e.g. 'mise install node') and re-run" >&2
+    exit 1
+  fi
+fi
 
 echo "==> bun install (root)"
 bun install
