@@ -448,6 +448,23 @@ function mutateJob(workflow: string, from: string, to: string): string {
   return workflow.replace(block, block.replace(from, to));
 }
 
+/**
+ * Drop the setup-node step from the job — the floor pin would be gone.
+ *
+ * The step's exact line is read out of the workflow, never hardcoded: the
+ * action's version tag is dependabot's to bump and must not turn this guard
+ * red (the tag is not what the guard asserts — `node-version` is).
+ */
+function dropSetupNode(workflow: string): string {
+  const line = jobText(workflow, 'pack-smoke')
+    .split('\n')
+    .find((candidate) => /^ +- uses: actions\/setup-node@\S+$/.test(candidate));
+  if (line === undefined) {
+    throw new Error('the pack-smoke job has no setup-node step to drop');
+  }
+  return mutateJob(workflow, `${line}\n`, '');
+}
+
 /** Move the build step after the smoke step — the smoke would pack a stale dist. */
 function moveBuildAfterSmoke(workflow: string): string {
   const job = packSmokeJob(workflow);
@@ -690,9 +707,7 @@ test('the pack-smoke job pins setup-node to the floor the manifest declares', ()
     pinsNodeFloor(mutateJob(workflowText, 'node-version: "22"', 'node-version: "24"'), FLOOR),
   ).toBe(false);
   // Mutation: setup-node is dropped from the job.
-  expect(
-    pinsNodeFloor(mutateJob(workflowText, '      - uses: actions/setup-node@v4\n', ''), FLOOR),
-  ).toBe(false);
+  expect(pinsNodeFloor(dropSetupNode(workflowText), FLOOR)).toBe(false);
   // Mutation: the manifest raises the floor — ci.yml has to follow, or the job
   // stops testing the declared floor.
   const raised = nodeFloor(
