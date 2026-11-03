@@ -149,7 +149,7 @@ jobs:
       # The floor from package.json engines.node (">=22"). bin/smoke-packed
       # installs the tarball with npm_config_engine_strict=true, so a package
       # that needs a newer node fails here, by name.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
 
