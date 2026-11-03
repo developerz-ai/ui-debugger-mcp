@@ -17,6 +17,10 @@ that version cannot be obtained, so setup never runs on an arbitrary ambient bun
 The Node it needs comes from PATH, or — when Node is installed but missing from
 PATH — from `mise`. Both are RESOLVED, never downloaded.
 
+The verified Bun's directory stays FIRST on `PATH`: the directory the resolved
+Node comes from is added BEHIND it, so a Bun installed beside mise's Node can
+never shadow the runtime setup verified.
+
 Boot the server in watch mode (for manual testing with an MCP client):
 
 ```bash

@@ -56,6 +56,8 @@ cd "$(dirname "$0")/.."
 # The verified bun's directory goes FIRST on PATH — ahead of every other entry
 # that could hold a `bun`, so the root install, the dummy/web install, the
 # chromium library check and the launch check all run on the verified runtime.
+# Nothing below may put another directory AHEAD of it — a bun installed beside
+# mise's node would shadow the verified runtime for every stage that follows.
 bun_env=$(bin/require-bun)
 BUN_VERSION=$(printf '%s\n' "$bun_env" | sed -n 's/^BUN_VERSION=//p')
 BUN_PATH=$(printf '%s\n' "$bun_env" | sed -n 's/^BUN_PATH=//p')
@@ -72,15 +74,23 @@ echo "==> bun $BUN_VERSION ($BUN_PATH)"
 # where` / `mise which` RESOLVE an already-installed tool, they never fetch
 # one. Without a node the setup cannot continue, so it fails loud HERE rather
 # than dying later with a bare "node: command not found".
+# The node directory goes AFTER the verified bun directory, in BOTH resolution
+# branches: a bun installed BESIDE mise's node (a global bun in the node bin
+# dir) would otherwise sit ahead of the verified runtime on PATH, and every
+# stage below would run on a runtime this script never verified.
 if ! command -v node >/dev/null 2>&1; then
+  node_bin_dir=""
   node_dir=$(mise where node 2>/dev/null || true)
   if [ -n "$node_dir" ] && [ -x "${node_dir}/bin/node" ]; then
-    export PATH="${node_dir}/bin:$PATH"
+    node_bin_dir="${node_dir}/bin"
   else
     node_bin=$(mise which node 2>/dev/null || true)
     if [ -n "$node_bin" ] && [ -x "$node_bin" ]; then
-      export PATH="$(dirname "$node_bin"):$PATH"
+      node_bin_dir="$(dirname "$node_bin")"
     fi
+  fi
+  if [ -n "$node_bin_dir" ]; then
+    export PATH="$(dirname "$BUN_PATH"):${node_bin_dir}:$PATH"
   fi
   if ! command -v node >/dev/null 2>&1; then
     echo "X_NODE_MISSING: node is not on PATH and mise resolves no installed node — the playwright manifest and CLI need it; install node (e.g. 'mise install node') and re-run" >&2

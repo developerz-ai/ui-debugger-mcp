@@ -16,6 +16,11 @@
  * handful of host binaries the script needs (node, dirname, basename) plus
  * the stubs themselves.
  *
+ * The last block EXECUTES `bin/setup` itself against the same kind of stubs:
+ * every stage of it is stubbed (a stub bun, a stub mise, a Playwright cache
+ * that already holds the pinned revision), so the script installs nothing and
+ * downloads nothing — it proves WHICH bun the later stages run on.
+ *
  * Every guard carries a MUTATION check: the guard is shown to turn RED when
  * the thing it guards is broken. A guard that cannot fail is a defect.
  */
@@ -789,5 +794,256 @@ describe('bin/setup consumes the verified runtime', () => {
     const mutated = setupText.replace(/^BUN_PATH=\$\(printf.*$/m, '');
     expect(mutated).not.toBe(setupText);
     expect(mutated.includes('BUN_PATH=$(printf')).toBe(false);
+  });
+});
+
+/** How the fixture's mise resolves node: a directory (`where`) or a binary (`which`). */
+type NodeResolution = 'where' | 'which';
+
+type SetupFixtureOptions = {
+  /** The setup script the fixture carries. Defaults to the real one. */
+  script?: string;
+  /** How mise resolves node in this fixture. Default: `where`. */
+  nodeResolution?: NodeResolution;
+};
+
+/**
+ * A synthetic checkout that runs the REAL `bin/setup` against stubs:
+ *
+ *   - the VERIFIED bun — the runtime `bin/require-bun` selects (mise's bun at
+ *     the version CI pins), in a directory of its own;
+ *   - a COMPETING bun — a different version, sitting in mise's NODE bin dir,
+ *     exactly where a globally installed bun lands on a mise-managed host;
+ *   - a mise stub that resolves bun and node, and a synthetic Playwright cache
+ *     that already holds the pinned revision (so no download happens).
+ *
+ * node is deliberately ABSENT from PATH: the host manages it with mise, which
+ * is the case where setup resolves node itself and puts that directory on
+ * PATH — the one path where another `bun` can shadow the verified runtime.
+ */
+function makeSetupFixture(options: SetupFixtureOptions = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'setup-runtime-'));
+  const repo = join(root, 'repo');
+  const sysBin = join(root, 'sysbin');
+  const stubBin = join(root, 'stubbin');
+  const bunDir = join(root, 'verified-bun');
+  const nodeDir = join(root, 'mise-node');
+  const cacheDir = join(root, 'ms-playwright');
+  const bunLog = join(root, 'bun-calls.log');
+  const nodeResolution = options.nodeResolution ?? 'where';
+  const pinned = ciPinnedVersion();
+
+  mkdirSync(join(repo, 'bin'), { recursive: true });
+  mkdirSync(join(repo, '.github/workflows'), { recursive: true });
+  mkdirSync(join(repo, 'dummy/web'), { recursive: true });
+  mkdirSync(join(repo, 'node_modules/playwright-core'), { recursive: true });
+  mkdirSync(sysBin, { recursive: true });
+  mkdirSync(stubBin, { recursive: true });
+  mkdirSync(join(bunDir, 'bin'), { recursive: true });
+  mkdirSync(join(nodeDir, 'bin'), { recursive: true });
+
+  // The script under test — the real one, or a mutated copy a guard proves it
+  // can fail on — plus the stage it depends on.
+  writeFileSync(
+    join(repo, 'bin/setup'),
+    options.script ?? readFileSync(SETUP_SCRIPT, 'utf8'),
+    'utf8',
+  );
+  chmodSync(join(repo, 'bin/setup'), 0o755);
+  writeFileSync(join(repo, 'bin/require-bun'), readFileSync(REQUIRE_BUN, 'utf8'), 'utf8');
+  chmodSync(join(repo, 'bin/require-bun'), 0o755);
+  writeFileSync(join(repo, '.github/workflows/ci.yml'), readFileSync(CI_WORKFLOW, 'utf8'), 'utf8');
+
+  // The chromium revision setup reads from playwright-core's manifest, and a
+  // cache that already holds it — so the download stage is skipped entirely.
+  const revision = '4242';
+  writeFileSync(
+    join(repo, 'node_modules/playwright-core/browsers.json'),
+    JSON.stringify({ browsers: [{ name: 'chromium', revision }] }),
+    'utf8',
+  );
+  for (const dir of [`chromium-${revision}`, `chromium_headless_shell-${revision}`]) {
+    mkdirSync(join(cacheDir, dir), { recursive: true });
+    writeFileSync(join(cacheDir, dir, 'INSTALLATION_COMPLETE'), '', 'utf8');
+  }
+
+  // The host binaries the script needs. node is NOT among them — the host
+  // manages node with mise, so setup has to resolve it itself. `bash` is
+  // there because the script's own shebang (`#!/usr/bin/env bash`) resolves
+  // it through PATH.
+  for (const name of ['dirname', 'basename', 'sed', 'bash']) {
+    const source = hostBinary(name);
+    try {
+      symlinkSync(source, join(sysBin, name));
+    } catch {
+      copyFileSync(source, join(sysBin, name));
+      chmodSync(join(sysBin, name), 0o755);
+    }
+  }
+
+  // A stub bun: it records every invocation (so a test can see WHICH bun ran
+  // a stage) and reports the version it stands for. Only the FIRST argument
+  // is recorded — the launch check's inline script spans several lines, and a
+  // record must stay one line.
+  const writeBunStub = (path: string, marker: string, version: string) => {
+    writeFileSync(
+      path,
+      [
+        '#!/bin/sh',
+        `printf '%s %s\\n' '${marker}' "$1" >> '${bunLog}'`,
+        `if [ "$1" = "--version" ]; then echo '${version}'; fi`,
+        'exit 0',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    chmodSync(path, 0o755);
+  };
+  writeBunStub(join(bunDir, 'bin/bun'), 'VERIFIED', pinned);
+  writeBunStub(join(nodeDir, 'bin/bun'), 'COMPETING', '0.0.1');
+
+  // mise's node — the host has it installed, PATH does not carry it.
+  try {
+    symlinkSync(realNodeBinary(), join(nodeDir, 'bin/node'));
+  } catch {
+    copyFileSync(realNodeBinary(), join(nodeDir, 'bin/node'));
+    chmodSync(join(nodeDir, 'bin/node'), 0o755);
+  }
+
+  // A mise stub that answers ONLY for the tools that are installed — a
+  // request for anything else is answered "not installed", exactly as mise
+  // does.
+  const whereAnswers = [`      'bun@${pinned}') echo '${bunDir}'; exit 0 ;;`];
+  const whichAnswers: string[] = [];
+  if (nodeResolution === 'where') {
+    whereAnswers.push(`      'node') echo '${nodeDir}'; exit 0 ;;`);
+  } else {
+    whichAnswers.push(`      'node') echo '${nodeDir}/bin/node'; exit 0 ;;`);
+  }
+  writeFileSync(
+    join(stubBin, 'mise'),
+    [
+      '#!/bin/sh',
+      'case "$1" in',
+      '  where)',
+      '    case "$2" in',
+      ...whereAnswers,
+      '    esac',
+      '    ;;',
+      '  which)',
+      '    case "$2" in',
+      ...whichAnswers,
+      '    esac',
+      '    ;;',
+      'esac',
+      'exit 1',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  chmodSync(join(stubBin, 'mise'), 0o755);
+
+  const run = (): RunResult => {
+    const result = spawnSync('/bin/bash', [join(repo, 'bin/setup')], {
+      cwd: root,
+      env: { PATH: `${stubBin}:${sysBin}`, HOME: root, PLAYWRIGHT_BROWSERS_PATH: cacheDir },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    return {
+      status: result.status ?? -1,
+      stdout: result.stdout ?? '',
+      stderr: result.stderr ?? '',
+    };
+  };
+
+  /** Every bun invocation the stub recorded, in the order setup made them. */
+  const bunCalls = (): string[] => {
+    if (!existsSync(bunLog)) return [];
+    return readFileSync(bunLog, 'utf8')
+      .split('\n')
+      .filter((line) => line.length > 0);
+  };
+
+  return {
+    root,
+    repo,
+    verifiedBun: join(bunDir, 'bin/bun'),
+    bunLog,
+    run,
+    bunCalls,
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+describe('bin/setup — the verified runtime survives the node resolution', () => {
+  /**
+   * The stages that decide the runtime are the ones AFTER the gate: the root
+   * install, the dummy/web build, the library check and the launch check.
+   * Each runs `bun` off PATH — so which `bun` PATH resolves to decides the
+   * runtime the whole checkout is provisioned on.
+   */
+  function expectVerifiedRuntime(fixture: ReturnType<typeof makeSetupFixture>): void {
+    const result = fixture.run();
+    expect(result.status).toBe(0);
+    // The script reports the runtime it verified.
+    expect(result.stdout).toContain(fixture.verifiedBun);
+    const calls = fixture.bunCalls();
+    // The stages really ran — an empty log would satisfy "no competing bun"
+    // without proving anything about the runtime they ran on: the root
+    // install, the library check and the launch check are all in there.
+    expect(calls).toContain('VERIFIED install');
+    expect(calls.some((call) => call.includes('chromium-libs.ts'))).toBe(true);
+    expect(calls.some((call) => call.endsWith('-e'))).toBe(true);
+    // No stage may have run on the bun that sits beside mise's node.
+    expect(calls.filter((call) => call.startsWith('COMPETING'))).toEqual([]);
+    expect(calls.every((call) => call.startsWith('VERIFIED'))).toBe(true);
+  }
+
+  test('the mise `where` branch keeps the verified bun ahead of the node dir', () => {
+    // node is resolved as a DIRECTORY (`mise where`): that directory goes on
+    // PATH, and it holds a bun of its own.
+    const fixture = makeSetupFixture({ nodeResolution: 'where' });
+    try {
+      expectVerifiedRuntime(fixture);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('the mise `which` branch keeps the verified bun ahead of the node dir', () => {
+    // node is resolved as a BINARY (`mise which`): the directory holding it
+    // goes on PATH, and it holds a bun of its own.
+    const fixture = makeSetupFixture({ nodeResolution: 'which' });
+    try {
+      expectVerifiedRuntime(fixture);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('MUTATION: prepending the node directory shadows the verified bun', () => {
+    // The guards above must not survive the bug they guard: a node directory
+    // prepended AHEAD of the verified bun directory puts the bun that sits
+    // beside mise's node first on PATH, and every later stage then runs on a
+    // runtime setup never verified.
+    const source = readFileSync(SETUP_SCRIPT, 'utf8');
+    const mutated = source.replace(
+      'export PATH="$(dirname "$BUN_PATH"):${node_bin_dir}:$PATH"',
+      'export PATH="${node_bin_dir}:$(dirname "$BUN_PATH"):$PATH"',
+    );
+    expect(mutated).not.toBe(source);
+
+    const fixture = makeSetupFixture({ script: mutated });
+    try {
+      const result = fixture.run();
+      expect(result.status).toBe(0);
+      const calls = fixture.bunCalls();
+      // The competing bun now runs the root install — the exact failure the
+      // guards above forbid.
+      expect(calls).toContain('COMPETING install');
+    } finally {
+      fixture.cleanup();
+    }
   });
 });
