@@ -12,6 +12,9 @@ The one-command entry point is `bin/setup` — installs root + dummy/web deps an
 builds the e2e fixture's `dist/`. `bin/check` is the matching CI gate (typecheck,
 lint, test). Both run from any cwd and are the same commands CI runs.
 
+`bin/setup` selects and verifies the Bun version CI pins and fails loud when
+that version cannot be obtained, so setup never runs on an arbitrary ambient bun.
+
 Boot the server in watch mode (for manual testing with an MCP client):
 
 ```bash
