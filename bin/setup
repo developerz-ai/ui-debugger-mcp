@@ -50,6 +50,8 @@ cd "$(dirname "$0")/.."
 # a runtime at exactly that version and VERIFIES the runtime's own --version.
 # It fails loud with a named `X_BUN_*:` diagnostic when the required runtime
 # cannot be obtained, so setup never proceeds on an arbitrary ambient bun.
+# It resolves the node it needs to read the CI configuration the same way:
+# from PATH, or from mise when node is installed there but not on PATH.
 #
 # The verified bun's directory goes FIRST on PATH — ahead of every other entry
 # that could hold a `bun`, so the root install, the dummy/web install, the
@@ -61,6 +63,30 @@ BUN_PATH=$(printf '%s\n' "$bun_env" | sed -n 's/^BUN_PATH=//p')
 [ -n "$BUN_PATH" ] || { echo "X_BUN_MISSING: bin/require-bun did not report a bun path" >&2; exit 1; }
 export PATH="$(dirname "$BUN_PATH"):$PATH"
 echo "==> bun $BUN_VERSION ($BUN_PATH)"
+
+# node is needed by the stages below (playwright-core's manifest, its CLI).
+# A host that manages its runtimes with mise commonly has node INSTALLED but
+# NOT on PATH — the mise activation this script replaced put it there, and a
+# checkout that has every runtime it needs must not be blocked by that. So an
+# installed mise-managed node is resolved here as well and put on PATH: `mise
+# where` / `mise which` RESOLVE an already-installed tool, they never fetch
+# one. Without a node the setup cannot continue, so it fails loud HERE rather
+# than dying later with a bare "node: command not found".
+if ! command -v node >/dev/null 2>&1; then
+  node_dir=$(mise where node 2>/dev/null || true)
+  if [ -n "$node_dir" ] && [ -x "${node_dir}/bin/node" ]; then
+    export PATH="${node_dir}/bin:$PATH"
+  else
+    node_bin=$(mise which node 2>/dev/null || true)
+    if [ -n "$node_bin" ] && [ -x "$node_bin" ]; then
+      export PATH="$(dirname "$node_bin"):$PATH"
+    fi
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    echo "X_NODE_MISSING: node is not on PATH and mise resolves no installed node — the playwright manifest and CLI need it; install node (e.g. 'mise install node') and re-run" >&2
+    exit 1
+  fi
+fi
 
 echo "==> bun install (root)"
 bun install

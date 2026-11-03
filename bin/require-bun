@@ -20,6 +20,12 @@
 # mise's own cache): it SELECTS and VERIFIES a runtime that is already
 # installed. When the required runtime is absent it fails loud, naming how to
 # obtain it — it never downloads.
+#
+# It also resolves the NODE it needs to read that configuration: from PATH, or
+# from mise when node is INSTALLED there but absent from PATH — the mise
+# activation this script replaced put it there. That resolution never
+# downloads either: `mise where` / `mise which` only resolve an already
+# installed tool.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -56,11 +62,31 @@ fi
 # node reads the workflow (the repo convention — bin/setup uses it for the
 # playwright manifest, bin/smoke-packed for package.json). Without it the pin
 # cannot be read, so the required version stays unresolved.
-if ! command -v node >/dev/null 2>&1; then
-  fail "X_BUN_VERSION_UNRESOLVED: required bun version unknown — node is not on PATH, so the bun version CI pins cannot be read from $WORKFLOW; install node and re-run"
+#
+# A host that manages its runtimes with mise commonly has node INSTALLED but
+# NOT on PATH — the mise activation this script replaced put it there, and a
+# checkout that has every runtime it needs must not be blocked by that. So an
+# installed mise-managed node is resolved BEFORE giving up: `mise where` and
+# `mise which` RESOLVE an already-installed tool, they never fetch one (mise's
+# auto-install is off above), so this stays offline.
+node_bin=$(command -v node 2>/dev/null || true)
+if [ -z "$node_bin" ] && command -v mise >/dev/null 2>&1; then
+  mise_node_dir=$(mise where node 2>/dev/null || true)
+  if [ -n "$mise_node_dir" ] && [ -x "${mise_node_dir}/bin/node" ]; then
+    node_bin="${mise_node_dir}/bin/node"
+  else
+    mise_node_path=$(mise which node 2>/dev/null || true)
+    if [ -n "$mise_node_path" ] && [ -x "$mise_node_path" ]; then
+      node_bin="$mise_node_path"
+    fi
+  fi
 fi
 
-pins=$(REQUIRE_BUN_WORKFLOW="$WORKFLOW" node <<'NODE'
+if [ -z "$node_bin" ]; then
+  fail "X_BUN_VERSION_UNRESOLVED: required bun version unknown — node is not on PATH and mise resolves no installed node, so the bun version CI pins cannot be read from $WORKFLOW; install node (e.g. 'mise install node') and re-run"
+fi
+
+pins=$(REQUIRE_BUN_WORKFLOW="$WORKFLOW" "$node_bin" <<'NODE'
   const fs = require("node:fs");
   const text = fs.readFileSync(process.env.REQUIRE_BUN_WORKFLOW, "utf8");
   const lines = text.split("\n");
@@ -71,6 +97,40 @@ pins=$(REQUIRE_BUN_WORKFLOW="$WORKFLOW" node <<'NODE'
   let withIndent = 0;
 
   const indentOf = (line) => line.length - line.trimStart().length;
+
+  // A YAML scalar — quoted or plain. A trailing `# comment` is NOT part of
+  // the value: the comment starts at a `#` OUTSIDE the quotes that is
+  // preceded by whitespace (or that is the whole value). So
+  // `bun-version: "1.4.3" # CI runtime` pins 1.4.3 — NOT `1.4.3 # CI
+  // runtime`, a version no runtime ever reports.
+  const parseScalar = (raw) => {
+    const scalar = raw.trim();
+    const quote = scalar[0];
+    if (quote === '"' || quote === "'") {
+      let value = "";
+      for (let i = 1; i < scalar.length; i += 1) {
+        const ch = scalar[i];
+        if (quote === '"' && ch === "\\") {
+          value += scalar[i + 1] || "";
+          i += 1;
+          continue;
+        }
+        if (ch === quote) {
+          // A single-quoted scalar escapes a quote by doubling it.
+          if (quote === "'" && scalar[i + 1] === "'") {
+            value += "'";
+            i += 1;
+            continue;
+          }
+          return value.trim();
+        }
+        value += ch;
+      }
+      return value.trim();
+    }
+    const commentAt = scalar.search(/(?:^|\s)#/);
+    return (commentAt === -1 ? scalar : scalar.slice(0, commentAt)).trim();
+  };
 
   for (const raw of lines) {
     const line = raw.replace(/\s+$/, "");
@@ -90,7 +150,7 @@ pins=$(REQUIRE_BUN_WORKFLOW="$WORKFLOW" node <<'NODE'
     // `uses:` identifies the action, wherever it appears within its step.
     const usesMatch = trimmed.match(/^(?:-\s+)?uses:\s*(.*)$/);
     if (usesMatch) {
-      step.uses = usesMatch[1].replace(/["\x27]/g, "").trim();
+      step.uses = parseScalar(usesMatch[1]);
       continue;
     }
 
@@ -110,7 +170,7 @@ pins=$(REQUIRE_BUN_WORKFLOW="$WORKFLOW" node <<'NODE'
       }
       const versionMatch = trimmed.match(/^(?:-\s+)?bun-version:\s*(.*)$/);
       if (versionMatch) {
-        step.version = versionMatch[1].replace(/["\x27]/g, "").trim();
+        step.version = parseScalar(versionMatch[1]);
       }
       continue;
     }

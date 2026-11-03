@@ -25,6 +25,7 @@ import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -92,6 +93,12 @@ type FixtureOptions = {
   bunVersion?: string | null;
   /** The version the mise-provided bun reports. `null` = no mise stub. */
   miseVersion?: string | null;
+  /** The script text the stub repo carries. Defaults to the real one. */
+  script?: string;
+  /** Whether node is on the stub PATH. Default: true. */
+  nodeOnPath?: boolean;
+  /** mise has an INSTALLED node — the host manages it, PATH does not. */
+  miseNode?: boolean;
 };
 
 /**
@@ -109,7 +116,13 @@ function makeFixture(options: FixtureOptions = {}) {
   mkdirSync(stubBin, { recursive: true });
   mkdirSync(sysBin, { recursive: true });
 
-  copyFileSync(REQUIRE_BUN, join(repo, 'bin/require-bun'));
+  // The script under test — the real one, or a mutated copy a guard proves
+  // it can fail on.
+  writeFileSync(
+    join(repo, 'bin/require-bun'),
+    options.script ?? readFileSync(REQUIRE_BUN, 'utf8'),
+    'utf8',
+  );
   chmodSync(join(repo, 'bin/require-bun'), 0o755);
   writeFileSync(
     join(repo, '.github/workflows/ci.yml'),
@@ -118,6 +131,10 @@ function makeFixture(options: FixtureOptions = {}) {
   );
 
   for (const name of ['node', 'dirname', 'basename']) {
+    // A host that manages node with mise can have it INSTALLED but not on
+    // PATH — the fixture reproduces that by leaving node out of the stub
+    // PATH, so the script has to resolve it through mise.
+    if (name === 'node' && options.nodeOnPath === false) continue;
     const source = hostBinary(name);
     try {
       symlinkSync(source, join(sysBin, name));
@@ -135,20 +152,69 @@ function makeFixture(options: FixtureOptions = {}) {
   }
 
   const miseDir = join(root, 'mise-install');
-  if (options.miseVersion !== null && options.miseVersion !== undefined) {
+  const miseNodeDir = join(root, 'mise-node');
+  const miseLog = join(stubBin, 'mise-calls.log');
+  const miseEnvLog = join(stubBin, 'mise-env.log');
+  const hasMiseBun = options.miseVersion !== null && options.miseVersion !== undefined;
+
+  if (hasMiseBun) {
     mkdirSync(join(miseDir, 'bin'), { recursive: true });
     const miseBun = join(miseDir, 'bin/bun');
     writeFileSync(miseBun, `#!/bin/sh\necho "${options.miseVersion}"\n`, 'utf8');
     chmodSync(miseBun, 0o755);
-    // A mise stub that answers only the `where bun@<version>` query the
-    // script asks — never a download.
-    const miseStub = join(stubBin, 'mise');
+  }
+
+  if (options.miseNode === true) {
+    // mise has node INSTALLED (the host manages it) — PATH does not have it.
+    mkdirSync(join(miseNodeDir, 'bin'), { recursive: true });
+    const miseNodeBin = join(miseNodeDir, 'bin/node');
+    try {
+      symlinkSync(realNodeBinary(), miseNodeBin);
+    } catch {
+      copyFileSync(realNodeBinary(), miseNodeBin);
+      chmodSync(miseNodeBin, 0o755);
+    }
+  }
+
+  if (hasMiseBun || options.miseNode === true) {
+    // A mise stub that answers ONLY for tools that are ALREADY INSTALLED —
+    // a request for any other version is answered "not installed", exactly
+    // as mise does — and that RECORDS every call, so a test can assert the
+    // EXACT query the script made. A stub that answered every version would
+    // hide a wrong request.
+    const whereAnswers: string[] = [];
+    if (hasMiseBun) {
+      whereAnswers.push(`      'bun@${options.miseVersion}') echo '${miseDir}'; exit 0 ;;`);
+    }
+    if (options.miseNode === true) {
+      whereAnswers.push(`      'node') echo '${miseNodeDir}'; exit 0 ;;`);
+    }
+    const whichAnswers: string[] =
+      options.miseNode === true ? [`      'node') echo '${miseNodeDir}/bin/node'; exit 0 ;;`] : [];
     writeFileSync(
-      miseStub,
-      `#!/bin/sh\nif [ "$1" = "where" ]; then\n  echo "${miseDir}"\n  exit 0\nfi\nexit 1\n`,
+      join(stubBin, 'mise'),
+      [
+        '#!/bin/sh',
+        `printf '%s\\n' "$*" >> '${miseLog}'`,
+        `printf 'MISE_AUTO_INSTALL=%s\\n' "\${MISE_AUTO_INSTALL:-unset}" >> '${miseEnvLog}'`,
+        'case "$1" in',
+        '  where)',
+        '    case "$2" in',
+        ...whereAnswers,
+        '    esac',
+        '    ;;',
+        '  which)',
+        '    case "$2" in',
+        ...whichAnswers,
+        '    esac',
+        '    ;;',
+        'esac',
+        'exit 1',
+        '',
+      ].join('\n'),
       'utf8',
     );
-    chmodSync(miseStub, 0o755);
+    chmodSync(join(stubBin, 'mise'), 0o755);
   }
 
   const path = `${stubBin}:${sysBin}`;
@@ -172,9 +238,19 @@ function makeFixture(options: FixtureOptions = {}) {
     repo,
     stubBun,
     miseBun: join(miseDir, 'bin/bun'),
+    miseLog,
+    miseEnvLog,
     run,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
+}
+
+/** Every mise call the stub recorded, in the order the script made them. */
+function miseCalls(fixture: { miseLog: string }): string[] {
+  if (!existsSync(fixture.miseLog)) return [];
+  return readFileSync(fixture.miseLog, 'utf8')
+    .split('\n')
+    .filter((line) => line.length > 0);
 }
 
 /** The `BUN_VERSION=` / `BUN_PATH=` values a successful run printed. */
@@ -272,6 +348,57 @@ describe('bin/require-bun — the required version comes from ci.yml', () => {
       const result = fixture.run();
       expect(result.status).not.toBe(0);
       expect(result.stderr).toContain('X_BUN_VERSION_UNRESOLVED:');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('MUTATION: a pin with a trailing comment yields the version, not the comment', () => {
+    // `bun-version: "1.4.3" # CI runtime` pins 1.4.3 — the comment is NOT part
+    // of the value. A parser that keeps it derives `1.4.3 # CI runtime`, a
+    // version no runtime ever reports, so setup would reject a bun that
+    // matches CI exactly.
+    const workflow = [
+      'name: ci',
+      'on: push',
+      'jobs:',
+      '  test:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - uses: oven-sh/setup-bun@v2 # the runtime CI installs',
+      '        with:',
+      '          bun-version: "1.4.3" # CI runtime',
+      '',
+    ].join('\n');
+    const fixture = makeFixture({ workflow, bunVersion: '1.4.3' });
+    try {
+      const result = fixture.run();
+      expect(result.status).toBe(0);
+      expect(parseOutput(result.stdout).version).toBe('1.4.3');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('MUTATION: an UNQUOTED pin with a trailing comment yields the version', () => {
+    // Same pin without quotes — a plain YAML scalar, where the comment
+    // starts at the `#` the whitespace introduces.
+    const workflow = [
+      'name: ci',
+      'on: push',
+      'jobs:',
+      '  test:',
+      '    steps:',
+      '      - uses: oven-sh/setup-bun@v2',
+      '        with:',
+      '          bun-version: 1.4.3 # CI runtime',
+      '',
+    ].join('\n');
+    const fixture = makeFixture({ workflow, bunVersion: '1.4.3' });
+    try {
+      const result = fixture.run();
+      expect(result.status).toBe(0);
+      expect(parseOutput(result.stdout).version).toBe('1.4.3');
     } finally {
       fixture.cleanup();
     }
@@ -374,6 +501,102 @@ describe('bin/require-bun — a matching runtime is accepted', () => {
       const result = fixture.run();
       expect(result.status).not.toBe(0);
       expect(result.stderr).toContain('X_BUN_VERSION_MISMATCH:');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('the mise query asks for EXACTLY the CI-pinned version', () => {
+    const expected = ciPinnedVersion();
+    const fixture = makeFixture({ bunVersion: expected, miseVersion: expected });
+    try {
+      const result = fixture.run();
+      expect(result.status).toBe(0);
+      expect(parseOutput(result.stdout).path).toBe(fixture.miseBun);
+      // The query names the version CI pins — mise resolves an INSTALLED
+      // version, so any other spec would resolve nothing.
+      expect(miseCalls(fixture)).toContain(`where bun@${expected}`);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('MUTATION: a mise query for another version turns the guard red', () => {
+    // The stub answers ONLY the installed version, so a script that asked
+    // for another one selects no mise runtime at all — and the exact query
+    // the guard above asserts is gone.
+    const expected = ciPinnedVersion();
+    const source = readFileSync(REQUIRE_BUN, 'utf8');
+    const mutated = source.replace(
+      /mise where "bun@\$\{required_version\}"/,
+      'mise where "bun@0.0.1"',
+    );
+    expect(mutated).not.toBe(source);
+    const fixture = makeFixture({
+      script: mutated,
+      bunVersion: expected,
+      miseVersion: expected,
+    });
+    try {
+      const result = fixture.run();
+      expect(miseCalls(fixture)).not.toContain(`where bun@${expected}`);
+      expect(parseOutput(result.stdout).path).not.toBe(fixture.miseBun);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+});
+
+describe('bin/require-bun — node comes from PATH or from mise', () => {
+  test('a node that is INSTALLED but not on PATH is resolved through mise', () => {
+    // The host manages its runtimes with mise: node is installed, PATH does
+    // not carry it. The workflow must still be read — the pin derives from
+    // it — so the node is resolved through mise instead of failing.
+    const expected = ciPinnedVersion();
+    const fixture = makeFixture({ bunVersion: expected, nodeOnPath: false, miseNode: true });
+    try {
+      const result = fixture.run();
+      expect(result.status).toBe(0);
+      expect(parseOutput(result.stdout).version).toBe(expected);
+      // The resolution never downloads: mise's auto-install stays off.
+      expect(readFileSync(fixture.miseEnvLog, 'utf8')).toContain('MISE_AUTO_INSTALL=0');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('MUTATION: without the mise node resolution the same fixture fails', () => {
+    const expected = ciPinnedVersion();
+    const source = readFileSync(REQUIRE_BUN, 'utf8');
+    const mutated = source.replace(
+      'if [ -z "$node_bin" ] && command -v mise >/dev/null 2>&1; then',
+      'if false; then',
+    );
+    expect(mutated).not.toBe(source);
+    const fixture = makeFixture({
+      script: mutated,
+      bunVersion: expected,
+      nodeOnPath: false,
+      miseNode: true,
+    });
+    try {
+      const result = fixture.run();
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('X_BUN_VERSION_UNRESOLVED:');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('a node that is nowhere at all fails loud', () => {
+    const expected = ciPinnedVersion();
+    const fixture = makeFixture({ bunVersion: expected, nodeOnPath: false });
+    try {
+      const result = fixture.run();
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('X_BUN_VERSION_UNRESOLVED:');
+      // The diagnostic must name how to obtain one.
+      expect(result.stderr).toContain('mise install node');
     } finally {
       fixture.cleanup();
     }

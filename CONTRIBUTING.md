@@ -14,6 +14,8 @@ lint, test). Both run from any cwd and are the same commands CI runs.
 
 `bin/setup` selects and verifies the Bun version CI pins and fails loud when
 that version cannot be obtained, so setup never runs on an arbitrary ambient bun.
+The Node it needs comes from PATH, or — when Node is installed but missing from
+PATH — from `mise`. Both are RESOLVED, never downloaded.
 
 Boot the server in watch mode (for manual testing with an MCP client):
 
