@@ -153,7 +153,7 @@ OpenAI-compatible router lets the model swap freely; the prompt must make any
 competent model behave the same.
 
 - **In-repo, versioned, tested.** Prompts live under `src/agent/prompts/`
-  (e.g. `debug-agent.md`, per-target addenda). Treated as code: reviewed,
+  (e.g. `debug-agent.ts`, per-target addenda). Treated as code: reviewed,
   diffed, unit-tested against expected tool-call behavior.
 - **Don't rely on model defaults.** Never assume the model "knows" to take a
   screenshot on failure, report visual issues, or stop at the goal. Spell it out:
