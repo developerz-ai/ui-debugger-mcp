@@ -15,9 +15,11 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { loadWorkspaceDir } from '../config/load.js';
+import { ConfigError } from '../errors.js';
 import { FindingsSchema } from '../findings/schema.js';
+import { readLivePointer } from '../session/live-pointer.js';
 import { ownerAlive } from '../session/process-identity.js';
 import { markStatus, readState, restoreRunning } from '../session/state-file.js';
 import { resolveProject, workspacePaths } from '../session/workspace.js';
@@ -33,17 +35,51 @@ async function readFindings(sessionDir: string) {
   }
 }
 
-/** Resolve `state.json` for the current project (no API key needed). */
-function stateJsonPath(cwd = process.cwd()): { project: string; stateJson: string } {
-  // A relative workspace is anchored at the project root (cwd), matching the server.
-  const base = loadWorkspaceDir(cwd);
-  const workspace = workspacePaths(cwd, isAbsolute(base) ? base : join(cwd, base));
-  return { project: resolveProject(cwd), stateJson: workspace.stateJson };
+/** The workspace the CURRENT config resolves to; `null` when the config is unreadable/invalid. */
+function configWorkspace(cwd: string) {
+  try {
+    // A relative workspace is anchored at the project root (cwd), matching the server.
+    const base = loadWorkspaceDir(cwd);
+    return workspacePaths(cwd, isAbsolute(base) ? base : join(cwd, base));
+  } catch (err) {
+    if (err instanceof ConfigError) return null;
+    throw err;
+  }
+}
+
+/**
+ * Resolve `state.json` for the current project (no API key needed).
+ *
+ * The server's workspace was fixed from the config at boot; the config may have
+ * been edited since. The live pointer names the root the server really owns, so
+ * it wins — even over an invalid config. No usable pointer (legacy server, no run
+ * yet) → the config-resolved workspace, whose ConfigError then surfaces loud.
+ * `drift` is set when the live root and the current config disagree.
+ */
+async function resolveState(
+  cwd: string,
+): Promise<{ project: string; stateJson: string; drift?: string }> {
+  const project = resolveProject(cwd);
+  const config = configWorkspace(cwd);
+  const liveRoot = await readLivePointer(cwd);
+  if (liveRoot !== null) {
+    const stateJson = join(liveRoot, 'state.json');
+    if ((await readState(stateJson)) !== null) {
+      if (config !== null && resolve(config.root) === resolve(liveRoot)) {
+        return { project, stateJson };
+      }
+      const now = config === null ? 'is unreadable or invalid' : `resolves to ${config.root}`;
+      const drift = `the live run's workspace is ${liveRoot}, but the config now ${now} — config edited since the server started`;
+      return { project, stateJson, drift };
+    }
+  }
+  if (config === null) loadWorkspaceDir(cwd); // rethrows the ConfigError — fail loud
+  return { project, stateJson: (config ?? workspacePaths(cwd)).stateJson };
 }
 
 /** `ui-debugger-mcp status` — print the active run's state + findings summary. */
 export async function runStatus(cwd = process.cwd()): Promise<void> {
-  const { project, stateJson } = stateJsonPath(cwd);
+  const { project, stateJson, drift } = await resolveState(cwd);
   const state = await readState(stateJson);
   if (!state) {
     console.log(`ui-debugger-mcp: no debug run recorded for '${project}'.`);
@@ -78,6 +114,7 @@ export async function runStatus(cwd = process.cwd()): Promise<void> {
   console.log(`  findings: ${counts}`);
   console.log(`  started:  ${state.startedAt}`);
   console.log(`  session:  ${state.sessionDir}`);
+  if (drift) console.log(`  drift:    ${drift}`);
 }
 
 /** Signal seam — `process.kill` in production, a stub under test. */
@@ -90,7 +127,7 @@ export async function runStop(
     process.kill(pid, signal);
   },
 ): Promise<void> {
-  const { project, stateJson } = stateJsonPath(cwd);
+  const { project, stateJson } = await resolveState(cwd);
   const state = await readState(stateJson);
   if (!state) {
     console.log(`ui-debugger-mcp: no active debug run to stop for '${project}'.`);

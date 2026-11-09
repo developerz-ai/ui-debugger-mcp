@@ -33,8 +33,8 @@ import { createShutdown } from './services/shutdown.js';
 import { SessionManager } from './session/manager.js';
 import { assertOwnerLockBackend } from './session/owner-lock.js';
 import type { Session } from './session/session.js';
-import { FileStatePort } from './session/state-file.js';
-import { ensureWorkspace, workspacePaths } from './session/workspace.js';
+import { FileStatePort, type StatePort } from './session/state-file.js';
+import { ensureWorkspace, type WorkspacePaths, workspacePaths } from './session/workspace.js';
 
 /** The seams the boot drives — each injectable, so the boot is drivable in-process. */
 export interface BootDeps {
@@ -48,6 +48,15 @@ export interface BootDeps {
   startServer?: (tools: McpTool[], init: { onClose?: () => void }) => Promise<McpServer>;
   /** Terminate the process. Defaults to `process.exit`. */
   exit?: (code: number) => void;
+  /**
+   * Build the state port the debug service records into. Defaults to
+   * `new FileStatePort(workspace, { cwd })` — a real server MUST pass `cwd`
+   * through, because that is the only thing that makes `record()` drop the
+   * config-independent live pointer `status`/`stop` resolve the workspace
+   * from after a config edit (see `live-pointer.ts`). A test seam so that
+   * can be pinned without a full `start_debug` run.
+   */
+  createStatePort?: (workspace: WorkspacePaths, opts: { cwd?: string }) => StatePort;
 }
 
 /** What a successful boot hands back. */
@@ -123,12 +132,14 @@ export async function bootServer(cwd: string, deps: BootDeps = {}): Promise<Boot
     },
     workspace,
   });
+  const createStatePort: NonNullable<BootDeps['createStatePort']> =
+    deps.createStatePort ?? ((ws, opts) => new FileStatePort(ws, opts));
   const service = new DebugService({
     manager,
     config,
     cwd,
     build: builder,
-    state: new FileStatePort(workspace),
+    state: createStatePort(workspace, { cwd }),
     // Everything above was resolved from the config file as it read a moment
     // ago; if it changes underneath us, say so instead of running on stale wiring.
     configChanged: makeConfigWatch(cwd),
