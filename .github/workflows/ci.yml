@@ -31,8 +31,9 @@ jobs:
         with:
           node-version: "24"
 
+      # Frozen: a drifted bun.lock must fail the job, never be rewritten in CI.
       - name: install
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: lint
         run: bun run lint
