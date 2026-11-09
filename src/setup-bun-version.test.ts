@@ -1030,8 +1030,8 @@ describe('bin/setup — the verified runtime survives the node resolution', () =
     // runtime setup never verified.
     const source = readFileSync(SETUP_SCRIPT, 'utf8');
     const mutated = source.replace(
-      'export PATH="$(dirname "$BUN_PATH"):${node_bin_dir}:$PATH"',
-      'export PATH="${node_bin_dir}:$(dirname "$BUN_PATH"):$PATH"',
+      `export PATH="$(dirname "$BUN_PATH"):\${node_bin_dir}:$PATH"`,
+      `export PATH="\${node_bin_dir}:$(dirname "$BUN_PATH"):$PATH"`,
     );
     expect(mutated).not.toBe(source);
 
@@ -1066,6 +1066,7 @@ function resolveBrowserCacheDir(
     home: string | null;
     xdgCacheHome?: string;
     browsersPath?: string;
+    npmConfigBrowsersPath?: string;
     bunPath: string;
     cwd: string;
   },
@@ -1091,8 +1092,9 @@ function resolveBrowserCacheDir(
       BUN_PATH: probe.bunPath,
       PLAYWRIGHT_BROWSERS_PATH: probe.browsersPath ?? '',
       XDG_CACHE_HOME: probe.xdgCacheHome ?? '',
-      // The host's npm must never leak its config spellings into a run.
-      npm_config_playwright_browsers_path: '',
+      // The host's npm must never leak its config spellings into a run,
+      // unless the probe itself is exercising that fallback.
+      npm_config_playwright_browsers_path: probe.npmConfigBrowsersPath ?? '',
       npm_package_config_playwright_browsers_path: '',
     };
     if (probe.home !== null) env.HOME = probe.home;
@@ -1166,6 +1168,25 @@ describe('bin/setup resolves the browser directory the way playwright does', () 
       ).toBe(join(real, '.local-browsers'));
     });
   });
+
+  linuxOnly(
+    'npm_config_playwright_browsers_path set, PLAYWRIGHT_BROWSERS_PATH empty: resolves to it',
+    () => {
+      withFakeTree(({ root, bun }) => {
+        const home = join(root, 'fake-home');
+        mkdirSync(home);
+        const npmDir = join(root, 'fake-npm-browsers');
+        expect(
+          resolveBrowserCacheDir(source, {
+            home,
+            npmConfigBrowsersPath: npmDir,
+            bunPath: bun,
+            cwd: root,
+          }),
+        ).toBe(npmDir);
+      });
+    },
+  );
 
   linuxOnly('neither variable set: $HOME/.cache/ms-playwright', () => {
     withFakeTree(({ root, bun }) => {

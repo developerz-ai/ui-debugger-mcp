@@ -208,16 +208,18 @@ _dz_package_root() {
   # The playwright-core PACKAGE ROOT — the directory holding its package.json,
   # taken by realpath the way playwright takes it (`packageRoot =
   # join(__dirname, "..")`, coreBundle.js:11891, then `../package.json` read
-  # from there). Searched up the ancestors of the VERIFIED runtime's own
-  # directory first (`node_modules/.bin/bun` resolves to its real binary here,
-  # as playwright resolves the realpath of the module it loads), then up from
-  # the cwd, which `cd "$(dirname "$0")/.."` above made the repo root — the
-  # tree whose `node node_modules/playwright-core/cli.js install chromium`
-  # downloads. bin/require-bun can report a mise install path with no
-  # node_modules in its ancestors, so the second start is what keeps this
-  # inside the checkout instead of failing.
+  # from there). Searched up the ancestors of the cwd FIRST, which
+  # `cd "$(dirname "$0")/.."` above made the repo root — the tree whose
+  # `node node_modules/playwright-core/cli.js install chromium` downloads, and
+  # the copy the launch check below loads. Only when the repo tree has none is
+  # the VERIFIED runtime's own directory walked (`node_modules/.bin/bun`
+  # resolves to its real binary here, as playwright resolves the realpath of
+  # the module it loads) — otherwise a playwright-core that happens to sit
+  # above the bun binary (for example a global one under lib/node_modules)
+  # would win over the repo's own copy that `PLAYWRIGHT_BROWSERS_PATH=0`
+  # actually resolves against.
   local start="" dir="" module=""
-  for start in "$(dirname "$(_dz_real_path "$BUN_PATH")")" "$PWD"; do
+  for start in "$PWD" "$(dirname "$(_dz_real_path "$BUN_PATH")")"; do
     dir="$start"
     # Only an absolute start can terminate at `/`; anything else is skipped
     # rather than walked (`dirname` of an empty path is `.`, which circles).
