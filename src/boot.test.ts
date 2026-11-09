@@ -21,6 +21,7 @@ import { type BootDeps, bootServer } from './boot.js';
 import { DEFAULT_MODELS } from './config/load.js';
 import { McpServerError, WorkspaceError } from './errors.js';
 import { startStdioServer } from './mcp/server.js';
+import { noopStatePort } from './session/state-file.js';
 import { workspacePaths } from './session/workspace.js';
 
 /**
@@ -156,6 +157,40 @@ test('a host with a flock backend boots: the stdio MCP server is connected', asy
     // Detection took NO run lock — the boot must not claim the workspace the
     // first run will claim.
     expect(existsSync(join(workspace.root, 'owner.lock'))).toBe(false);
+  } finally {
+    result.dispose();
+    await result.server.close();
+    stdin.end();
+  }
+});
+
+test('the boot builds the state port with this cwd, so status/stop can find the run after a config edit', async () => {
+  // `FileStatePort` only drops the config-independent live pointer — the thing
+  // `status`/`stop` rely on once the workspace moves under an edited config —
+  // when it is constructed WITH the project's cwd (see `live-pointer.ts`).
+  // `control.test.ts` and `state-file.test.ts` each build their own port with
+  // `cwd` directly, so neither would notice `boot.ts` going back to
+  // `new FileStatePort(workspace)` (dropping `{ cwd }`) at its call site.
+  // Driving that through a real `record()` would mean actually launching a
+  // browser, so this pins the call site itself via the boot's own seam.
+  const cwd = await makeProject(CONFIG);
+  const workspace = workspacePaths(cwd, CONFIG.workspace);
+  const stdin = new PassThrough();
+  const calls: Array<{ workspace: unknown; opts: { cwd?: string } }> = [];
+
+  const result = await bootServer(cwd, {
+    startServer: stdioServer(stdin),
+    exit: () => undefined,
+    createStatePort: (ws, opts) => {
+      calls.push({ workspace: ws, opts });
+      return noopStatePort;
+    },
+  });
+
+  try {
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.workspace).toEqual(workspace);
+    expect(calls[0]?.opts.cwd).toBe(cwd);
   } finally {
     result.dispose();
     await result.server.close();
