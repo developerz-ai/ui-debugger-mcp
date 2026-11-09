@@ -28,7 +28,8 @@
 #                             to need. Skipped when both the pinned chromium AND
 #                             its headless shell are already in the Playwright
 #                             cache dir, so a re-run with the browser present
-#                             does NOT re-download.
+#                             does NOT re-download. That dir is RESOLVED, not
+#                             assumed — see `_dz_cache_dir` where it happens.
 #   5. Library check        — `bun src/cli/chromium-libs.ts "$CACHE_DIR"` proves
 #                             every shared library of the pinned headless-shell
 #                             binary resolves. Apt / install-deps runs ONLY when
@@ -116,9 +117,175 @@ echo "==> dummy/web fixture (install + build)"
   bun run build
 )
 
-# Resolve the cache dir the way playwright-core does internally: default to
-# ~/.cache/ms-playwright unless PLAYWRIGHT_BROWSERS_PATH overrides it.
-CACHE_DIR="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
+# Resolve the browser cache dir the way playwright-core itself does, so every
+# gate below (the skip-when-cached check, the apt repair reached through the
+# library check, and `bun src/cli/chromium-libs.ts "$CACHE_DIR"`) looks where
+# `node node_modules/playwright-core/cli.js install chromium` will actually
+# have put the binaries. The old one-line
+#   CACHE_DIR="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
+# assumed a literal PLAYWRIGHT_BROWSERS_PATH, never knew the '=0' meaning and
+# ignored XDG_CACHE_HOME: a checkout whose browsers sit in $XDG_CACHE_HOME, or
+# an install run under PLAYWRIGHT_BROWSERS_PATH=0, read as "browser absent" and
+# re-downloaded into a dir the launch does not use.
+#
+# Mirrors the pinned playwright-core's own resolution — its `registryDirectory`
+# IIFE (node_modules/playwright-core/lib/coreBundle.js:34465-34478) over
+# `defaultRegistryDirectory`/`computeDefaultCacheDirectory` (:34009-34023):
+#   PLAYWRIGHT_BROWSERS_PATH=0          -> <playwright-core package root>/.local-browsers
+#   PLAYWRIGHT_BROWSERS_PATH=<dir>      -> <dir>
+#   (unset)                             -> the platform default below
+# plus npm's `npm_config_*` / `npm_package_config_*` env fallbacks (coreBundle.js
+# :8835-8840 `getFromENV`) — an install run under one of those is the same
+# install; skipping the download here and letting playwright fetch elsewhere is
+# how a custom cache used to read as empty. `0` is NOT special to
+# XDG_CACHE_HOME: the resolved dir existing is the whole check.
+#
+# The IIFE's last step — resolving a RELATIVE answer against INIT_CWD/cwd — is
+# deliberately not reproduced: setup `cd`s to the repo root, and the download
+# and both gates run from that same cwd, so a relative value means the same
+# directory to each of them here.
+_dz_default_registry_dir() {
+  # `computeDefaultCacheDirectory()` + "ms-playwright" (coreBundle.js:34009-34023,
+  # in shell): linux returns `XDG_CACHE_HOME || join(homedir(), ".cache")`, darwin
+  # `join(homedir(), "Library", "Caches")`. So XDG_CACHE_HOME wins on Linux, HOME
+  # wins on macOS, and $HOME/.cache is the LAST resort — the one the old
+  # `:-$HOME/.cache/ms-playwright` one-liner treated as THE answer.
+  #
+  # playwright's third arm (win32 → LOCALAPPDATA) is out of reach in a POSIX
+  # script that already needs apt/`$HOME`, so any other kernel takes the linux
+  # arm; the same trade the script makes everywhere else.
+  local kernel=""
+  kernel="$(uname 2>/dev/null || true)"
+  if [ "$kernel" != "Darwin" ] && [ -n "${XDG_CACHE_HOME:-}" ]; then
+    # Linux: XDG_CACHE_HOME wins outright — homedir() is never consulted, so a
+    # checkout whose browsers sit in $XDG_CACHE_HOME is a HIT here, not a
+    # re-download into a dir the launch does not use.
+    printf '%s\n' "$XDG_CACHE_HOME/ms-playwright"
+    return 0
+  fi
+  local home="${HOME:-}"
+  if [ -z "$home" ]; then
+    # No HOME to build the default from. Say so and fail rather than answer
+    # with a directory nobody will read (os.homedir()'s passwd lookup is out of
+    # reach in shell).
+    echo "neither HOME nor XDG_CACHE_HOME is set; cannot find the browser cache" >&2
+    return 1
+  fi
+  if [ "$kernel" = "Darwin" ]; then
+    printf '%s\n' "$home/Library/Caches/ms-playwright"
+    return 0
+  fi
+  printf '%s\n' "$home/.cache/ms-playwright"
+}
+
+_dz_real_path() {
+  # The realpath of `$1`, or `$1` itself when the platform's realpath declines
+  # (GNU answers a not-yet-existing multi-level path, macOS' does not) or when
+  # the platform has neither realpath nor readlink -f. A path that cannot be
+  # resolved is answered with itself and the caller treats a missing result as
+  # absent — never a reason to abort, and NEVER an empty answer: an empty
+  # `dirname` is `.`, which would make the walk below circle forever.
+  if command -v realpath >/dev/null 2>&1; then
+    local resolved=""
+    resolved="$(realpath "$1" 2>/dev/null || true)"
+    if [ -n "$resolved" ]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+  if command -v readlink >/dev/null 2>&1; then
+    local linked=""
+    linked="$(readlink -f "$1" 2>/dev/null || true)"
+    if [ -n "$linked" ]; then
+      printf '%s\n' "$linked"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$1"
+}
+
+_dz_package_root() {
+  # The playwright-core PACKAGE ROOT — the directory holding its package.json,
+  # taken by realpath the way playwright takes it (`packageRoot =
+  # join(__dirname, "..")`, coreBundle.js:11891, then `../package.json` read
+  # from there). Searched up the ancestors of the cwd FIRST, which
+  # `cd "$(dirname "$0")/.."` above made the repo root — the tree whose
+  # `node node_modules/playwright-core/cli.js install chromium` downloads, and
+  # the copy the launch check below loads. Only when the repo tree has none is
+  # the VERIFIED runtime's own directory walked (`node_modules/.bin/bun`
+  # resolves to its real binary here, as playwright resolves the realpath of
+  # the module it loads) — otherwise a playwright-core that happens to sit
+  # above the bun binary (for example a global one under lib/node_modules)
+  # would win over the repo's own copy that `PLAYWRIGHT_BROWSERS_PATH=0`
+  # actually resolves against.
+  local start="" dir="" module=""
+  for start in "$PWD" "$(dirname "$(_dz_real_path "$BUN_PATH")")"; do
+    dir="$start"
+    # Only an absolute start can terminate at `/`; anything else is skipped
+    # rather than walked (`dirname` of an empty path is `.`, which circles).
+    while [ -n "$dir" ] && [ "${dir#/}" != "$dir" ]; do
+      module="$dir/node_modules/playwright-core"
+      if [ -f "$module/package.json" ]; then
+        module="$(_dz_real_path "$module")"
+        if [ -n "$module" ] && [ -f "$module/package.json" ]; then
+          printf '%s\n' "$module"
+          return 0
+        fi
+      fi
+      if [ "$dir" = "/" ]; then
+        break
+      fi
+      dir="$(dirname "$dir")"
+    done
+  done
+  echo "playwright-core (its package.json) not found from $BUN_PATH or $PWD" >&2
+  return 1
+}
+
+_dz_browsers_dir() {
+  # `getFromENV("PLAYWRIGHT_BROWSERS_PATH")` (coreBundle.js:8835-8840): the
+  # plain variable first, then npm's two config spellings, each only consulted
+  # when the one above it is empty. Printed explicitly rather than via
+  # `${!name:-}` indirect expansion, which macOS' stock bash 3.2 does not
+  # support. Prints nothing when no spelling is set — the caller then takes the
+  # default arm.
+  if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+    printf '%s\n' "$PLAYWRIGHT_BROWSERS_PATH"
+    return 0
+  fi
+  if [ -n "${npm_config_playwright_browsers_path:-}" ]; then
+    printf '%s\n' "$npm_config_playwright_browsers_path"
+    return 0
+  fi
+  if [ -n "${npm_package_config_playwright_browsers_path:-}" ]; then
+    printf '%s\n' "$npm_package_config_playwright_browsers_path"
+  fi
+}
+
+_dz_cache_dir() {
+  # The `registryDirectory` IIFE, in shell: '0' -> the package-local cache,
+  # any other value -> the value, nothing -> the platform default. The resolved
+  # directory EXISTING is the whole skip check downstream, so nothing here
+  # requires it to be there — and `0` is not special to XDG_CACHE_HOME.
+  local env_defined="" out="" pkg=""
+  env_defined="$(_dz_browsers_dir)"
+  if [ "$env_defined" = "0" ]; then
+    if ! pkg="$(_dz_package_root)" || [ -z "$pkg" ]; then
+      echo "X_PACKAGE_ROOT: PLAYWRIGHT_BROWSERS_PATH=0 means <playwright-core>/.local-browsers, and playwright-core cannot be resolved from $BUN_PATH" >&2
+      return 1
+    fi
+    out="$pkg/.local-browsers"
+  elif [ -n "$env_defined" ]; then
+    out="$env_defined"
+  else
+    out="$(_dz_default_registry_dir)" || return 1
+  fi
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+CACHE_DIR="$(_dz_cache_dir)" || exit 1
+[ -n "$CACHE_DIR" ] || { echo "X_CACHE_DIR: could not resolve the Playwright browser cache dir" >&2; exit 1; }
 
 # Parse the chromium revision the installed playwright-core pins, so the
 # skip-when-cached check below matches what `playwright-core install

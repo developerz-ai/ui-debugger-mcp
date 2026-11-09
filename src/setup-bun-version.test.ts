@@ -34,6 +34,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -1029,8 +1030,8 @@ describe('bin/setup — the verified runtime survives the node resolution', () =
     // runtime setup never verified.
     const source = readFileSync(SETUP_SCRIPT, 'utf8');
     const mutated = source.replace(
-      'export PATH="$(dirname "$BUN_PATH"):${node_bin_dir}:$PATH"',
-      'export PATH="${node_bin_dir}:$(dirname "$BUN_PATH"):$PATH"',
+      `export PATH="$(dirname "$BUN_PATH"):\${node_bin_dir}:$PATH"`,
+      `export PATH="\${node_bin_dir}:$(dirname "$BUN_PATH"):$PATH"`,
     );
     expect(mutated).not.toBe(source);
 
@@ -1045,5 +1046,163 @@ describe('bin/setup — the verified runtime survives the node resolution', () =
     } finally {
       fixture.cleanup();
     }
+  });
+});
+
+/**
+ * EXECUTE the browser-dir block sliced out of `script`'s own text — from
+ * `_dz_default_registry_dir() {` through the `CACHE_DIR="$(_dz_cache_dir)"`
+ * assignment every gate below it reads — and return what CACHE_DIR becomes.
+ * The slice, not a copy of the logic, is what runs: deleting or mutating the
+ * block in `bin/setup` turns the guards below RED. Every path is a directory
+ * the TEST made; the developer's real HOME / XDG dir are never read.
+ *
+ * `false` when the script no longer carries the whole block, or the resolution
+ * fails. An unset value (`null` home, omitted others) is unset in the child.
+ */
+function resolveBrowserCacheDir(
+  script: string,
+  probe: {
+    home: string | null;
+    xdgCacheHome?: string;
+    browsersPath?: string;
+    npmConfigBrowsersPath?: string;
+    bunPath: string;
+    cwd: string;
+  },
+): string | false {
+  const first = '_dz_default_registry_dir() {';
+  const last = 'CACHE_DIR="$(_dz_cache_dir)"';
+  const start = script.indexOf(first);
+  const end = script.indexOf(last);
+  if (start < 0 || end < 0) return false;
+  const lineEnd = script.indexOf('\n', end);
+  const block = script.slice(start, lineEnd < 0 ? script.length : lineEnd);
+
+  const runnerRoot = mkdtempSync(join(tmpdir(), 'dz-cache-runner-'));
+  try {
+    const runner = join(runnerRoot, 'resolve.sh');
+    writeFileSync(
+      runner,
+      ['set -euo pipefail', block, 'printf \'%s\\n\' "$CACHE_DIR"', ''].join('\n'),
+      'utf8',
+    );
+    const env: Record<string, string> = {
+      PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+      BUN_PATH: probe.bunPath,
+      PLAYWRIGHT_BROWSERS_PATH: probe.browsersPath ?? '',
+      XDG_CACHE_HOME: probe.xdgCacheHome ?? '',
+      // The host's npm must never leak its config spellings into a run,
+      // unless the probe itself is exercising that fallback.
+      npm_config_playwright_browsers_path: probe.npmConfigBrowsersPath ?? '',
+      npm_package_config_playwright_browsers_path: '',
+    };
+    if (probe.home !== null) env.HOME = probe.home;
+    const result = spawnSync('/bin/bash', [runner], {
+      cwd: probe.cwd,
+      env,
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    // A killed or hung resolver is not "resolution failed": throw, never `false`.
+    if (result.error !== undefined || result.signal !== null) {
+      throw new Error(
+        `browser-dir resolution did not finish: ${String(result.error ?? result.signal)}`,
+      );
+    }
+    if (result.status !== 0) return false;
+    const resolved = (result.stdout ?? '').trim();
+    return resolved.length > 0 ? resolved : false;
+  } finally {
+    rmSync(runnerRoot, { recursive: true, force: true });
+  }
+}
+
+describe('bin/setup resolves the browser directory the way playwright does', () => {
+  const source = readFileSync(SETUP_SCRIPT, 'utf8');
+
+  /**
+   * A fake checkout under a canonical tmpdir: `node_modules/playwright-core` is
+   * a SYMLINK to `packages/playwright-core`, so `PLAYWRIGHT_BROWSERS_PATH=0`
+   * must answer with the realpath, as playwright's `packageRoot` does.
+   */
+  function withFakeTree(run: (tree: { root: string; real: string; bun: string }) => void): void {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'dz-cache-')));
+    try {
+      const real = join(root, 'packages/playwright-core');
+      mkdirSync(real, { recursive: true });
+      writeFileSync(join(real, 'package.json'), '{"name":"playwright-core"}', 'utf8');
+      mkdirSync(join(root, 'node_modules/.bin'), { recursive: true });
+      symlinkSync(
+        join('..', 'packages', 'playwright-core'),
+        join(root, 'node_modules/playwright-core'),
+      );
+      const bun = join(root, 'node_modules/.bin/bun');
+      writeFileSync(bun, '#!/bin/sh\nexit 0\n', 'utf8');
+      chmodSync(bun, 0o755);
+      run({ root, real, bun });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  // macOS ignores XDG_CACHE_HOME (HOME/Library/Caches wins), so the Linux
+  // defaults below only hold off darwin.
+  const linuxOnly = process.platform === 'darwin' ? test.skip : test;
+
+  linuxOnly('only XDG_CACHE_HOME set (no HOME): $XDG_CACHE_HOME/ms-playwright', () => {
+    withFakeTree(({ root, bun }) => {
+      const xdg = join(root, 'fake-xdg');
+      expect(
+        resolveBrowserCacheDir(source, { home: null, xdgCacheHome: xdg, bunPath: bun, cwd: root }),
+      ).toBe(join(xdg, 'ms-playwright'));
+    });
+  });
+
+  test('PLAYWRIGHT_BROWSERS_PATH=0: the realpath of playwright-core/.local-browsers', () => {
+    withFakeTree(({ root, real, bun }) => {
+      const home = join(root, 'fake-home');
+      mkdirSync(home);
+      expect(
+        resolveBrowserCacheDir(source, { home, browsersPath: '0', bunPath: bun, cwd: root }),
+      ).toBe(join(real, '.local-browsers'));
+    });
+  });
+
+  linuxOnly(
+    'npm_config_playwright_browsers_path set, PLAYWRIGHT_BROWSERS_PATH empty: resolves to it',
+    () => {
+      withFakeTree(({ root, bun }) => {
+        const home = join(root, 'fake-home');
+        mkdirSync(home);
+        const npmDir = join(root, 'fake-npm-browsers');
+        expect(
+          resolveBrowserCacheDir(source, {
+            home,
+            npmConfigBrowsersPath: npmDir,
+            bunPath: bun,
+            cwd: root,
+          }),
+        ).toBe(npmDir);
+      });
+    },
+  );
+
+  linuxOnly('neither variable set: $HOME/.cache/ms-playwright', () => {
+    withFakeTree(({ root, bun }) => {
+      const home = join(root, 'fake-home');
+      mkdirSync(home);
+      expect(resolveBrowserCacheDir(source, { home, bunPath: bun, cwd: root })).toBe(
+        join(home, '.cache/ms-playwright'),
+      );
+    });
+  });
+
+  test('a script without the resolver block resolves nothing', () => {
+    withFakeTree(({ root, bun }) => {
+      const mutated = source.replace('_dz_default_registry_dir() {', '_renamed() {');
+      expect(mutated).not.toBe(source);
+      expect(resolveBrowserCacheDir(mutated, { home: root, bunPath: bun, cwd: root })).toBe(false);
+    });
   });
 });
