@@ -221,6 +221,77 @@ test('stop still marks stopped when the server exited between check and signal',
   expect((await readState(stateJson))?.status).toBe('stopped');
 });
 
+// --- config edited while a run is live ------------------------------------
+
+/** Boot a live run under workspace `./ws-a` (the way the server does), then repoint the config at `./ws-b`. */
+async function startThenEditConfig() {
+  const dz = join(cwd, '.dz', 'ui-debugger');
+  await mkdir(dz, { recursive: true });
+  const configPath = join(dz, 'ui-debugger-mcp.json');
+  const config = (workspace: string) =>
+    JSON.stringify({ workspace, targets: { web: { adapter: 'browser', url: 'http://x' } } });
+  await writeFile(configPath, config('./ws-a'), 'utf8');
+
+  const live = workspacePaths(cwd, './ws-a');
+  await new FileStatePort(live, { pid: process.pid, cwd }).record({
+    sessionId: 'live-1',
+    target: 'web',
+    goal: 'drifted run',
+  });
+  await writeFile(configPath, config('./ws-b'), 'utf8');
+  return { live, drifted: workspacePaths(cwd, './ws-b') };
+}
+
+test('status finds a live run after the config workspace was edited, and names the drift', async () => {
+  const { live, drifted } = await startThenEditConfig();
+  await runStatus(cwd);
+  const out = logs.join('\n');
+  expect(out).not.toContain('no debug run recorded');
+  expect(out).toContain('live-1');
+  expect(out).toContain(`pid ${process.pid}`);
+  expect(out).toContain('running');
+  expect(out).toMatch(/drift:/);
+  expect(out).toContain(live.root);
+  expect(out).toContain(drifted.root);
+});
+
+test('status still finds the live run when the edited config is invalid', async () => {
+  const { live } = await startThenEditConfig();
+  await writeFile(join(cwd, '.dz', 'ui-debugger', 'ui-debugger-mcp.json'), '{ not json', 'utf8');
+  await runStatus(cwd);
+  const out = logs.join('\n');
+  expect(out).toContain('live-1');
+  expect(out).toMatch(/drift:.*invalid/);
+  expect(out).toContain(live.root);
+});
+
+test('stop signals the live pid and marks the LIVE workspace stopped after a config edit', async () => {
+  const { live, drifted } = await startThenEditConfig();
+  const kills: number[] = [];
+  await runStop(cwd, (pid) => kills.push(pid));
+
+  expect(kills).toEqual([process.pid]);
+  expect((await readState(live.stateJson))?.status).toBe('stopped');
+  expect(await readState(drifted.stateJson)).toBeNull(); // nothing invented in the new workspace
+});
+
+test('record stamps workspaceRoot and a no-drift status prints no drift line', async () => {
+  const { live } = await startThenEditConfig();
+  expect((await readState(live.stateJson))?.workspaceRoot).toBe(live.root);
+
+  // Config pointed back at the live workspace → no drift to report.
+  await writeFile(
+    join(cwd, '.dz', 'ui-debugger', 'ui-debugger-mcp.json'),
+    JSON.stringify({
+      workspace: './ws-a',
+      targets: { web: { adapter: 'browser', url: 'http://x' } },
+    }),
+    'utf8',
+  );
+  await runStatus(cwd);
+  expect(logs.join('\n')).not.toContain('drift:');
+});
+
 test('status shows PID-reused line when identity is stale', async () => {
   if (process.platform !== 'linux') return;
 

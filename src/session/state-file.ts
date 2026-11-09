@@ -33,6 +33,7 @@ import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { SessionBusyError } from '../errors.js';
 import { writeFileAtomic } from './atomic-write.js';
+import { writeLivePointer } from './live-pointer.js';
 import {
   acquireOwnerLock,
   type OwnerLock,
@@ -63,6 +64,8 @@ export const StateFileSchema = z.object({
   sessionDir: z.string(),
   /** Process fingerprint — lets the CLI tell our live server from a recycled `pid`. */
   identity: ProcessIdentitySchema,
+  /** Workspace root the server booted with. Optional: older servers' files lack it. */
+  workspaceRoot: z.string().optional(),
 });
 
 export type StateFile = z.infer<typeof StateFileSchema>;
@@ -180,6 +183,7 @@ export class FileStatePort implements StatePort {
   readonly #pid: number;
   readonly #now: () => Date;
   readonly #io: StateIo;
+  readonly #cwd: string | undefined;
   /**
    * Tail of this workspace's breadcrumb-write queue.
    *
@@ -195,8 +199,9 @@ export class FileStatePort implements StatePort {
 
   constructor(
     workspace: WorkspacePaths,
-    opts: { pid?: number; now?: () => Date; io?: StateIo } = {},
+    opts: { pid?: number; now?: () => Date; io?: StateIo; cwd?: string } = {},
   ) {
+    this.#cwd = opts.cwd;
     this.#workspace = workspace;
     this.#pid = opts.pid ?? process.pid;
     this.#now = opts.now ?? (() => new Date());
@@ -223,6 +228,11 @@ export class FileStatePort implements StatePort {
       // A live foreign owner refuses here, before a single byte is written.
       const createdClaim = await this.#acquireClaim(run.sessionId, iso);
       try {
+        // Config-independent locator for `status`/`stop`: a run nobody can find
+        // is a run nobody can stop, so a failure here undoes the claim too. It
+        // goes BEFORE the breadcrumb: a pointer failure then leaves no `running`
+        // state.json naming this (healthy, idle) server for `stop` to SIGTERM.
+        if (this.#cwd !== undefined) await writeLivePointer(this.#cwd, this.#workspace.root);
         await this.#io.write(this.#workspace.stateJson, {
           pid: this.#pid,
           sessionId: run.sessionId,
@@ -233,6 +243,7 @@ export class FileStatePort implements StatePort {
           updatedAt: iso,
           sessionDir: sessionPaths(this.#workspace, run.sessionId).root,
           identity: captureIdentity(this.#pid),
+          workspaceRoot: this.#workspace.root,
         });
       } catch (err) {
         // The breadcrumb never landed. Give back ONLY a claim this call

@@ -128,7 +128,7 @@ export async function bootServer(cwd: string, deps: BootDeps = {}): Promise<Boot
     config,
     cwd,
     build: builder,
-    state: new FileStatePort(workspace),
+    state: new FileStatePort(workspace, { cwd }),
     // Everything above was resolved from the config file as it read a moment
     // ago; if it changes underneath us, say so instead of running on stale wiring.
     configChanged: makeConfigWatch(cwd),

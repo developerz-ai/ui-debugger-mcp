@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionBusyError } from '../errors.js';
+import { livePointerPath, readLivePointer } from './live-pointer.js';
 import { ownerLockPath } from './owner-lock.js';
 import { captureIdentity } from './process-identity.js';
 import type { StateFile } from './state-file.js';
@@ -161,6 +162,44 @@ test('FileStatePort.record writes a running breadcrumb with a derived sessionDir
     startedAt: '2026-06-29T02:00:00.000Z',
   });
   expect(state?.sessionDir).toBe(join(ws.sessions, '1700000000000-0007'));
+});
+
+test('FileStatePort.record with a cwd writes the live pointer and records the workspace root', async () => {
+  const cwd = join(dir, 'proj');
+  const ws = workspacePaths(cwd, join(dir, 'ws'));
+  const port = new FileStatePort(ws, { pid: process.pid, cwd });
+  await port.record({ sessionId: 's', target: 'web', goal: 'g' });
+
+  expect(await readLivePointer(cwd)).toBe(ws.root);
+  expect((await readState(ws.stateJson))?.workspaceRoot).toBe(ws.root);
+});
+
+test('FileStatePort.record without a cwd writes no live pointer', async () => {
+  const cwd = join(dir, 'proj');
+  const ws = workspacePaths(cwd, join(dir, 'ws'));
+  const port = new FileStatePort(ws, { pid: process.pid });
+  await port.record({ sessionId: 's', target: 'web', goal: 'g' });
+
+  expect(existsSync(livePointerPath(cwd))).toBe(false);
+});
+
+test('a failed live-pointer write publishes no running breadcrumb and frees the claim', async () => {
+  // The pointer is what lets `status`/`stop` find the run. If it cannot be
+  // written, `start_debug` fails — a `running` state.json left behind would be
+  // a phantom run whose pid is the healthy idle server, and `stop` would kill it.
+  const cwd = join(dir, 'proj');
+  const ws = workspacePaths(cwd, join(dir, 'ws'));
+  // A directory where the pointer file belongs makes the atomic write fail.
+  await mkdir(livePointerPath(cwd), { recursive: true });
+  const port = new FileStatePort(ws, { pid: process.pid, cwd });
+
+  await expect(port.record({ sessionId: 's', target: 'web', goal: 'g' })).rejects.toThrow();
+
+  expect(await readState(ws.stateJson)).toBeNull();
+  // The claim was given back: a rival server is admitted.
+  const rival = new FileStatePort(ws, { pid: spawnLivePid() });
+  await rival.record({ sessionId: 'rival-run', target: 'web', goal: 'next' });
+  expect(await readState(ws.stateJson)).toMatchObject({ sessionId: 'rival-run' });
 });
 
 test('FileStatePort.record fails loud when the breadcrumb cannot be written', async () => {
