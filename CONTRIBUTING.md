@@ -21,6 +21,15 @@ The verified Bun's directory stays FIRST on `PATH`: the directory the resolved
 Node comes from is added BEHIND it, so a Bun installed beside mise's Node can
 never shadow the runtime setup verified.
 
+Its browser gates (the skip-when-cached check, the apt repair and the library
+check) look for the pinned Chromium where playwright-core itself would put it:
+`PLAYWRIGHT_BROWSERS_PATH`, else `$XDG_CACHE_HOME/ms-playwright`, else
+`$HOME/.cache/ms-playwright` — on macOS `$HOME/Library/Caches/ms-playwright`,
+where HOME beats XDG. `PLAYWRIGHT_BROWSERS_PATH=0` is not a directory named `0`:
+it is the package-local cache, `node_modules/playwright-core/.local-browsers`.
+All gates read one resolved dir, so a custom cache is never read as an absent
+browser and re-downloaded.
+
 Boot the server in watch mode (for manual testing with an MCP client):
 
 ```bash
