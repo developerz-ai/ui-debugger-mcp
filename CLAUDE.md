@@ -239,11 +239,13 @@ bun run lint:fix       # biome auto-fix
 ```
 
 `bin/setup` prepares a fresh checkout: `bun install` (root) + builds the
-dummy/web e2e fixture, downloads the pinned Chromium, then verifies the
-headless-shell binary's shared libraries all resolve (`bun src/cli/chromium-libs.ts`)
+dummy/web e2e fixture, downloads the pinned Chromium, then verifies shared libraries
+for both full Chromium (used by the adapter) and the headless shell
+(`bun src/cli/chromium-libs.ts`)
 — apt remediation only when libraries are actually missing and noninteractive
 elevation is available, otherwise a loud failure naming every missing one, then
-a real launch check. That library check runs inside `bin/setup` only; it is NOT
+real headless launch checks of both binaries, closing each before reporting ready.
+That library check runs inside `bin/setup` only; it is NOT
 a public CLI subcommand (`main.ts` dispatches only init/status/stop).
 
 ## Coding Rules

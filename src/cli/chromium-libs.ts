@@ -5,8 +5,8 @@
  * A headless Chromium that cannot resolve `libX.so` fails at launch with a
  * stack trace naming no library, so the failure surfaces deep inside
  * `bin/check` / `bun test` instead of at setup. This module resolves the
- * library question directly: it locates the pinned headless-shell binary in
- * the Playwright cache dir, runs `ldd` on it, and reports the libraries the
+ * library question directly: it locates pinned Chromium and its headless shell
+ * in the Playwright cache dir, runs `ldd` on both, and reports the libraries the
  * loader cannot find.
  *
  * Contract (the shape `bin/setup` depends on):
@@ -15,8 +15,8 @@
  *    carries a message STARTING WITH `X_CHROMIUM_LIBS_MISSING:` naming every
  *    missing library and the remediation command.
  *
- * The binary checked is the one playwright-core will actually LAUNCH: the
- * `chromium_headless_shell-<rev>` dir whose revision the installed
+ * The binaries checked are the ones playwright-core will actually LAUNCH: the
+ * `chromium-<rev>` and `chromium_headless_shell-<rev>` dirs whose revision the installed
  * playwright-core pins in `node_modules/playwright-core/browsers.json`. A
  * cache that also holds other revisions (left by earlier playwright versions)
  * must not be mistaken for the pinned one — a healthy foreign binary says
@@ -181,11 +181,12 @@ export function parseMissingLibs(lddOutput: string): string[] {
 export function formatMissingLibsMessage(
   missing: string[],
   installCommand: string = INSTALL_DEPS_COMMAND,
+  binary: string = 'the Chromium headless shell',
 ): string {
   const libs = missing.length > 0 ? missing.join(', ') : '(none listed)';
   return (
     `${MISSING_LIBS_MARKER} ${missing.length} shared librar${missing.length === 1 ? 'y' : 'ies'} ` +
-    `missing for the Chromium headless shell: ${libs}. ` +
+    `missing for ${binary}: ${libs}. ` +
     `Fix with: ${installCommand}`
   );
 }
@@ -231,18 +232,22 @@ export type ElevationProbe = (command: string) => boolean;
 export type Installer = (command: string) => void;
 
 /**
- * Seam: locate the headless shell binary; `null` when absent. `pinnedRevision`
+ * Seam: locate either binary; `null` when absent. `pinnedRevision`
  * is the revision resolved from the installed playwright-core manifest — when
  * known, ONLY that revision's dir is acceptable (see {@link locateHeadlessShell}).
  */
-export type BinaryLocator = (cacheDir: string, pinnedRevision?: number | null) => string | null;
+export type BinaryLocator = (
+  cacheDir: string,
+  pinnedRevision?: number | null,
+  kind?: 'shell' | 'full',
+) => string | null;
 
 /**
  * The revision number of a `chromium_headless_shell-<rev>` dir name, or -1
  * when the suffix is not numeric.
  */
 function shellRevision(dirName: string): number {
-  const suffix = dirName.slice(HEADLESS_SHELL_DIR_PREFIX.length);
+  const suffix = dirName.slice(dirName.lastIndexOf('-') + 1);
   const rev = Number.parseInt(suffix, 10);
   return Number.isNaN(rev) ? -1 : rev;
 }
@@ -253,14 +258,14 @@ function shellRevision(dirName: string): number {
  * changed in an unforeseen way still resolves rather than reporting a missing
  * binary. `null` when this dir holds no executable we recognize.
  */
-function shellBinaryIn(base: string): string | null {
-  for (const sub of HEADLESS_SHELL_SUBDIRS) {
-    for (const bin of HEADLESS_SHELL_BINARIES) {
+function binaryIn(base: string, subdirs: string[], binaries: string[]): string | null {
+  for (const sub of subdirs) {
+    for (const bin of binaries) {
       const candidate = join(base, sub, bin);
       if (existsSync(candidate)) return candidate;
     }
   }
-  for (const bin of HEADLESS_SHELL_BINARIES) {
+  for (const bin of binaries) {
     const candidate = join(base, bin);
     if (existsSync(candidate)) return candidate;
   }
@@ -288,9 +293,36 @@ export function locateHeadlessShell(
   cacheDir: string,
   pinnedRevision?: number | null,
 ): string | null {
+  return locateCachedBinary(
+    cacheDir,
+    pinnedRevision,
+    HEADLESS_SHELL_DIR_PREFIX,
+    HEADLESS_SHELL_SUBDIRS,
+    HEADLESS_SHELL_BINARIES,
+  );
+}
+
+/** Full Chromium: explicit executablePath launches this rather than the shell. */
+export function locateChromium(cacheDir: string, pinnedRevision?: number | null): string | null {
+  return locateCachedBinary(
+    cacheDir,
+    pinnedRevision,
+    'chromium-',
+    ['chrome-linux64', 'chrome-linux'],
+    ['chrome'],
+  );
+}
+
+function locateCachedBinary(
+  cacheDir: string,
+  pinnedRevision: number | null | undefined,
+  prefix: string,
+  subdirs: string[],
+  binaries: string[],
+): string | null {
   if (!existsSync(cacheDir)) return null;
   if (pinnedRevision !== undefined && pinnedRevision !== null) {
-    return shellBinaryIn(join(cacheDir, `${HEADLESS_SHELL_DIR_PREFIX}${pinnedRevision}`));
+    return binaryIn(join(cacheDir, `${prefix}${pinnedRevision}`), subdirs, binaries);
   }
   let entries: string[];
   try {
@@ -299,12 +331,12 @@ export function locateHeadlessShell(
     return null;
   }
   const shellDirs = entries
-    .filter((name) => name.startsWith(HEADLESS_SHELL_DIR_PREFIX))
+    .filter((name) => name.startsWith(prefix))
     // Highest revision first: the suffix is numeric, and a lexical sort would
     // put "9999" before "1228" (the pinned revision is the older one here).
     .sort((a, b) => shellRevision(b) - shellRevision(a));
   for (const dir of shellDirs) {
-    const found = shellBinaryIn(join(cacheDir, dir));
+    const found = binaryIn(join(cacheDir, dir), subdirs, binaries);
     if (found) return found;
   }
   return null;
@@ -492,44 +524,57 @@ export type ChromiumLibsDeps = {
 };
 
 /** Outcome of a successful check. */
-export type ChromiumLibsOk = { ok: true; binary: string; missing: string[] };
+export type ChromiumLibsOk = { ok: true; binary: string; binaries: string[]; missing: string[] };
 
 /**
- * Check the pinned Chromium headless shell's shared libraries.
+ * Check full Chromium AND its headless shell at the existing pinned revision.
  *
  * Throws {@link ChromiumLibsMissingError} when libraries are missing and could
  * not be installed (no elevation, or the install failed).
  */
 export function checkChromiumLibs(cacheDir: string, deps: ChromiumLibsDeps = {}): ChromiumLibsOk {
   const pinnedRevision = deps.pinnedRevision ?? readPinnedHeadlessShellRevision;
-  const locate = deps.locateBinary ?? locateHeadlessShell;
+  const locate: BinaryLocator =
+    deps.locateBinary ??
+    ((dir, revision, kind) =>
+      kind === 'full' ? locateChromium(dir, revision) : locateHeadlessShell(dir, revision));
   const ldd = deps.ldd ?? runLdd;
   const probe = deps.probeElevation ?? probeElevation;
   const install = deps.install ?? runInstaller;
 
   const revision = pinnedRevision();
-  const binary = locate(cacheDir, revision);
-  if (!binary) {
+  const requireBinary = (kind: 'shell' | 'full'): string => {
+    const binary = locate(cacheDir, revision, kind);
+    if (binary) return binary;
     const pinned = revision !== null && revision !== undefined ? ` (revision ${revision})` : '';
+    const name = kind === 'shell' ? 'Chromium headless shell' : 'Chromium';
     throw new ChromiumLibsMissingError(
-      `${MISSING_LIBS_MARKER} Chromium headless shell${pinned} not found under ${cacheDir}. ` +
+      `${MISSING_LIBS_MARKER} ${name}${pinned} not found under ${cacheDir}. ` +
         `Install it with: node node_modules/playwright-core/cli.js install chromium`,
     );
-  }
-
-  const missing = parseMissingLibs(ldd(binary));
+  };
+  const binary = requireBinary('shell');
+  const binaries = [binary, requireBinary('full')];
+  const inspect = () => binaries.map((path) => ({ path, missing: parseMissingLibs(ldd(path)) }));
+  const diagnostic = (reports: ReturnType<typeof inspect>) =>
+    reports
+      .filter((report) => report.missing.length > 0)
+      .map((report) => formatMissingLibsMessage(report.missing, INSTALL_DEPS_COMMAND, report.path))
+      .join('\n');
+  const reports = inspect();
+  const missing = [...new Set(reports.flatMap((report) => report.missing))];
   // Nothing missing => nothing attempted. The elevation probe is skipped too:
   // it shells out to `sudo`, and a healthy machine must not pay for it.
-  if (missing.length === 0) return { ok: true, binary, missing };
+  if (missing.length === 0) return { ok: true, binary, binaries, missing };
 
   const installCommand = INSTALL_DEPS_COMMAND;
   // The probe is asked about the exact command the installer will run — a
   // command-scoped answer, not a generic "sudo exists".
   const plan = remediationPlan(missing, probe(installCommand), installCommand);
-  if (plan.kind === 'none') return { ok: true, binary, missing };
+  if (plan.kind === 'none') return { ok: true, binary, binaries, missing };
 
   if (plan.kind === 'blocked') {
-    throw new ChromiumLibsMissingError(plan.message);
+    throw new ChromiumLibsMissingError(diagnostic(reports));
   }
 
   // Libraries are missing and elevation is available: install them. A FAILING
@@ -541,17 +586,17 @@ export function checkChromiumLibs(cacheDir: string, deps: ChromiumLibsDeps = {})
     const detail = err instanceof Error ? err.message : String(err);
     throw new ChromiumLibsMissingError(
       `${MISSING_LIBS_MARKER} remediation failed: \`${plan.command}\` — ${detail}. ` +
-        `Resolve the missing libraries manually, then re-run.`,
+        `Resolve the missing libraries manually, then re-run.\n${diagnostic(reports)}`,
     );
   }
 
   // The install claims success — verify, never trust. A still-missing library
   // must not be reported as healthy.
-  const stillMissing = parseMissingLibs(ldd(binary));
-  if (stillMissing.length > 0) {
-    throw new ChromiumLibsMissingError(formatMissingLibsMessage(stillMissing));
+  const stillMissing = diagnostic(inspect());
+  if (stillMissing) {
+    throw new ChromiumLibsMissingError(stillMissing);
   }
-  return { ok: true, binary, missing };
+  return { ok: true, binary, binaries, missing };
 }
 
 /**
@@ -567,7 +612,7 @@ export function runCli(argv: string[] = process.argv.slice(2)): number {
   }
   try {
     const result = checkChromiumLibs(cacheDir);
-    console.log(`chromium libraries OK (${result.binary})`);
+    console.log(`chromium libraries OK (${result.binaries.join(', ')})`);
     return 0;
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));

@@ -5,8 +5,8 @@
  * BEFORE it (so a missing system library is named, not discovered as a mystery
  * inside the launch).
  *
- * These assertions read the script's TEXT and never execute it: running
- * `bin/setup` would download browsers and install system packages.
+ * Read the script and execute only its extracted launch payload against a
+ * controlled Playwright stub: never download browsers or install system packages.
  *
  * Every lookup runs against the script with its COMMENTS stripped. A comment
  * that merely mentions `src/cli/chromium-libs.ts` must not be able to satisfy
@@ -37,8 +37,81 @@ function codeLineOf(needle: string): number {
   return hit ? hit.line : -1;
 }
 
-test('the launch verification still launches chromium headless', () => {
-  expect(setupScript).toContain('chromium.launch({ headless: true })');
+function runLaunchPayload(failure: 'shell' | 'full' | null) {
+  const launchLine = codeLineOf('verify chromium launches');
+  const readyLine = codeLineOf('==> ready.');
+  const invocation = codeLines
+    .filter((entry) => entry.line > launchLine && entry.line < readyLine)
+    .map((entry) => entry.text)
+    .join('\n');
+  const match = /^bun -e '([\s\S]*)'$/.exec(invocation);
+  expect(match).not.toBeNull();
+
+  // Isolate the module mock in a child: no real browser, no suite-wide mock.
+  const stub = `
+    import { mock } from 'bun:test';
+    class LaunchFailure extends Error {}
+    mock.module('playwright-core', () => ({ chromium: {
+      executablePath: () => '/stub/full/chrome',
+      launch: async (options) => {
+        console.log('EVENT ' + JSON.stringify({ launch: options }));
+        const binary = options.executablePath === '/stub/full/chrome' ? 'full' : 'shell';
+        if (binary === ${JSON.stringify(failure)}) {
+          throw new LaunchFailure(binary + ' launch failed');
+        }
+        return {
+          version: () => 'stub-version',
+          close: async () => {
+            await Promise.resolve();
+            console.log('EVENT ' + JSON.stringify({ close: binary }));
+          },
+        };
+      },
+    } }));
+  `;
+  const result = Bun.spawnSync([process.execPath, '-e', stub + match?.[1]], {
+    cwd: REPO_ROOT,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    timeout: 5_000,
+  });
+  return {
+    exitCode: result.exitCode,
+    stderr: result.stderr.toString(),
+    events: result.stdout
+      .toString()
+      .split('\n')
+      .filter((line) => line.startsWith('EVENT '))
+      .map((line) => line.slice('EVENT '.length)),
+  };
+}
+
+const shellLaunch = JSON.stringify({ launch: { headless: true } });
+const fullLaunch = JSON.stringify({
+  launch: { headless: true, executablePath: '/stub/full/chrome' },
+});
+const shellClose = JSON.stringify({ close: 'shell' });
+const fullClose = JSON.stringify({ close: 'full' });
+
+test('the launch payload launches and closes shell then explicit full Chromium headlessly', () => {
+  const result = runLaunchPayload(null);
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr).toBe('');
+  expect(result.events).toEqual([shellLaunch, shellClose, fullLaunch, fullClose]);
+});
+
+test('a full-only launch failure exits nonzero after closing the healthy shell', () => {
+  const result = runLaunchPayload('full');
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain('full launch failed');
+  expect(result.events).toEqual([shellLaunch, shellClose, fullLaunch]);
+});
+
+test('a shell-only launch failure exits nonzero before attempting full Chromium', () => {
+  const result = runLaunchPayload('shell');
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain('shell launch failed');
+  expect(result.events).toEqual([shellLaunch]);
 });
 
 test('the launch verification is still the final gate', () => {

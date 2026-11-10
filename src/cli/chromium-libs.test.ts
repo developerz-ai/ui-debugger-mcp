@@ -280,6 +280,201 @@ test('checkChromiumLibs: the elevation probe is asked about the ACTUAL install c
 
 // --- locating the headless shell in the Playwright cache ----------------
 
+/** Real cache layout and default revision/locators; only host operations are stubbed. */
+function withBinaryPair(fn: (pair: { cache: string; shell: string; full: string }) => void): void {
+  rmSync(TMP, { recursive: true, force: true });
+  const revision = readPinnedHeadlessShellRevision();
+  expect(revision).not.toBeNull();
+  const shell = makeCache(
+    `chromium_headless_shell-${revision}/chrome-headless-shell-linux64/chrome-headless-shell`,
+  );
+  const full = makeCache(`chromium-${revision}/chrome-linux64/chrome`);
+  try {
+    fn({ cache: join(TMP, 'cache'), shell, full });
+  } finally {
+    rmSync(TMP, { recursive: true, force: true });
+  }
+}
+
+test('default inspection: a healthy pair checks BOTH pinned binaries without elevation', () => {
+  withBinaryPair(({ cache, shell, full }) => {
+    const checked: string[] = [];
+    const outputs = new Map([
+      [shell, LDD_CLEAN],
+      [full, LDD_CLEAN],
+    ]);
+    const result = checkChromiumLibs(cache, {
+      ldd: (binary) => {
+        checked.push(binary);
+        expect(outputs.has(binary)).toBe(true);
+        return outputs.get(binary) ?? '';
+      },
+      probeElevation: () => {
+        throw new ChromiumLibsMissingError('unexpected probe');
+      },
+      install: () => {
+        throw new ChromiumLibsMissingError('unexpected install');
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(checked.sort()).toEqual([shell, full].sort());
+  });
+});
+
+for (const affected of ['shell', 'full'] as const) {
+  test(`default inspection: ${affected}-only missing libraries fail with binary and library`, () => {
+    withBinaryPair((pair) => {
+      const checked: string[] = [];
+      const outputs = new Map([
+        [pair.shell, LDD_CLEAN],
+        [pair.full, LDD_CLEAN],
+      ]);
+      outputs.set(pair[affected], 'libpair.so => not found');
+      let thrown: unknown;
+      try {
+        checkChromiumLibs(pair.cache, {
+          ldd: (binary) => {
+            checked.push(binary);
+            expect(outputs.has(binary)).toBe(true);
+            return outputs.get(binary) ?? '';
+          },
+          probeElevation: () => false,
+          install: () => {
+            throw new ChromiumLibsMissingError('unexpected install');
+          },
+        });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(ChromiumLibsMissingError);
+      const message = thrown instanceof Error ? thrown.message : String(thrown);
+      expect(message.startsWith(MISSING_LIBS_MARKER)).toBe(true);
+      expect(message).toContain(pair[affected]);
+      expect(message).toContain('libpair.so');
+      expect(message).toContain(INSTALL_DEPS_COMMAND);
+      expect(checked.sort()).toEqual([pair.shell, pair.full].sort());
+    });
+  });
+
+  test(`default inspection: remediation rechecks both, including still-broken ${affected}`, () => {
+    withBinaryPair((pair) => {
+      const checked: string[] = [];
+      const installs: string[] = [];
+      expect(() =>
+        checkChromiumLibs(pair.cache, {
+          ldd: (binary) => {
+            checked.push(binary);
+            // Initially only the OTHER binary is broken: recheck must include
+            // binaries that were healthy before installation too.
+            const broken =
+              installs.length === 0
+                ? pair[affected === 'shell' ? 'full' : 'shell']
+                : pair[affected];
+            return binary === broken ? 'libpair.so => not found' : LDD_CLEAN;
+          },
+          probeElevation: () => true,
+          install: (command) => {
+            installs.push(command);
+          },
+        }),
+      ).toThrow(pair[affected]);
+      expect(installs).toEqual([INSTALL_DEPS_COMMAND]);
+      expect(checked.sort()).toEqual([pair.shell, pair.full, pair.shell, pair.full].sort());
+    });
+  });
+}
+
+test('default inspection: one remediation fixes the pair and verifies both again', () => {
+  withBinaryPair(({ cache, shell, full }) => {
+    const checked: string[] = [];
+    const installs: string[] = [];
+    const outputs = new Map([
+      [shell, 'libshell.so => not found'],
+      [full, 'libfull.so => not found'],
+    ]);
+    const result = checkChromiumLibs(cache, {
+      ldd: (binary) => {
+        checked.push(binary);
+        expect(outputs.has(binary)).toBe(true);
+        return outputs.get(binary) ?? '';
+      },
+      probeElevation: () => true,
+      install: (command) => {
+        installs.push(command);
+        outputs.set(shell, LDD_CLEAN);
+        outputs.set(full, LDD_CLEAN);
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(installs).toEqual([INSTALL_DEPS_COMMAND]);
+    expect(checked.sort()).toEqual([shell, full, shell, full].sort());
+  });
+});
+
+test('default inspection: missing pinned full executable fails even with a foreign full revision', () => {
+  withBinaryPair(({ cache, full }) => {
+    rmSync(full);
+    makeCache('chromium-999999/chrome-linux64/chrome');
+    expect(() =>
+      checkChromiumLibs(cache, {
+        ldd: () => LDD_CLEAN,
+        probeElevation: () => false,
+      }),
+    ).toThrow(`Chromium (revision ${readPinnedHeadlessShellRevision()}) not found`);
+  });
+});
+
+test('default inspection: pinned full revision wins over a broken foreign full binary', () => {
+  withBinaryPair(({ cache, full, shell }) => {
+    makeCache('chromium-999999/chrome-linux64/chrome');
+    const checked: string[] = [];
+    expect(
+      checkChromiumLibs(cache, {
+        ldd: (binary) => {
+          checked.push(binary);
+          return binary === full || binary === shell ? LDD_CLEAN : LDD_WITH_MISSING;
+        },
+        probeElevation: () => false,
+      }).ok,
+    ).toBe(true);
+    expect(checked.sort()).toEqual([shell, full].sort());
+  });
+});
+
+test('CLI default wiring: healthy pair passes; full-only unresolved library exits 1', () => {
+  withBinaryPair(({ cache, full, shell }) => {
+    const bin = join(TMP, 'bin');
+    mkdirSync(bin);
+    // Isolated PATH: neither root nor sudo can reach a real package installer.
+    for (const [name, body] of [
+      ['ldd', '/bin/cat "$1.ldd"'],
+      ['node', 'echo INSTALL_ATTEMPTED >&2; exit 1'],
+      ['sudo', 'exit 1'],
+    ] as const) {
+      const path = join(bin, name);
+      writeFileSync(path, `#!/bin/sh\n${body}\n`);
+      chmodSync(path, 0o755);
+    }
+    writeFileSync(`${shell}.ldd`, LDD_CLEAN);
+    writeFileSync(`${full}.ldd`, LDD_CLEAN);
+    const run = () =>
+      Bun.spawnSync([process.execPath, join(import.meta.dir, 'chromium-libs.ts'), cache], {
+        env: { ...process.env, PATH: bin },
+      });
+    const healthy = run();
+    expect(healthy.exitCode).toBe(0);
+    expect(healthy.stdout.toString()).toContain(shell);
+    expect(healthy.stdout.toString()).toContain(full);
+    expect(healthy.stderr.toString()).not.toContain('INSTALL_ATTEMPTED');
+    writeFileSync(`${full}.ldd`, 'libcli.so => not found');
+    const broken = run();
+    expect(broken.exitCode).toBe(1);
+    expect(broken.stderr.toString()).toContain(MISSING_LIBS_MARKER);
+    expect(broken.stderr.toString()).toContain(full);
+    expect(broken.stderr.toString()).toContain('libcli.so');
+  });
+});
+
 /** Create a fake cache dir with a headless shell at `rel`. */
 function makeCache(rel: string): string {
   const dir = join(TMP, 'cache');
