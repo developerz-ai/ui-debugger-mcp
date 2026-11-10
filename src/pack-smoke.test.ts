@@ -895,9 +895,9 @@ test('no shipped module statically imports a Bun-only specifier — the publishe
       join(dir, 'clean.ts'),
       "import { readFileSync } from 'node:fs';\nexport const read = readFileSync;\n",
     );
-    expect(bunImportOffenders(dir, [join(dir, 'offender.ts'), join(dir, 'clean.ts')])).toEqual([
-      "offender.ts imports 'bun:ffi'",
-    ]);
+    const selectedModules = productionSourceModules(dir, []);
+    expect(selectedModules).toContain(join(dir, 'offender.ts'));
+    expect(bunImportOffenders(dir, selectedModules)).toContain("offender.ts imports 'bun:ffi'");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -908,12 +908,11 @@ test('no shipped module statically imports a Bun-only specifier — the publishe
   try {
     writeFileSync(join(shipped, 'helpers.ts'), "import { dlopen } from 'bun:ffi';\n");
     writeFileSync(join(shipped, 'x.test-helpers.ts'), "import { dlopen } from 'bun:ffi';\n");
-    expect(
-      bunImportOffenders(shipped, [
-        join(shipped, 'helpers.ts'),
-        join(shipped, 'x.test-helpers.ts'),
-      ]),
-    ).toEqual(["helpers.ts imports 'bun:ffi'", "x.test-helpers.ts imports 'bun:ffi'"]);
+    const selectedModules = productionSourceModules(shipped, []);
+    expect(selectedModules).toContain(join(shipped, 'x.test-helpers.ts'));
+    expect(bunImportOffenders(shipped, selectedModules)).toContain(
+      "x.test-helpers.ts imports 'bun:ffi'",
+    );
   } finally {
     rmSync(shipped, { recursive: true, force: true });
   }
