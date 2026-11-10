@@ -15,8 +15,9 @@
  *     and a package that needs a newer node all fail loud instead of
  *     passing quietly;
  *
- *   - the shipped SOURCE, scanned for Bun-only imports, because a static one
- *     is what makes the installed copy die before it can print anything.
+ *   - the modules selected by the production build, scanned for Bun-only
+ *     imports, because a static one is what makes the installed copy die
+ *     before it can print anything.
  *
  * Every guard carries a mutation test: the text it exists to reject is
  * mutated and the guard must notice. A guard that cannot fail is a defect.
@@ -32,7 +33,7 @@ const REPO_ROOT = join(import.meta.dirname, '..');
 const workflowText = readFileSync(join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
 const scriptText = readFileSync(join(REPO_ROOT, 'bin/smoke-packed'), 'utf8');
 
-/** The shipped source root — every module the published bin loads. */
+/** The source root from which the production build selects shipped modules. */
 const SRC_ROOT = join(REPO_ROOT, 'src');
 
 interface PackageJson {
@@ -381,44 +382,76 @@ function staticBunImports(code: string): string[] {
 }
 
 /**
- * A module the published bin never loads: the suites' own files (`*.test.ts`)
- * and the fakes they share (`*.test-helpers.ts`).
- *
- * Both are TEST scaffolding — nothing the bin imports reaches them — so a
- * Bun-only import in one of them is not what kills the installed copy. Every
- * other module under `src/` ships, and every one of them has to load on Node.
+ * Whether a repo-relative path matches a TypeScript config exclude glob.
+ * `tsconfig.build.json` is the source of truth for whether a source module
+ * reaches `dist/`; this test must not infer that from a scaffolding filename.
  */
-function isTestScaffolding(name: string): boolean {
-  return name.includes('.test.') || name.endsWith('.test-helpers.ts');
+function matchesBuildExclude(path: string, pattern: string): boolean {
+  let expression = '^';
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index] ?? '';
+    const next = pattern[index + 1] ?? '';
+    const afterNext = pattern[index + 2] ?? '';
+    if (character === '*' && next === '*' && afterNext === '/') {
+      expression += '(?:.*/)?';
+      index += 2;
+    } else if (character === '*' && next === '*') {
+      expression += '.*';
+      index += 1;
+    } else if (character === '*') {
+      expression += '[^/]*';
+    } else {
+      expression += character.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+    }
+  }
+  return new RegExp(`${expression}$`).test(path);
 }
 
-/**
- * The modules under `dir` that statically import a Bun-only specifier.
- *
- * Tests may use Bun freely — only shipped code has to be runtime-agnostic —
- * so the test scaffolding is skipped.
- */
-function bunImportOffenders(dir: string): string[] {
-  const offenders: string[] = [];
+/** The TypeScript source files selected by the production build. */
+function productionSourceModules(dir: string, excludes: string[]): string[] {
+  const modules: string[] = [];
   const walk = (current: string): void => {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       const path = join(current, entry.name);
       if (entry.isDirectory()) {
         walk(path);
-        continue;
-      }
-      if (!entry.name.endsWith('.ts') || isTestScaffolding(entry.name)) continue;
-      // Comments may name `bun:ffi` — the ban is on importing it, not on
-      // explaining it.
-      const code = readFileSync(path, 'utf8')
-        .replace(/\/\*[\s\S]*?\*\//g, '')
-        .replace(/\/\/.*$/gm, '');
-      for (const specifier of staticBunImports(code)) {
-        offenders.push(`${path.slice(dir.length + 1)} imports '${specifier}'`);
+      } else if (
+        entry.name.endsWith('.ts') &&
+        !excludes.some((pattern) => matchesBuildExclude(path.slice(REPO_ROOT.length + 1), pattern))
+      ) {
+        modules.push(path);
       }
     }
   };
   walk(dir);
+  return modules;
+}
+
+function productionBuildExcludes(): string[] {
+  const config = JSON.parse(readFileSync(join(REPO_ROOT, 'tsconfig.build.json'), 'utf8')) as {
+    exclude: string[];
+  };
+  return config.exclude;
+}
+
+/**
+ * The selected modules that statically import a Bun-only specifier.
+ *
+ * Only emitted modules have to be runtime-agnostic. Selection comes from the
+ * production build above, not from an assumption about a file's name.
+ */
+function bunImportOffenders(dir: string, modules: string[]): string[] {
+  const offenders: string[] = [];
+  for (const path of modules) {
+    // Comments may name `bun:ffi` — the ban is on importing it, not on
+    // explaining it.
+    const code = readFileSync(path, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
+    for (const specifier of staticBunImports(code)) {
+      offenders.push(`${path.slice(dir.length + 1)} imports '${specifier}'`);
+    }
+  }
   return offenders;
 }
 
@@ -847,7 +880,8 @@ test('no shipped module statically imports a Bun-only specifier — the publishe
   // slips past it. The published bin runs behind `#!/usr/bin/env node`, and
   // node's ESM loader refuses the `bun:` scheme outright — the installed copy
   // dies with ERR_UNSUPPORTED_ESM_URL_SCHEME before it can print its help.
-  expect(bunImportOffenders(SRC_ROOT)).toEqual([]);
+  const productionModules = productionSourceModules(SRC_ROOT, productionBuildExcludes());
+  expect(bunImportOffenders(SRC_ROOT, productionModules)).toEqual([]);
 
   // Mutation: the walk MUST notice a static Bun-only import — that is the
   // text this guard exists to reject.
@@ -861,23 +895,25 @@ test('no shipped module statically imports a Bun-only specifier — the publishe
       join(dir, 'clean.ts'),
       "import { readFileSync } from 'node:fs';\nexport const read = readFileSync;\n",
     );
-    expect(bunImportOffenders(dir)).toEqual(["offender.ts imports 'bun:ffi'"]);
+    expect(bunImportOffenders(dir, [join(dir, 'offender.ts'), join(dir, 'clean.ts')])).toEqual([
+      "offender.ts imports 'bun:ffi'",
+    ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 
-  // Mutation: the exemption is NARROW. A helper that is not test scaffolding
-  // is shipped code, and the walk must still catch it — only the suites' own
-  // files and the fakes they share are exempt.
+  // Mutation: a test helper that the production build SELECTS is shipped code.
+  // Its filename cannot exempt a static Bun import from the package guard.
   const shipped = mkdtempSync(join(tmpdir(), 'bun-import-shipped-'));
   try {
     writeFileSync(join(shipped, 'helpers.ts'), "import { dlopen } from 'bun:ffi';\n");
-    expect(bunImportOffenders(shipped)).toEqual(["helpers.ts imports 'bun:ffi'"]);
-
-    // The shared fakes the suites import are test scaffolding — the bin never
-    // loads them, so they are exempt.
     writeFileSync(join(shipped, 'x.test-helpers.ts'), "import { dlopen } from 'bun:ffi';\n");
-    expect(bunImportOffenders(shipped)).toEqual(["helpers.ts imports 'bun:ffi'"]);
+    expect(
+      bunImportOffenders(shipped, [
+        join(shipped, 'helpers.ts'),
+        join(shipped, 'x.test-helpers.ts'),
+      ]),
+    ).toEqual(["helpers.ts imports 'bun:ffi'", "x.test-helpers.ts imports 'bun:ffi'"]);
   } finally {
     rmSync(shipped, { recursive: true, force: true });
   }
