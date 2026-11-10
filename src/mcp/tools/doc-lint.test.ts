@@ -535,7 +535,7 @@ test('the guard parsed its anchors: 5 tool rows, 5 param tables', () => {
 });
 
 test('a renamed tool in the reference annotations table is reported (mutation)', () => {
-  const mutated = REFERENCE_TEXT.replace('| `describe` |', '| `describe_all` |');
+  const mutated = REFERENCE_TEXT.replace('| `describe`    ', '| `describe_all`');
   expect(mutated).not.toBe(REFERENCE_TEXT);
 
   const problems = lintReference(mutated, CATALOG);
@@ -545,8 +545,8 @@ test('a renamed tool in the reference annotations table is reported (mutation)',
 
 test('a flipped annotation value in the reference table is reported (mutation)', () => {
   const mutated = REFERENCE_TEXT.replace(
-    '| `describe` | `readOnlyHint: true` |',
-    '| `describe` | `readOnlyHint: false` |',
+    '| `describe`     | `readOnlyHint: true`                            |',
+    '| `describe`     | `readOnlyHint: false`                           |',
   );
   expect(mutated).not.toBe(REFERENCE_TEXT);
 
@@ -557,8 +557,8 @@ test('a flipped annotation value in the reference table is reported (mutation)',
 
 test('a renamed parameter in a reference param table is reported (mutation)', () => {
   const mutated = REFERENCE_TEXT.replace(
-    '| `target` | `string` | no | Narrow output to a single target by name. |',
-    '| `tgt` | `string` | no | Narrow output to a single target by name. |',
+    '| `target` | `string` | no       | Narrow output to a single target by name. |',
+    '| `tgt` | `string` | no       | Narrow output to a single target by name. |',
   );
   expect(mutated).not.toBe(REFERENCE_TEXT);
 
@@ -568,7 +568,7 @@ test('a renamed parameter in a reference param table is reported (mutation)', ()
 });
 
 test('a renamed tool in the README table is reported (mutation)', () => {
-  const mutated = README_TEXT.replace('| `end_session` |', '| `end_run` |');
+  const mutated = README_TEXT.replace('| `end_session`  ', '| `end_run`     ');
   expect(mutated).not.toBe(README_TEXT);
 
   const problems = lintReadme(mutated, CATALOG);
@@ -619,7 +619,10 @@ test('a renamed parameter in the mcp-tools.md Input column is reported (mutation
 });
 
 test('a missing row in the reference annotations table is reported (mutation)', () => {
-  const mutated = REFERENCE_TEXT.replace('| `end_session` | `idempotentHint: true` |\n', '');
+  const mutated = REFERENCE_TEXT.replace(
+    '| `end_session`  | `idempotentHint: true`                          |\n',
+    '',
+  );
   expect(mutated).not.toBe(REFERENCE_TEXT);
 
   const problems = lintReference(mutated, CATALOG);
@@ -631,8 +634,8 @@ test('a missing row in the reference annotations table is reported (mutation)', 
 
 test('an annotation the tool does not declare is reported (mutation)', () => {
   const mutated = REFERENCE_TEXT.replace(
-    '| `describe` | `readOnlyHint: true` |',
-    '| `describe` | `readOnlyHint: true`, `idempotentHint: true` |',
+    '| `describe`     | `readOnlyHint: true`                            |',
+    '| `describe`     | `readOnlyHint: true`, `idempotentHint: true`    |',
   );
   expect(mutated).not.toBe(REFERENCE_TEXT);
 
@@ -645,8 +648,8 @@ test('an annotation the tool does not declare is reported (mutation)', () => {
 
 test('a live annotation the reference row omits is reported (mutation)', () => {
   const mutated = REFERENCE_TEXT.replace(
-    '| `describe` | `readOnlyHint: true` |',
-    '| `describe` | |',
+    '| `describe`     | `readOnlyHint: true`                            |',
+    '| `describe`     |                                                  |',
   );
   expect(mutated).not.toBe(REFERENCE_TEXT);
 
@@ -657,8 +660,8 @@ test('a live annotation the reference row omits is reported (mutation)', () => {
 
 test('a missing param table in the reference is reported (mutation)', () => {
   const mutated = REFERENCE_TEXT.replace(
-    '| Param | Type | Required | Description |',
-    '| Param | Type | Required | Note |',
+    '| Param    | Type     | Required | Description                               |',
+    '| Param    | Type     | Required | Note                                      |',
   );
   expect(mutated).not.toBe(REFERENCE_TEXT);
 

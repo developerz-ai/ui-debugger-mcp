@@ -15,7 +15,7 @@ the main bottleneck when an entire product is built by AI.
 Eliminate the human from the UI-debug loop with an MCP server.
 
 - A **smart agent** (Claude Code, Cursor, …) finishes a PR and wants to verify the UI.
-- It hands a **story** to this server: *"on web, log in and do X, Y, Z — tell me if it breaks."*
+- It hands a **story** to this server: _"on web, log in and do X, Y, Z — tell me if it breaks."_
 - A **small fast agent runs inside this server** (via the Vercel AI SDK). It drives
   the browser or desktop, watches console + network, takes screenshots.
 - It reports **structured findings** back: pass/fail, what broke, evidence.
@@ -27,12 +27,12 @@ high-level and delegates the whole clicking loop to the small agent.
 
 ## How it's different from playwright-mcp
 
-| | playwright-mcp | UI Debugger MCP |
-|---|---|---|
-| Who clicks | smart model, one action per call | small agent, on its own |
-| Tools exposed | many (click, type, snapshot…) | few (give a story, get findings) |
-| Smart model cost | high (chatty) | low (high-level) |
-| Output | raw page state | structured findings + evidence |
+|                  | playwright-mcp                   | UI Debugger MCP                  |
+| ---------------- | -------------------------------- | -------------------------------- |
+| Who clicks       | smart model, one action per call | small agent, on its own          |
+| Tools exposed    | many (click, type, snapshot…)    | few (give a story, get findings) |
+| Smart model cost | high (chatty)                    | low (high-level)                 |
+| Output           | raw page state                   | structured findings + evidence   |
 
 ## Architecture — the three actors
 
@@ -64,10 +64,10 @@ Picture a **boss**, a **fast blind driver**, and a **describer with eyes**:
 - **fast guy** — the driver. Fast, cheap, **text-only and blind**. Runs the
   click loop on structure (DOM / a11y tree / view hierarchy). Default: deepseek.
 - **vision guy** — the eyes. **Multimodal**. The driver calls `look` to ask
-  *"does this look right? is the button centred?"* and gets a description back.
+  _"does this look right? is the button centred?"_ and gets a description back.
   Default: qwen. Spent only when visual judgment is needed.
 
-One goal: **the UI works *and* looks nice.** Full design in [`docs/idea/`](docs/idea/).
+One goal: **the UI works _and_ looks nice.** Full design in [`docs/idea/`](docs/idea/).
 
 Every run keeps its screenshots and stitches them into a short **captioned
 replay video** — Claude attaches it to the PR so a reviewer sees the flow working
@@ -77,10 +77,10 @@ in ~10 seconds ([`docs/idea/workspace.md`](docs/idea/workspace.md#pr-replay-vide
 
 One project can expose several debug targets. A large app can have all three:
 
-| Target  | Protocol / how it's driven                       | Reads |
-|---------|--------------------------------------------------|-------|
-| web     | **CDP** (Chrome DevTools Protocol), headless by default | DOM |
-| desktop | **X11 / Wayland** input + AT-SPI                 | a11y tree |
+| Target  | Protocol / how it's driven                                      | Reads          |
+| ------- | --------------------------------------------------------------- | -------------- |
+| web     | **CDP** (Chrome DevTools Protocol), headless by default         | DOM            |
+| desktop | **X11 / Wayland** input + AT-SPI                                | a11y tree      |
 | mobile  | **ADB** (uiautomator + screencap), Android, headless by default | view hierarchy |
 
 The desktop and android adapters read **structure only** — there is
@@ -215,13 +215,13 @@ get_findings { session_id: "...", wait: 30000 }
 
 It's a **conversation**, not a remote control — five fat tools, not one-per-click:
 
-| Tool | What it does |
-|------|--------------|
-| `start_debug` | Open a run: `{ target, goal, url?, as?, replace?, criteria?, timeout? }`. `url` is required when the target has no configured url; `as` names a login persona; `replace: true` takes over a project that already has a run. The small agent drives autonomously. Returns `{ session_id }`. |
-| `get_findings` | Poll status + structured findings (functional bugs + visual issues) + evidence. Long-poll with `wait`. A whole-object read caps each list at 20 and says so in `truncated` (`{returned, total}` per field) — pass `fields` for the full lists. |
-| `send_message` | Talk to the running agent mid-flight — add work, redirect, or answer a question. |
-| `describe` | List the configured targets + models for this project — including each target's auth `personas[]` and `notes` — plus `session`: the run this project currently holds. |
-| `end_session` | Close the run, free the browser/profile. |
+| Tool           | What it does                                                                                                                                                                                                                                                                              |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start_debug`  | Open a run: `{ target, goal, url?, as?, replace?, criteria?, timeout? }`. `url` is required when the target has no configured url; `as` names a login persona; `replace: true` takes over a project with a run already open. The small agent drives autonomously. Returns the session id. |
+| `get_findings` | Poll status + structured findings (functional bugs + visual issues) + evidence. Long-poll with `wait`. A whole-object read caps each list at 20 and says so in `truncated` (`{returned, total}` per field) — pass `fields` for the full lists.                                            |
+| `send_message` | Talk to the running agent mid-flight — add work, redirect, or answer a question.                                                                                                                                                                                                          |
+| `describe`     | List the configured targets + models for this project — including each target's auth `personas[]` and `notes` — plus `session`: the run this project currently holds.                                                                                                                     |
+| `end_session`  | Close the run, free the browser/profile.                                                                                                                                                                                                                                                  |
 
 A run is **always time-capped**: `start_debug`'s `timeout` (seconds) overrides the
 default 300s, so a session can never hang forever — it auto-ends and frees the
@@ -252,7 +252,7 @@ start_debug { target: "dashboard", as: "admin", goal: "open Audit and check the 
 
 The run signs in **out-of-band**, before the driver's first step: it costs zero
 driver steps, and the credentials never enter the model's context — the prompt
-only learns *"you are already signed in as `admin`"*. Values are redacted out of
+only learns _"you are already signed in as `admin`"_. Values are redacted out of
 every log the run writes; `describe` reports persona **names** only. A typo'd `as`
 fails loud listing the valid names, and a login that does not take fails the run
 rather than handing back a session that will report every page behind it as empty.
@@ -262,7 +262,7 @@ Use dev/seed credentials — this file is committed. Details in
 ### Telling it what's expected — `notes`
 
 A freshly-migrated app with no seed data renders empty states everywhere, and the
-driver reports *"the table is empty"* as the run's headline bug. It is right, and
+driver reports _"the table is empty"_ as the run's headline bug. It is right, and
 it is useless. Say what's expected once, in the target:
 
 ```jsonc
@@ -277,7 +277,7 @@ it is useless. Say what's expected once, in the target:
 
 One fact per line, on any target (web, desktop, android). Unlike the per-run
 `goal`, `notes` is config: it is composed into the driver's prompt once, as its
-own *"Known about this app"* section — treat these as expected, never report one
+own _"Known about this app"_ section — treat these as expected, never report one
 as a defect, and a screen that **contradicts** one is still worth reporting.
 The same preconditions also reach the separate vision model that judges
 screenshots, so a configured expected empty state stops being filed as a visual
@@ -319,14 +319,14 @@ allowed tools, output formats).
 
 You get findings, but the agent's evidence is what makes them actionable:
 
-| | |
-|---|---|
-| **HTTP** | Whole exchanges — method, url, status, `durationMs`, and for `fetch`/`xhr` the request **and response bodies** plus headers. A `4xx` carries the server's own reason (`{"error":"password too short"}`), not just a status. Credential header values are redacted to `<redacted, N chars>`: presence stays diagnostic, the secret never reaches the model, the logs, or your transcript. |
-| **DOM** | Roles, names, bounds, live `value`/`checked` on form controls, `data-testid`, and WCAG contrast per text node — so "is the box ticked?" and "is this text readable?" are answered structurally, without spending vision. |
-| **iframes** | Embedded documents are read too. Nodes carry `frame`, and their bounds are page coordinates, so clicking works the same as anywhere else. |
-| **Tabs** | A `target="_blank"` click is noticed and followable, instead of reading as "nothing happened". |
-| **Console** | Errors and uncaught exceptions, with source locations. |
-| **Frames** | An ordered screenshot per action, stitched into `replay.mp4`. |
+|             |                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **HTTP**    | Whole exchanges — method, url, status, `durationMs`, and for `fetch`/`xhr` the request **and response bodies** plus headers. A `4xx` carries the server's own reason (`{"error":"password too short"}`), not just a status. Credential header values are redacted to `<redacted, N chars>`: presence stays diagnostic, the secret never reaches the model, the logs, or your transcript. |
+| **DOM**     | Roles, names, bounds, live `value`/`checked` on form controls, `data-testid`, and WCAG contrast per text node — so "is the box ticked?" and "is this text readable?" are answered structurally, without spending vision.                                                                                                                                                                 |
+| **iframes** | Embedded documents are read too. Nodes carry `frame`, and their bounds are page coordinates, so clicking works the same as anywhere else.                                                                                                                                                                                                                                                |
+| **Tabs**    | A `target="_blank"` click is noticed and followable, instead of reading as "nothing happened".                                                                                                                                                                                                                                                                                           |
+| **Console** | Errors and uncaught exceptions, with source locations.                                                                                                                                                                                                                                                                                                                                   |
+| **Frames**  | An ordered screenshot per action, stitched into `replay.mp4`.                                                                                                                                                                                                                                                                                                                            |
 
 Static assets are held back from a default network read — on a Vite dev server
 they outnumber real API calls ~15:1 — with a count of what was hidden and the
@@ -431,11 +431,11 @@ still land without it.
 
 All three adapters ship in v1:
 
-| Target  | State |
-|---------|-------|
-| web     | ✅ shipped (CDP, headless + attach) |
+| Target  | State                                      |
+| ------- | ------------------------------------------ |
+| web     | ✅ shipped (CDP, headless + attach)        |
 | desktop | ✅ shipped (X11/Wayland, AT-SPI + xdotool) |
-| android | ✅ shipped (ADB, uiautomator) |
+| android | ✅ shipped (ADB, uiautomator)              |
 
 Replay video (`replay.mp4`, captioned stills → mp4 via ffmpeg) ships with the web adapter.
 ffmpeg is optional — absent gracefully, findings still land.

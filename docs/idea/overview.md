@@ -19,8 +19,8 @@ A local MCP server that takes the human out of the UI-debug loop.
   console + network, takes screenshots, and reports back:
   - **does it work?** (functional bugs, errors, hangs)
   - **how does it look?** (layout, overlap, spacing, polish — visual/UX feedback)
-- The smart agent fixes the code, and continues the conversation: *"try again",
-  "now also check the mobile view", "the button still overlaps?"*
+- The smart agent fixes the code, and continues the conversation: _"try again",
+  "now also check the mobile view", "the button still overlaps?"_
 - **Loop until the UI works and looks right.**
 
 ## The full loop (you driving)

@@ -5,6 +5,7 @@
 Baseline: 645 pass / 10 skip / 0 fail; CI runs e2e (only `SKIP_BROWSER_INTEGRATION` gated suite skipped). These are the gaps no fix-slice claims.
 
 ## Gaps to close
+
 - `src/adapters/factory.ts` — zero tests: unknown target → `TargetNotFoundError`; per-kind dispatch (may already land in 04 — check first).
 - `src/errors.test.ts` — add `McpServerError`, `ReplayError`, `AdbError`, `VisionUnavailableError` (name + instanceof chain).
 - `src/mcp/server.test.ts` — Zod failure through the real transport: bad `url`, `wait` > 120000, `timeout` > max, missing `goal`.
@@ -19,12 +20,15 @@ Baseline: 645 pass / 10 skip / 0 fail; CI runs e2e (only `SKIP_BROWSER_INTEGRATI
 - Split oversized test files while touching them: `session.test.ts` (797), `loop.test.ts` (508).
 
 ## Steps
+
 1. Diff this list against what 01–08 actually shipped; drop duplicates.
 2. Group remaining by file; land as one PR of pure test additions (no src changes except test-only helpers).
 
 ## Tests
+
 - That's the slice. Run: `bun test` (expect count well above 645), `typecheck`, `lint`.
 
 ## Done when
+
 - Every bullet either has a test or a one-line note in the PR why not.
 - No test file > 500 LOC; no test writes outside tmpdirs it cleans.

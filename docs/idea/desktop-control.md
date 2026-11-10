@@ -8,11 +8,11 @@ agents use. Decides the adapter internals. Linux-first, X11 + Wayland.
 Web and mobile hand you a **structured element tree for free**. The Linux
 desktop does **not**.
 
-| Target  | Free structured tree? | From |
-|---------|-----------------------|------|
-| web     | yes — DOM + a11y       | CDP  |
-| mobile  | yes — view hierarchy   | ADB / uiautomator |
-| desktop | **uneven** — AT-SPI2 when present, else nothing | D-Bus |
+| Target  | Free structured tree?                           | From              |
+| ------- | ----------------------------------------------- | ----------------- |
+| web     | yes — DOM + a11y                                | CDP               |
+| mobile  | yes — view hierarchy                            | ADB / uiautomator |
+| desktop | **uneven** — AT-SPI2 when present, else nothing | D-Bus             |
 
 So: **a11y-tree-first everywhere it exists.** That is the whole strategy — and
 it is what the shipped desktop/android adapters do: **accessibility-only** —
@@ -43,13 +43,13 @@ compositor-specific.
 
 ## Input
 
-| Tool | X11 | Wayland | Notes |
-|------|-----|---------|-------|
-| **xdotool** | ✅ | ❌ | input + windows + geometry, all-in-one. The X11 default. |
-| **libei + RemoteDesktop portal** | — | ✅ GNOME≥46, KDE≥6.1 (not wlroots) | the *blessed* XTEST replacement, consent-gated. Future-proof. |
-| **ydotool / dotool** | ✅ | ✅ any compositor | via `/dev/uinput`. **Window-blind** — needs coords. Needs `input` group + udev rule. |
-| **wtype / virtual-keyboard** | ❌ | wlroots only | **refused by GNOME & KDE.** Don't rely on it. |
-| **kdotool** (KWin) / **wlrctl** (wlroots) | — | compositor-specific | window mgmt only. No portable Wayland window API exists. |
+| Tool                                      | X11 | Wayland                            | Notes                                                                                |
+| ----------------------------------------- | --- | ---------------------------------- | ------------------------------------------------------------------------------------ |
+| **xdotool**                               | ✅  | ❌                                 | input + windows + geometry, all-in-one. The X11 default.                             |
+| **libei + RemoteDesktop portal**          | —   | ✅ GNOME≥46, KDE≥6.1 (not wlroots) | the _blessed_ XTEST replacement, consent-gated. Future-proof.                        |
+| **ydotool / dotool**                      | ✅  | ✅ any compositor                  | via `/dev/uinput`. **Window-blind** — needs coords. Needs `input` group + udev rule. |
+| **wtype / virtual-keyboard**              | ❌  | wlroots only                       | **refused by GNOME & KDE.** Don't rely on it.                                        |
+| **kdotool** (KWin) / **wlrctl** (wlroots) | —   | compositor-specific                | window mgmt only. No portable Wayland window API exists.                             |
 
 **This codebase:** `xdotool` for X11/XWayland (the proven, container-friendly path).
 Native-Wayland input via libei/ydotool is future work. See `src/adapters/desktop/input.ts` + `capture.ts`.
@@ -78,11 +78,11 @@ same on X11 and Wayland (the one Wayland-robust piece).
 Naive X11 capture (`scrot`, `mss`, `pyautogui.screenshot()`) returns **BLACK** on
 Wayland. No universal API. Detect compositor and dispatch:
 
-| Route | Works on |
-|-------|----------|
-| **grim** | wlroots (Sway/Hyprland) only |
-| `org.gnome.Shell.Screenshot` (D-Bus) | GNOME |
-| `org.kde.KWin.ScreenShot2` (D-Bus) | KDE |
+| Route                                                           | Works on                         |
+| --------------------------------------------------------------- | -------------------------------- |
+| **grim**                                                        | wlroots (Sway/Hyprland) only     |
+| `org.gnome.Shell.Screenshot` (D-Bus)                            | GNOME                            |
+| `org.kde.KWin.ScreenShot2` (D-Bus)                              | KDE                              |
 | **xdg-desktop-portal** Screenshot / ScreenCast (+ **PipeWire**) | **all DEs** — the portable route |
 
 **Agent gotcha:** the portal **prompts** and needs a surface to anchor the dialog

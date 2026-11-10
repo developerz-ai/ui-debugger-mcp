@@ -3,6 +3,7 @@
 > Part of [`overview.md`](overview.md). Depends on: none.
 
 ## Files to change
+
 - `src/agent/prompts/compose.ts:45-71` + `debug-agent.ts:11-19` — self-look mode (`session-builder.ts:247-249`) still prompts "You NEVER see pixels… `look` = ask the vision model", contradicting `look.ts:277-279` self-look ("you are multimodal — judge it yourself").
 - `src/agent/prompts/web-addendum.ts:68-73` — "Enumerate frames via the Target domain" — no observe kind/act action exposes frames/tabs; unexecutable, burns steps.
 - `src/agent/prompts/web-addendum.ts:64-66` — teaches `hover`; `act.ts:34` has no hover action.
@@ -14,6 +15,7 @@
 - `src/agent/prompts/debug-agent.ts:26` vs `desktop-addendum.ts:26-28` — base mandates console/network observes; desktop says they error. Hedge base: "where the target supports them".
 
 ## Steps
+
 1. Thread a `selfLook: boolean` into `composeSystemPrompt`; swap the look paragraph accordingly. Wire from `session-builder.ts:247-249`.
 2. web-addendum: delete the Target-domain frames section (until frame support exists); replace "hover/click parent" with click-only guidance; teach `limit`/`level_eq`/`status_gte` filters in the console/network section.
 3. `runObserve`: default `limit: 50` for `console`/`network` kinds when caller passes none (explicit limit still wins; keep fail-loud on invalid values).
@@ -24,6 +26,7 @@
 8. Sync `docs/idea/mcp-tools.md:77,163` (flat act schema is deliberate — `act.ts:41-47`) — or leave for slice 09; note cross-ref.
 
 ## Tests
+
 - Prompt-vs-schema drift guard: assert every action/kind/field name mentioned in addendums exists in `ACT_ACTIONS`/`OBSERVE_KINDS`/`NODE_FIELDS` (would have caught hover + frames).
 - selfLook prompt variant snapshot test (both modes, contradiction absent).
 - console/network default limit applied; explicit limit wins.
@@ -33,6 +36,7 @@
 - Run: `bun test src/agent`, full suite after.
 
 ## Done when
+
 - No prompt instruction references a verb/field the schemas reject (guarded by test).
 - Chatty-page console/network reads are bounded by default.
 - Self-look sessions get a self-look prompt.

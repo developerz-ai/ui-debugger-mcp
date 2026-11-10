@@ -73,9 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lands inside that window is the login taking.
 
 - **A login failure now says which of the two things actually happened.** A
-  *settled rejection* — the page went idle and the URL was still the login page
+  _settled rejection_ — the page went idle and the URL was still the login page
   — still names the persona, the URL and the submit control and still says the
-  credentials are probably wrong. A *budget exhaustion* — the budget ran out
+  credentials are probably wrong. A _budget exhaustion_ — the budget ran out
   with the URL still on the login page and no settled observation — is a
   DIFFERENT `AuthError`: it names the persona and the URL and says the
   navigation never settled, without blaming the credentials, because nothing
@@ -104,7 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `resolveConfigPath(cwd)` by every read and write.
 
   Resolution is fail-fast in both directions: `.dz/` wins when both files
-  exist, and a *bad* `.dz/` copy raises `ConfigError` rather than silently
+  exist, and a _bad_ `.dz/` copy raises `ConfigError` rather than silently
   falling through to the root file. A fresh `init` writes to `.dz/` when the
   repo already has that directory, and to the root file otherwise.
 
@@ -129,7 +129,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The no-`expect` proof-of-signin waits for the post-submit navigation to settle
   before reading the URL that decides — but it was given the ENTIRE remaining
   login budget for a wait whose result it discards. A page that never reaches
-  network-idle is the normal shape of a *rejected* login (the credentials POST
+  network-idle is the normal shape of a _rejected_ login (the credentials POST
   comes back 401 and nothing navigates), so the one case the check exists to
   catch was also the slowest to report. The settle wait is now a bounded
   `NAVIGATION_SETTLE_MS` slice, still shortened further by a caller with less
@@ -152,7 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A managed android run is headless by default.** The adapter used to spawn
   `emulator @avd -port <p>` and nothing else, which opens a window on a desktop
-  and *fails to boot at all* on a box with no display — `-no-window` on its own
+  and _fails to boot at all_ on a box with no display — `-no-window` on its own
   is not enough either, since the emulator still asks for a host GL context.
   Managed boot now passes `-no-window -gpu swiftshader_indirect -no-audio
   -no-boot-anim`, matching the web adapter's headless-by-default posture.
@@ -188,7 +188,7 @@ empty tables are the point.
   method `end_session` calls — managed Chrome stopped, an attached browser only
   disconnected, timer cleared, profile lock freed — because a second teardown
   implementation would drift, and the drift would be a leaked browser sitting on
-  the lock. It only ever replaces a run *this* server owns: one held by another
+  the lock. It only ever replaces a run _this_ server owns: one held by another
   live server is still refused (that browser is not ours to close), and so is a
   start still in flight (it owns no slot to hand over yet).
 
@@ -206,8 +206,8 @@ empty tables are the point.
 
   One fact per line, on any adapter. Unlike the per-run `goal`, this is config: it
   is composed into the system prompt once, as its own `## Known about this app`
-  section ahead of the goal — *treat as expected, never `report` one as a bug; a
-  screen that CONTRADICTS one still is a finding*. Notes are context, not a gag
+  section ahead of the goal — _treat as expected, never `report` one as a bug; a
+  screen that CONTRADICTS one still is a finding_. Notes are context, not a gag
   order.
 
   Bounded at 1000 characters and enforced when the config loads, naming the cap:
@@ -241,7 +241,7 @@ Now it lives in config and costs nothing.
 
   **The login runs out-of-band**, between the first navigation and the driver's
   first step — the driver never performs it and never receives the values. A recipe
-  in the system prompt would be resent to the provider on *every* step (the standing
+  in the system prompt would be resent to the provider on _every_ step (the standing
   rule here is that a secret never enters the model's context), and an in-trail
   login spends 4-8 steps on work with one correct answer. The trail stays honest:
   the login's actions are recorded as steps, marked as the pre-run sign-in, with
@@ -302,13 +302,13 @@ single rule.
   structured data, value-words (`NEVER`/`ALWAYS`/`fails when`) over rhetoric, and
   code/selectors/tool syntax left byte-for-byte intact.
 
-  | Composed system prompt | Before | After |
-  |---|---|---|
-  | web | 15,579 | 12,543 (−19.5%) |
-  | desktop | 11,237 | 8,932 (−20.5%) |
-  | android | 11,908 | 9,556 (−19.7%) |
-  | vision guy | 2,669 | 2,122 (−20.5%) |
-  | summary guy | 887 | 811 (−8.6%) |
+  | Composed system prompt | Before | After           |
+  | ---------------------- | ------ | --------------- |
+  | web                    | 15,579 | 12,543 (−19.5%) |
+  | desktop                | 11,237 | 8,932 (−20.5%)  |
+  | android                | 11,908 | 9,556 (−19.7%)  |
+  | vision guy             | 2,669  | 2,122 (−20.5%)  |
+  | summary guy            | 887    | 811 (−8.6%)     |
 
   Every behavioural rule survives, including the ones added in 1.4.0 after real
   failures: the cross-origin ban, `clear: true` on re-typed fields, the
@@ -374,11 +374,11 @@ report confident findings about it.
 
 ### Fixed
 
-- **A run could wander off the app under test and never say so.** Driven at the local fixture with the goal "debug the Nimbus Store home page", the driver's *first* action was `navigate → https://nimbus-store.vercel.app` — a public site it inferred from the goal text. It never came back, and the run returned six fully-evidenced bugs (a CORS misconfiguration, a JS crash, a 404 favicon) about a stranger's production app, with nothing marking the target as lost. Two gaps, both ours: `story.md` never recorded the run's URL, so the driver's own context could not answer "where am I supposed to be"; and the "only navigate to URLs given in the goal" rule lived in the prompt with nothing enforcing it. Now the address is stated in the prompt and in `story.md`, and `act({action:"navigate"})` refuses a cross-origin hop, naming the origin the run belongs to. Paths and same-origin URLs pass; desktop/android, whose `navigate` means a window title or an app package, are unaffected.
+- **A run could wander off the app under test and never say so.** Driven at the local fixture with the goal "debug the Nimbus Store home page", the driver's _first_ action was `navigate → https://nimbus-store.vercel.app` — a public site it inferred from the goal text. It never came back, and the run returned six fully-evidenced bugs (a CORS misconfiguration, a JS crash, a 404 favicon) about a stranger's production app, with nothing marking the target as lost. Two gaps, both ours: `story.md` never recorded the run's URL, so the driver's own context could not answer "where am I supposed to be"; and the "only navigate to URLs given in the goal" rule lived in the prompt with nothing enforcing it. Now the address is stated in the prompt and in `story.md`, and `act({action:"navigate"})` refuses a cross-origin hop, naming the origin the run belongs to. Paths and same-origin URLs pass; desktop/android, whose `navigate` means a window title or an app package, are unaffected.
 - **Config-drift detection was dead in every installed copy.** `configFingerprint` hashed with `Bun.hash`, but the package ships `bin: dist/main.js` behind `#!/usr/bin/env node` — under Node that is a `ReferenceError`, which fell straight into the surrounding catch and returned `null`. Every comparison was `null !== null`, so the "you edited the config, reconnect" guard added in 1.3.0 never fired for anyone who installed it, while working perfectly under `bun run dev`. Now `node:crypto`, with the catch narrowed to `ENOENT` so a real read failure is loud. A test now bans Bun globals from shipped code outright.
-- **An invalid `report` call ended the run with no verdict.** `stopWhen: hasToolCall('report')` fires on the tool *call*, and AI SDK 6 records a schema-rejected call in `step.toolCalls` without executing it. So one bad enum from the small driver model — `status: "pass"`, a `bugs[].kind` outside the union — stopped the loop after a full step budget and full token spend, leaving the stale `running` snapshot as the last thing on disk. It now stops on the report *result*, and a step whose `report` never executed still flushes its progress instead of dropping that step's console errors and look issues.
+- **An invalid `report` call ended the run with no verdict.** `stopWhen: hasToolCall('report')` fires on the tool _call_, and AI SDK 6 records a schema-rejected call in `step.toolCalls` without executing it. So one bad enum from the small driver model — `status: "pass"`, a `bugs[].kind` outside the union — stopped the loop after a full step budget and full token spend, leaving the stale `running` snapshot as the last thing on disk. It now stops on the report _result_, and a step whose `report` never executed still flushes its progress instead of dropping that step's console errors and look issues.
 - **`observe` handed desktop and android web-only selector syntax.** The belt emitted Playwright forms (`role=button[name="Save" i]`, `data-testid="…"`) as `target` for every adapter, while the AT-SPI and uiautomator parsers accept only `button "Save"` or a bare name — and both addenda instruct the driver to copy `target` verbatim and never hand-craft a selector. Every click and type on a non-web target failed. Targets are now emitted in each adapter's own dialect, with a drift test that runs the real belt and asserts the emitted form appears in the matching prompt.
-- **Two acts plus `report` in one step lost the second act.** The act queue chains on promises, so act #2 had not entered the trail's gate when `report`'s barrier checked it; the barrier returned early, the verdict recorded only act #1, and since the loop then stops, act #2 — which really ran against the live UI and saved a screenshot — reached no persisted file at all. The gate is now entered when an act is *queued*, not when it starts.
+- **Two acts plus `report` in one step lost the second act.** The act queue chains on promises, so act #2 had not entered the trail's gate when `report`'s barrier checked it; the barrier returned early, the verdict recorded only act #1, and since the loop then stops, act #2 — which really ran against the live UI and saved a screenshot — reached no persisted file at all. The gate is now entered when an act is _queued_, not when it starts.
 - **Server boot could hang forever.** The image-capability probe `fetch`ed `/models` with no timeout and is awaited before the stdio transport connects, so a base URL that accepts the connection and blackholes the request left the MCP client with a process that started and answered nothing. Capped at 5s.
 - **Playwright hijacked the graceful shutdown.** `launchPersistentContext` installs its own SIGINT/SIGTERM handlers by default; Playwright's SIGINT handler calls `process.exit(130)` immediately after ours starts, so the terminal findings write, the summary and `replay.mp4` never landed and `state.json` stayed `running`. Signals now stay with the server.
 - **A signal during launch skipped teardown entirely.** `endActive()` returns immediately when the session is not yet in the manager, which is the whole browser-launch window — so a client death mid-launch exited the process with nothing aborting the launch and the Chrome profile potentially left locked. Starts are now cancellable and awaited.
@@ -388,7 +388,7 @@ report confident findings about it.
 - **`target: "constructor"` bypassed the not-found check** by walking the prototype chain — it passed the guard, littered a session dir, then died as "unknown adapter type: undefined", while `describe` correctly called it not found.
 - **One transient `mkdir` failure poisoned a run's persistence.** The store cached the rejected promise forever, so a momentary `EMFILE` meant every later write in that session failed — including the terminal `report` — and the run ended with no `findings.json`.
 - **The post-verdict replay ran even when the session was already aborted**, orphaning ffmpeg past `process.exit` and writing findings after close.
-- **Desktop `find` reported "no element matched" for elements that exist.** The AT-SPI walk stopped at `limit` counting *query* matches, but `filters` are applied afterwards — so `find({query:'Save', filters:{enabled_eq:true}})` stopped at the first disabled "Save" and never reached the enabled one.
+- **Desktop `find` reported "no element matched" for elements that exist.** The AT-SPI walk stopped at `limit` counting _query_ matches, but `filters` are applied afterwards — so `find({query:'Save', filters:{enabled_eq:true}})` stopped at the first disabled "Save" and never reached the enabled one.
 - **`xdotool search --name` took a POSIX regex while the title arrived as a literal**, so a window titled `MyApp (dev)` was never found and `open` failed with "window not found" against a window plainly on screen.
 - **A zero-size android region swiped at the screen origin.** A not-yet-laid-out list reports `[0,0][0,0]`; `scroll({within})` then issued a 2px gesture at the top-left corner with negative Y — a notification-shade pull — and reported it as a successful scroll.
 - **Managed teardown was SIGTERM-only and dropped the handle**, so a target that ignores SIGTERM was orphaned permanently with its profile lock held. Now escalates to SIGKILL after a grace period.
@@ -398,9 +398,9 @@ report confident findings about it.
 - **A `send_message` landing after the last step was drained and lost** with the caller believing it was delivered; pending messages now surface in the verdict.
 - **`describe.workspace` returned the raw config string** (`./tmp/ui-debugger-mcp`) rather than the resolved per-project root, so a caller joining it to the relative paths it sees looked in the wrong directory.
 - **Workspaces collided on `basename(cwd)`** when `workspace` was configured as an absolute shared path — two projects named `api` shared one `state.json`, profile and session history.
-- **A streaming response left no trace at all.** The network row was buffered only *after* its body resolved, and an SSE stream, a long-poll or a stalled download only "finishes" when the page tears it down — so for the whole run there was no row for the driver to read and no line in `network.log`, as if the request had never been made. Rows are now recorded the moment the headers arrive and enriched in place; the body and header reads are capped at 2s and marked `<body not finished>` rather than holding the record hostage.
-- **A connection reset mid-body was reported as a clean `200`.** Suppressing the post-response `requestfailed` echo (1.3.0) suppressed *every* late failure, not just `net::ERR_ABORTED` teardown — a response whose connection died while the body streamed was indistinguishable from a body-less success. Only the abort echo is dropped now; a real late failure amends the exchange in place, and re-emits its log line.
-- **Credentials in a URL leaked into model context and the log.** Header *values* were redacted, but the URL was not — an OAuth callback (`?code=4/0Ae…`), a presigned S3 link (`?X-Amz-Signature=…`) or a `?api_key=` carries a live secret in the URL itself, and the URL is the one field that reaches the model on **every** network read and lands in `logs/network.log` verbatim. Credential-bearing query values are now `<redacted, N chars>` too.
+- **A streaming response left no trace at all.** The network row was buffered only _after_ its body resolved, and an SSE stream, a long-poll or a stalled download only "finishes" when the page tears it down — so for the whole run there was no row for the driver to read and no line in `network.log`, as if the request had never been made. Rows are now recorded the moment the headers arrive and enriched in place; the body and header reads are capped at 2s and marked `<body not finished>` rather than holding the record hostage.
+- **A connection reset mid-body was reported as a clean `200`.** Suppressing the post-response `requestfailed` echo (1.3.0) suppressed _every_ late failure, not just `net::ERR_ABORTED` teardown — a response whose connection died while the body streamed was indistinguishable from a body-less success. Only the abort echo is dropped now; a real late failure amends the exchange in place, and re-emits its log line.
+- **Credentials in a URL leaked into model context and the log.** Header _values_ were redacted, but the URL was not — an OAuth callback (`?code=4/0Ae…`), a presigned S3 link (`?X-Amz-Signature=…`) or a `?api_key=` carries a live secret in the URL itself, and the URL is the one field that reaches the model on **every** network read and lands in `logs/network.log` verbatim. Credential-bearing query values are now `<redacted, N chars>` too.
 - **Console locations pointed one line too high.** Playwright reports `line`/`column` 0-based; `url:line:col` is read (and opened in an editor) 1-based, so every stack location the driver reported to the smart agent was off by one in both axes.
 - **`within` silently dropped everything inside an iframe.** The scope was re-resolved with `frame.locator(within)` inside each frame, and a scope living in the main document matches nothing in a child — so `find({within:'#checkout'})` returned zero of the embedded payment fields while reporting a successful, empty search. The scope is now resolved once to a page-coordinate rect that frames are tested against.
 - **The off-viewport click guard was off for every attach target.** `viewportSize()` is null under `connectOverCDP` (it hard-codes `noDefaultViewport`), and null was read as "inside" — disabling the guard exactly where the window size is least predictable. The page is now asked directly before giving up.
@@ -410,7 +410,7 @@ report confident findings about it.
 ### Changed
 
 - **The replay clip is built to be attachable to a GitHub PR.** The encode named no codec, relying on ffmpeg's container default, and left the `moov` atom at the end — so playback stalled until the whole file downloaded. Now explicitly H.264/yuv420p with `+faststart`, and tuned with x264's `stillimage` preset: a replay is a slideshow of static frames whose entire value is the text burned into them, and the default psychovisual tuning smooths exactly the edges that text is made of. Measured on a real run: 21% smaller and sharper. Over GitHub's 10MB attachment limit, the clip is now called out in `agent.log` rather than failing on upload.
-- **The vision frame is encoded for the cheapest transfer that keeps text legible.** Measured first, on a real 1280×720 app frame: PNG was **43KB**, JPEG q95 62KB, q90 49KB, q85 42KB — i.e. every JPEG quality that keeps small text crisp is *larger* than the PNG, and the one that finally wins on size is the one that starts ringing around glyph edges. Flat UI is exactly what PNG is good at, so a blanket switch to JPEG would have traded text quality for nothing. `look` now keeps PNG for anything under 400KB — which flat UI never exceeds — and falls back to JPEG q92 only for a photo-heavy frame where PNG genuinely blows up, then keeps whichever encoding actually came out smaller. The evidence saved to disk is always the exact bytes the vision model judged, with a matching extension.
+- **The vision frame is encoded for the cheapest transfer that keeps text legible.** Measured first, on a real 1280×720 app frame: PNG was **43KB**, JPEG q95 62KB, q90 49KB, q85 42KB — i.e. every JPEG quality that keeps small text crisp is _larger_ than the PNG, and the one that finally wins on size is the one that starts ringing around glyph edges. Flat UI is exactly what PNG is good at, so a blanket switch to JPEG would have traded text quality for nothing. `look` now keeps PNG for anything under 400KB — which flat UI never exceeds — and falls back to JPEG q92 only for a photo-heavy frame where PNG genuinely blows up, then keeps whichever encoding actually came out smaller. The evidence saved to disk is always the exact bytes the vision model judged, with a matching extension.
 - **An absolute `workspace` now stores each project under `<name>-<hash8>`.** Relative workspaces — the default and what `init` scaffolds — are byte-identical to before; installs using an absolute shared workspace start from a fresh Chrome profile once.
 - `start_debug` fails loud when `state.json` cannot be written, instead of returning a session id for a run nothing can find.
 - During launch, `status` reports the run and `stop` can signal it.
@@ -451,7 +451,7 @@ below is a defect that consumer actually hit.
 - **Network reads default to API traffic** — measured on a Vite dev server, static assets outnumbered real API calls 45:3, so an unfiltered tail of 50 rows returned zero API traffic. Successful assets are held back with a `hidden` count and the exact filter to reveal them; failed requests are never hidden, whatever their type.
 - **iframe content is readable** — `readState` extracts from every frame, translates child-frame bounds into page coordinates (so coordinate clicks need no frame awareness) and tags nodes with `frame`; selector actions fall through frames to whichever holds the element. Embedded widgets were previously invisible to page-level locators.
 - **Multi-tab support** — `observe({kind:"tabs"})`, `act({action:"switch_tab"})`, and optional `tabs`/`selectTab` on the adapter contract. Console/network capture follows a tab switch while keeping what was already buffered. Every `act` returns the tab list once more than one is open, so a `target="_blank"` click no longer reads as "nothing happened".
-- **Live form state in the tree** — nodes now carry `value` (input/textarea/select contents) and `checked`. The extractor read `getAttribute('value')`, the markup's *initial* value, which never changes as the user types — and the accessible name resolves to the label or placeholder long before it would reach a value. So there was NO structural way to see what a field held, and a driver verifying its own input fell back to `look`: one observed run spent ~25 of its 60 steps asking vision "did my text land?" and died without a verdict. `name` still resolves to the label, so targeting is unchanged.
+- **Live form state in the tree** — nodes now carry `value` (input/textarea/select contents) and `checked`. The extractor read `getAttribute('value')`, the markup's _initial_ value, which never changes as the user types — and the accessible name resolves to the label or placeholder long before it would reach a value. So there was NO structural way to see what a field held, and a driver verifying its own input fell back to `look`: one observed run spent ~25 of its 60 steps asking vision "did my text land?" and died without a verdict. `name` still resolves to the label, so targeting is unchanged.
 - **Driver + vision prompts rewritten against observed failures** — the driver was told to "re-`observe` after each `act`", which on a real run meant a full tree read per action and was the single largest budget sink; it now verifies narrowly and is told plainly that an unreported run produces nothing. Added a rule-yourself-out section (doubled text, invented selectors, guessed URLs, elements below the fold or in another frame are the driver's errors, not the app's — an observed run filed two of the debugger's own defects as app bugs) and a bug bar that excludes normal behaviour (a logged-out `401` probe, a request cancelled by navigation) — a run reported the pre-login 401 as a bug while annotating it "expected". The vision prompt now bounds itself to what is visible in one viewport (below-the-fold content is not "missing"; no hover/focus/animation/responsive claims), tells the model an empty `issues` list is a good answer rather than a failure to find something, keeps it out of judging content correctness, and has it point the driver back at the tree when asked to read a value off pixels.
 - **`act({action:"type", clear:true})`** — replaces a field's contents instead of appending. Re-typing a used field produced `Finish project reportFinish project report`, which the driver then reported as an app bug.
 
