@@ -31,13 +31,13 @@
 #                             does NOT re-download. That dir is RESOLVED, not
 #                             assumed — see `_dz_cache_dir` where it happens.
 #   5. Library check        — `bun src/cli/chromium-libs.ts "$CACHE_DIR"` proves
-#                             every shared library of the pinned headless-shell
-#                             binary resolves. Apt / install-deps runs ONLY when
+#                             every shared library of pinned full Chromium and
+#                             its headless shell resolves. Apt / install-deps runs ONLY when
 #                             libraries are actually missing AND noninteractive
 #                             elevation is available; otherwise the check fails
 #                             loud naming every missing library.
 #   6. Launch check         — playwright-core actually launches the headless
-#                             shell, so a missing binary or system lib fails
+#                             shell AND full Chromium headlessly, so a missing binary or system lib fails
 #                             HERE with the error naming it, not as a mystery
 #                             inside `bin/check` / `bun test`. Not retried: a
 #                             missing binary or library is not transient.
@@ -350,8 +350,8 @@ else
   fi
 fi
 
-# Library gate: prove every shared library the pinned headless-shell binary
-# needs actually resolves, BEFORE the launch check — a missing lib then fails
+# Library gate: prove every shared library pinned full Chromium and its headless
+# shell need actually resolves, BEFORE the launch check — a missing lib then fails
 # HERE with the error naming it (and the fix), not as a mystery inside the
 # launch. `src/cli/chromium-libs.ts` exits 0 when everything resolves, and
 # exits 1 with an `X_CHROMIUM_LIBS_MISSING:` diagnostic on stderr naming every
@@ -363,9 +363,9 @@ fi
 echo "==> verify chromium shared libraries"
 bun src/cli/chromium-libs.ts "$CACHE_DIR"
 
-# Runtime gate: prove the launch surface the suite needs is actually there —
-# both the browser set (chromium + headless_shell) and the system libraries
-# the library check above already proved. If anything is missing, this fails
+# Runtime gate: launch the default headless shell, then explicitly launch full
+# Chromium (the adapter uses chromium.executablePath()), closing each in turn.
+# The library check above covers both binaries. If anything is missing, this fails
 # HERE with the error naming it (e.g. "Chromium distribution 'X' is not found
 # at Y" — same shape as the issue's #83 baseline-red), not as a mystery inside
 # `bin check` / `bun test`. Not retried: a missing binary or library is
@@ -374,8 +374,11 @@ echo "==> verify chromium launches"
 bun -e '(async () => {
   const { chromium } = await import("playwright-core");
   const browser = await chromium.launch({ headless: true });
-  console.log("chromium " + browser.version() + " launched headless");
+  console.log("chromium headless shell " + browser.version() + " launched");
   await browser.close();
+  const fullBrowser = await chromium.launch({ headless: true, executablePath: chromium.executablePath() });
+  console.log("full chromium " + fullBrowser.version() + " launched headless");
+  await fullBrowser.close();
 })().catch((err) => { console.error(err); process.exit(1); })'
 
 echo "==> ready. try: bin/check"
