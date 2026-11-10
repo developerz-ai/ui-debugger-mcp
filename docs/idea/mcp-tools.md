@@ -161,7 +161,7 @@ competent model behave the same.
 - **Composed, not monolithic.** Base debug-agent prompt + target addendum
   (web/desktop/android specifics) + the app's address + the signed-in persona +
   the target's `notes` (what is expected of this app) + the session's `story` +
-  `criteria`. Same composition pattern as `../ai-task-master` subagents.
+  `criteria`. Same composition pattern as [developerz-ai/ai-task-master](https://github.com/developerz-ai/ai-task-master) subagents.
 - **Provider-agnostic.** No vendor-specific tricks. Swap deepseek↔GLM↔Llama via
   any OpenAI-compatible router and the prompt still drives the same loop.
 

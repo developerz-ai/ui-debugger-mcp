@@ -289,7 +289,7 @@ All Zod-validated. Bad config fails fast and loud.
 
 We talk to **any OpenAI-compatible endpoint**: one `OPENAI_BASE_URL` + an API key
 in `OPENAI_API_KEY` or `OPENROUTER_API_KEY` (`OPENAI_API_KEY` takes precedence
-when both are set). No vendor lock-in (same posture as `../ai-task-master`).
+when both are set). No vendor lock-in (same posture as [developerz-ai/ai-task-master](https://github.com/developerz-ai/ai-task-master)).
 
 - **OpenRouter** (default base url) — one key reaches every provider; model
   strings are `provider/model`, with optional routing suffixes passed through

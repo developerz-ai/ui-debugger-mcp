@@ -72,7 +72,7 @@ one does the moving and asks — _"is the cup to my left?"_ — and acts on the 
 }
 ```
 Defaults if omitted: **deepseek for text** (driver + summary), **qwen for image**
-(vision). Capability-based assignment, same idea as `../ai-task-master`'s roles.
+(vision). Capability-based assignment, same idea as [developerz-ai/ai-task-master](https://github.com/developerz-ai/ai-task-master)'s roles.
 Provider = any OpenAI-compatible endpoint (`OPENAI_BASE_URL` + an API key in
 `OPENAI_API_KEY` or `OPENROUTER_API_KEY`, `OPENAI_API_KEY` first when both are
 set); OpenRouter is the default — see

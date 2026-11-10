@@ -27,9 +27,9 @@ code, asks again. Loop until the UI works. No human clicking.
 
 ## Reference repos (read for patterns, don't copy blind)
 
-- `../ai-task-master` — build template: Bun + TS + Vercel AI SDK, subagent-as-tool, MCP, Zod, Biome.
-- `../gold-standards-in-ai/docs` — house rules: few fat tools, SRP, custom errors, compressed config.
-- `../../sebyx07/claude-code-bible/docs` — deeper handbook. `?debug-ai=true` login bypass pattern.
+- [ai-task-master](https://github.com/developerz-ai/ai-task-master) — build template: Bun + TS + Vercel AI SDK, subagent-as-tool, MCP, Zod, Biome.
+- [gold-standards-in-ai](https://github.com/developerz-ai/gold-standards-in-ai) — house rules (its `docs/`): few fat tools, SRP, custom errors, compressed config.
+- [claude-code-bible](https://github.com/sebyx07/claude-code-bible) — deeper handbook (its `docs/`). `?debug-ai=true` login bypass pattern.
 
 ## Architecture
 
@@ -41,7 +41,7 @@ code, asks again. Loop until the UI works. No human clicking.
   router (OpenRouter default). Defaults: deepseek (text), qwen (image).
   - `prompts/` — OUR system prompts: in-repo, versioned, tested, provider-agnostic.
     NEVER rely on a 3rd-party model's defaults. Written compressed — they are
-    resent every step (`../../sebyx07/claude-code-bible/docs/11-compressed-config.md`).
+    resent every step ([claude-code-bible/docs/11-compressed-config.md](https://github.com/sebyx07/claude-code-bible/blob/main/docs/11-compressed-config.md)).
 - `src/adapters/` — target control behind one shared contract.
   - `browser/` — web via CDP (headless default). ✅ shipped.
   - `desktop/` — X11/Wayland windows. Covers desktop app AND mobile emulator. ✅ shipped.
