@@ -5,6 +5,7 @@
 Core design already matches Anthropic guidance + maps 1:1 onto experimental MCP Tasks — no redesign. This slice closes the concrete spec gaps.
 
 ## Files to change
+
 - `src/mcp/tools/*.ts` + `src/mcp/tools/result.ts:17-23` — tools emit `structuredContent` but never declare `outputSchema`; typed channel is unvalidated for clients ("Zod at every boundary" fails at tool outputs).
 - `src/mcp/tools/index.ts` (tool registrations) — no annotations.
 - `src/services/debug-service.ts` / `result.ts` — evidence (screenshots, replay.mp4, logs) returned as inline text paths; spec-blessed form is `resource_link` content items.
@@ -12,6 +13,7 @@ Core design already matches Anthropic guidance + maps 1:1 onto experimental MCP 
 - New: `server.json` at repo root for `mcp-publisher`.
 
 ## Steps
+
 1. `outputSchema`: findings/status shapes already exist as Zod (`src/findings/schema.ts`) — convert per-tool output to JSON Schema (SDK accepts Zod directly in 1.29) and declare on `get_findings`, `describe`, `start_debug`, `send_message`, `end_session`. Keep the serialized-text block for back-compat (spec requires both).
 2. Annotations: `get_findings`/`describe` → `readOnlyHint: true`; `start_debug` → `destructiveHint: false, openWorldHint: true`; `end_session` → `idempotentHint: true`.
 3. Error convention audit: run failures must return `isError: true` results (SDK already wraps handler throws — verify each tool path; protocol errors only for unknown tool/bad args).
@@ -21,6 +23,7 @@ Core design already matches Anthropic guidance + maps 1:1 onto experimental MCP 
 7. Skip (recorded decision, do not build): resources/prompts/sampling/elicitation primitives; MCP Tasks facade (experimental — session layer already shaped for it).
 
 ## Tests
+
 - Per-tool: `structuredContent` validates against declared `outputSchema` (round-trip through the real transport in `server.test.ts`).
 - Annotations present in `tools/list` response.
 - A failing run returns `isError: true` result, not a protocol error.
@@ -28,9 +31,11 @@ Core design already matches Anthropic guidance + maps 1:1 onto experimental MCP 
 - Run: `bun test src/mcp`, full suite.
 
 ## Done when
+
 - `tools/list` shows outputSchema + annotations for all five tools; findings arrive typed.
 - Evidence returned as resource links, not inline dumps.
 - package.json carries `mcpName` before the next npm publish; release doc includes registry step.
 
 ## Docs (required by /planx rule — MCP surface changed)
+
 - `README.md` + `docs/reference.md`: note structured output + annotations; registry install snippet.

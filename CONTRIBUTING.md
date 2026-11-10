@@ -76,12 +76,12 @@ It also builds `dummy/web` ahead of `bun test` so the e2e suite finds the fixtur
 Enforced by Biome (`biome.json`) and TypeScript strict config (`tsconfig.json`).
 Key rules (all error-level):
 
-| Rule | Constraint |
-|------|-----------|
-| Formatting | 2-space indent, lineWidth 100, LF, semicolons, trailing commas, arrow parens |
-| Quotes | single in TS/JS, double in JSX |
-| Imports | named exports only (`noDefaultExport`); `import type` for types |
-| Types | `noExplicitAny`, `noNonNullAssertion`, `strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax` |
+| Rule       | Constraint                                                                                          |
+| ---------- | --------------------------------------------------------------------------------------------------- |
+| Formatting | 2-space indent, lineWidth 100, LF, semicolons, trailing commas, arrow parens                        |
+| Quotes     | single in TS/JS, double in JSX                                                                      |
+| Imports    | named exports only (`noDefaultExport`); `import type` for types                                     |
+| Types      | `noExplicitAny`, `noNonNullAssertion`, `strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax` |
 
 House requirements, not tool-enforced — neither Biome nor `tsconfig.json`
 defines a rule for any of these, so `bin/check` cannot catch a violation; a
@@ -106,11 +106,11 @@ import { expect, test } from 'bun:test';
 
 Three test tiers used in this repo:
 
-| Tier | Example | When to run |
-|------|---------|-------------|
-| Unit (fake adapter) | `src/agent/belt/act.test.ts` | always — no external deps |
-| Browser integration | `src/adapters/browser/browser-adapter.integration.test.ts` | skip-guarded via `SKIP_BROWSER_TESTS=1`; needs `CHROMIUM_PATH` |
-| Full-stack e2e | `src/e2e.test.ts` | always — uses `Bun.serve` fixture + in-memory MCP transport + `MockLanguageModelV3` |
+| Tier                | Example                                                    | When to run                                                                         |
+| ------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Unit (fake adapter) | `src/agent/belt/act.test.ts`                               | always — no external deps                                                           |
+| Browser integration | `src/adapters/browser/browser-adapter.integration.test.ts` | skip-guarded via `SKIP_BROWSER_TESTS=1`; needs `CHROMIUM_PATH`                      |
+| Full-stack e2e      | `src/e2e.test.ts`                                          | always — uses `Bun.serve` fixture + in-memory MCP transport + `MockLanguageModelV3` |
 
 Reference example: `src/index.test.ts`.
 

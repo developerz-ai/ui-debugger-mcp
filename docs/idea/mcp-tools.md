@@ -28,13 +28,13 @@ clicks. This is the "don't ship one tool per action" rule taken to its limit —
 the small agent absorbs every low-level action, so the MCP surface stays ~5 tools
 no matter how complex the debugging gets.
 
-| Tool | Input | Returns |
-|------|-------|---------|
-| `start_debug`   | `{ target, goal, criteria?, url?, as?, replace?, timeout? }` | `session_id` |
-| `send_message`  | `{ session_id, message }`     | ack — inject work mid-run |
-| `get_findings`  | `{ session_id, wait?, fields? }` | status + findings + evidence paths (+ `truncated`) |
-| `describe`      | `{}` or `{ target }`          | targets catalog + config (lazy), incl. `personas[]`, `notes`, and the active `session` |
-| `end_session`   | `{ session_id }`              | closes it |
+| Tool           | Input                                                        | Returns                                                                                |
+| -------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| `start_debug`  | `{ target, goal, criteria?, url?, as?, replace?, timeout? }` | `session_id`                                                                           |
+| `send_message` | `{ session_id, message }`                                    | ack — inject work mid-run                                                              |
+| `get_findings` | `{ session_id, wait?, fields? }`                             | status + findings + evidence paths (+ `truncated`)                                     |
+| `describe`     | `{}` or `{ target }`                                         | targets catalog + config (lazy), incl. `personas[]`, `notes`, and the active `session` |
+| `end_session`  | `{ session_id }`                                             | closes it                                                                              |
 
 ### `as` — sign in without spending steps
 
@@ -78,8 +78,8 @@ caller that skipped the note conclude the run found exactly 20 issues.
 
 The bible's `list/describe/manage_resource` dispatcher is for **large CRUD
 surfaces** (50+ resources). We have ~5 verbs hit every turn — the bible says
-plainly: *"for a handful of resources hit on every turn, plain tools can still
-win — the handshake never amortizes there."* So: plain tools, no dispatcher.
+plainly: _"for a handful of resources hit on every turn, plain tools can still
+win — the handshake never amortizes there."_ So: plain tools, no dispatcher.
 
 ### Apply the parameterization rule anyway
 
@@ -104,17 +104,16 @@ win — the handshake never amortizes there."* So: plain tools, no dispatcher.
 The small model drives the target through its own Vercel AI SDK tools. Here
 granularity is needed (it really does click and type), but still **few + heavily
 parameterized** — treat each protocol like **SQL/REST, not RPC.** The bible:
-*"AIs are very good at SQL and REST precisely because those interfaces are
+_"AIs are very good at SQL and REST precisely because those interfaces are
 heavily parameterized — one SELECT, one GET, dozens of knobs. That's the same
-shape MCP tools should have."* So: a handful of verbs, lots of composable params.
+shape MCP tools should have."_ So: a handful of verbs, lots of composable params.
 
-| Tool | Shape | Maps to / routes |
-|------|-------|------------------|
-| `observe` | `{ kind, query?, fields?, filters?, limit?, within? }` | `tree` → `readState` · `screenshot` → `screenshot` · `console` → `console` · `network` → `network` · `tabs` → `tabs` (optional) |
-| `act` | flat object: `{ action, target?, text?, clear?, key?, direction?, amount?, networkIdle?, timeout? }` | `find`, then `click`/`type`/`pressKey`/`scroll`/`open`/`waitFor`/`selectTab` (optional) — picked by the `action` enum (`click`, `type`, `key`, `scroll`, `navigate`, `wait`, `switch_tab`) |
-| `look`    | `{ question?, expect? }` → `{ description, matches?, issues[] }` | **vision model** (see [`models.md`](models.md)) |
-| `report` | `{ status, steps[], bugs[], visual[], dismissStreamed?, summary? }` (Zod) | → surfaced via `get_findings` |
-
+| Tool      | Shape                                                                                                | Maps to / routes                                                                                                                                                                           |
+| --------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `observe` | `{ kind, query?, fields?, filters?, limit?, within? }`                                               | `tree` → `readState` · `screenshot` → `screenshot` · `console` → `console` · `network` → `network` · `tabs` → `tabs` (optional)                                                            |
+| `act`     | flat object: `{ action, target?, text?, clear?, key?, direction?, amount?, networkIdle?, timeout? }` | `find`, then `click`/`type`/`pressKey`/`scroll`/`open`/`waitFor`/`selectTab` (optional) — picked by the `action` enum (`click`, `type`, `key`, `scroll`, `navigate`, `wait`, `switch_tab`) |
+| `look`    | `{ question?, expect? }` → `{ description, matches?, issues[] }`                                     | **vision model** (see [`models.md`](models.md))                                                                                                                                            |
+| `report`  | `{ status, steps[], bugs[], visual[], dismissStreamed?, summary? }` (Zod)                            | → surfaced via `get_findings`                                                                                                                                                              |
 - **One `act`, not six tools.** `act({action:"click", target})` beats
   `click_element` / `fill_input` / `press_key` — one flat object with an enum discriminant.
 - **One `observe` for all channels.** `kind` selects tree / screenshot / console / network / tabs.
@@ -128,13 +127,13 @@ shape MCP tools should have."* So: a handful of verbs, lots of composable params
 
 Push composition into params, like a `SELECT`:
 
-| Param | Like | Use |
-|-------|------|-----|
-| `query`   | `WHERE` / selector | target a node: CSS/role/text (web), a11y role+name (desktop), resource-id/text (android) |
-| `fields`  | `SELECT cols` | sparse reads — ask only for role/name/bounds, not the whole tree |
-| `filters` | `WHERE field_op` | `{ visible_eq: true, role_in: ["button","link"] }` |
-| `limit` / `within` | `LIMIT` / scope | cap tree size; scope to a subtree/region |
-| `kind`    | table | `tree \| screenshot \| console \| network \| tabs` |
+| Param              | Like               | Use                                                                                      |
+| ------------------ | ------------------ | ---------------------------------------------------------------------------------------- |
+| `query`            | `WHERE` / selector | target a node: CSS/role/text (web), a11y role+name (desktop), resource-id/text (android) |
+| `fields`           | `SELECT cols`      | sparse reads — ask only for role/name/bounds, not the whole tree                         |
+| `filters`          | `WHERE field_op`   | `{ visible_eq: true, role_in: ["button","link"] }`                                       |
+| `limit` / `within` | `LIMIT` / scope    | cap tree size; scope to a subtree/region                                                 |
+| `kind`             | table              | `tree \| screenshot \| console \| network \| tabs`                                       |
 
 One `observe({kind:"tree", query:"role=button[name=Checkout]", fields:["bounds","enabled"]})`
 beats a dozen `get_*` tools. The model composes the call; that's what it's good at.
@@ -176,11 +175,11 @@ inheriting some provider's unstated behavior.
 The adapter contract bottoms out in real protocols (see
 [`adapters.md`](adapters.md), [`desktop-control.md`](desktop-control.md)):
 
-| Adapter | Protocol | Likely lib |
-|---------|----------|------------|
-| browser | CDP      | Playwright / puppeteer-core (drive directly, in-process) |
-| desktop | X11/Wayland input + AT-SPI | xdotool / ydotool / libei + AT-SPI (`Atspi` GI) |
-| android | ADB      | adb + uiautomator (or Appium UiAutomator2) |
+| Adapter | Protocol                   | Likely lib                                               |
+| ------- | -------------------------- | -------------------------------------------------------- |
+| browser | CDP                        | Playwright / puppeteer-core (drive directly, in-process) |
+| desktop | X11/Wayland input + AT-SPI | xdotool / ydotool / libei + AT-SPI (`Atspi` GI)          |
+| android | ADB                        | adb + uiautomator (or Appium UiAutomator2)               |
 
 ### Build vs reuse (web)
 
@@ -189,7 +188,7 @@ directly** — simpler than mounting playwright-mcp as a client (no second MCP
 hop, full CDP access for console/network). Desktop + android have no
 off-the-shelf MCP worth wrapping → custom adapters over the libs above.
 
-> If we ever *did* want to reuse an external MCP (e.g. chrome-devtools-mcp), the
+> If we ever _did_ want to reuse an external MCP (e.g. chrome-devtools-mcp), the
 > debug agent would mount it as an **MCP client** (`@ai-sdk/mcp`, gold-standards
 > pattern) and merge its tools into the inner belt. Not needed for v1.
 

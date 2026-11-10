@@ -1,4 +1,5 @@
 ---
+
 name: using-claude-cli
 description: How to drive `claude` (Claude Code) as a non-interactive CLI tool — headless runs, MCP servers, permissions, output formats, and piping. Use when scripting Claude, spawning a sub-agent from another process, or wiring Claude into CI/automation.
 ---
@@ -21,6 +22,7 @@ claude -p "Summarize the failing tests in this repo"        # print result, exit
   (pair with `--verbose`).
 - `--model <id>` — pick the model for this run (e.g. a fast model for cheap jobs).
 - Prompt can come from an arg, a file, or stdin:
+
   ```bash
   claude -p "$(cat task.txt)"
   echo "explain this error" | claude -p

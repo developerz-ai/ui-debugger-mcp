@@ -26,13 +26,13 @@
 
 ## Components
 
-| Component   | Job |
-|-------------|-----|
-| MCP layer   | Expose few tools. Carry the smart↔small conversation. |
-| Session     | One per cwd. Holds the running debug agent + workspace. |
-| Debug agent | Small model in a Vercel AI SDK loop. Owns the clicking. |
-| Adapters    | Drive a target behind one shared contract. |
-| Workspace   | Per-project scratch: profile, screenshots, logs, findings. |
+| Component   | Job                                                                                                      |
+| ----------- | -------------------------------------------------------------------------------------------------------- |
+| MCP layer   | Expose few tools. Carry the smart↔small conversation.                                                    |
+| Session     | One per cwd. Holds the running debug agent + workspace.                                                  |
+| Debug agent | Small model in a Vercel AI SDK loop. Owns the clicking.                                                  |
+| Adapters    | Drive a target behind one shared contract.                                                               |
+| Workspace   | Per-project scratch: profile, screenshots, logs, findings.                                               |
 | Config      | `.dz/ui-debugger/ui-debugger-mcp.json` or root `.ui-debugger-mcp.json` (project) + `.mcp.json` (launch). |
 
 ## Why the brain is inside the server

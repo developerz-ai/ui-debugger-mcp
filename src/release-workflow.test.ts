@@ -245,7 +245,7 @@ test('the parser detects skippable and non-fatal keys in first position', () => 
 
   const parsed = parseSteps(workflow);
 
-  expect(parsed[0]?.if).toBe("\${{ github.ref == 'refs/heads/main' }}");
+  expect(parsed[0]?.if).toBe("${{ github.ref == 'refs/heads/main' }}");
   expect(parsed[1]?.continueOnError).toBe('true');
 });
 

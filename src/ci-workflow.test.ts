@@ -8,7 +8,7 @@ const workflow = readFileSync(join(import.meta.dirname, '../.github/workflows/ci
 // Execute the real block, including comments and blanks, stopping at YAML's
 // next outer key/comment. Do not maintain a second copy of the retry loop.
 const block = workflow.match(
-  /^      - name: install chromium\n        run: \|\n((?: {10}[^\n]*\n|\n)+)/m,
+  /^ {6}- name: install chromium\n {8}run: \|\n((?: {10}[^\n]*\n|\n)+)/m,
 );
 expect(block).not.toBeNull();
 const install = (block?.[1] ?? '').replace(/^ {10}/gm, '');
@@ -124,7 +124,7 @@ for (const shell of [['-e'], ['--noprofile', '--norc', '-e', '-o', 'pipefail']])
 
     test('the original bare-timeout mutation fails the recovery assertion', () => {
       const mutated = install.replace(
-        /^  if (timeout[^\n]+); then\n([\s\S]*?)  else\n    rc=\$\?\n  fi$/m,
+        /^ {2}if (timeout[^\n]+); then\n([\s\S]*?) {2}else\n {4}rc=\$\?\n {2}fi$/m,
         '  $1\n  rc=$?\n  if [ "$rc" -eq 0 ]; then\n$2  fi',
       );
       expect(mutated).not.toBe(install);

@@ -26,12 +26,12 @@ On npmjs.com:
 `npmjs.com/package/@developerz.ai/ui-debugger-mcp` → **Settings** →
 **Trusted Publisher** → **GitHub Actions**, then enter:
 
-| Field             | Value                |
-| ----------------- | -------------------- |
-| Organization/user | `developerz-ai`      |
-| Repository        | `ui-debugger-mcp`    |
-| Workflow filename | `release.yml`        |
-| Environment       | *(leave blank)*      |
+| Field             | Value             |
+| ----------------- | ----------------- |
+| Organization/user | `developerz-ai`   |
+| Repository        | `ui-debugger-mcp` |
+| Workflow filename | `release.yml`     |
+| Environment       | _(leave blank)_   |
 
 (The GitHub org is `developerz-ai` with a hyphen; the npm scope is
 `@developerz.ai` with a dot — both are correct.)
@@ -67,7 +67,7 @@ The gate is **mandatory and unfailable**:
 - it carries no `continue-on-error`, so a failing test fails the job;
 - it carries no `if:` condition, so it can never be skipped;
 - it runs AFTER `build` and BEFORE both `npm publish` and the MCP Registry
-  publish — a failed or missing validation therefore blocks *both* publication
+  publish — a failed or missing validation therefore blocks _both_ publication
   steps, not just npm.
 
 The checkout is pinned to `ref: ${{ github.ref }}` and the run echoes

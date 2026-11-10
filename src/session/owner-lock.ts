@@ -209,7 +209,6 @@ async function resolveFlock(opener: FlockOpener): Promise<FlockFn> {
       // out unchanged.
       if (error instanceof WorkspaceError) throw error;
       misses.push(`${name}: ${(error as Error).message}`);
-      continue;
     }
   }
   throw new WorkspaceError(

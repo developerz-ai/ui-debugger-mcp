@@ -13,22 +13,26 @@ code, asks again. Loop until the UI works. No human clicking.
 - **vision guy** — the eyes (multimodal): describes screenshots, judges looks.
 
 ## Response Rules
+
 - Execute. No preamble.
 - Lead with action or answer.
 - Terse. Fragments OK.
 
 ## What this is
+
 - MCP **server** (stdio). Ships as npm package, run via `npx`/`bunx`.
 - The agent brain runs **inside** the server (Vercel AI SDK). Not the caller's.
 - Session keyed by **current dir** (cwd). One project = one session.
 - One debug run at a time (persistent Chrome profile locks the profile).
 
 ## Reference repos (read for patterns, don't copy blind)
+
 - `../ai-task-master` — build template: Bun + TS + Vercel AI SDK, subagent-as-tool, MCP, Zod, Biome.
 - `../gold-standards-in-ai/docs` — house rules: few fat tools, SRP, custom errors, compressed config.
 - `../../sebyx07/claude-code-bible/docs` — deeper handbook. `?debug-ai=true` login bypass pattern.
 
 ## Architecture
+
 - `src/main.ts` — CLI entry (help/version/init/status/stop).
 - `src/boot.ts` — server boot: owner-lock gate → config → workspace → provider/models → stdio MCP server.
 - `src/mcp/` — MCP server, tool defs (few fat tools, NOT one-per-action).
@@ -51,11 +55,12 @@ code, asks again. Loop until the UI works. No human clicking.
   etc.). No generic `Error`.
 
 ## Targets (one project, many)
-| Target  | Adapter        | Protocol            | Reads              |
-|---------|----------------|---------------------|--------------------|
-| web     | browser        | CDP                 | DOM                |
-| desktop | desktop        | X11/Xvfb; Wayland: wlroots capture (`grim`) only, no native input | a11y tree         |
-| mobile  | android        | ADB (uiautomator)   | view hierarchy     |
+
+| Target  | Adapter | Protocol                                                          | Reads          |
+| ------- | ------- | ----------------------------------------------------------------- | -------------- |
+| web     | browser | CDP                                                               | DOM            |
+| desktop | desktop | X11/Xvfb; Wayland: wlroots capture (`grim`) only, no native input | a11y tree      |
+| mobile  | android | ADB (uiautomator)                                                 | view hierarchy |
 
 Three adapters, one shared contract. Story names the target. iOS out of scope on Linux.
 
@@ -64,6 +69,7 @@ one (`cdpUrl` for web, `adbSerial` for android) and NEVER starts/stops it. Manag
 picks the binary via `executablePath`/`emulatorPath`.
 
 ## MCP tools (few, fat — not playwright-mcp)
+
 A **conversation**, not a remote control. Small agent owns the clicking loop.
 - `start_debug` — open a session with a goal `{ target, goal, criteria?, url?, as?, replace?, timeout? }`
   (`timeout` seconds; always capped — default 300s, max 2_147_483s (Node timer
@@ -98,11 +104,12 @@ eyes: sends a screenshot to the **vision guy**.
 and returns the tab list whenever more than one is open — a click that opens a tab
 otherwise reads to a blind driver as "nothing happened".
 
-A default `network` read hides *successful* static assets and reports `hidden` + how
+A default `network` read hides _successful_ static assets and reports `hidden` + how
 to see them. Measured on a Vite dev server: 45 script loads to 3 API calls, so an
 unfiltered tail of 50 returned zero API traffic. Failed requests are never hidden.
 
 ## CLI (bin: `ui-debugger-mcp`)
+
 - no args → run the stdio MCP server (default).
 - `init` → scaffold: create `./tmp/ui-debugger-mcp/`, write a starter config
   (deepseek/qwen defaults + `web` stub) if absent — at `.dz/ui-debugger/ui-debugger-mcp.json`
@@ -118,6 +125,7 @@ work from a separate process; SIGTERM/SIGINT also end the run cleanly. One run p
 project (cwd) → no run selector needed.
 
 ## Config split
+
 - `.mcp.json` — how to LAUNCH server (command, model API key + base url). Gitignored. Secret.
 - Project config — how to DEBUG this app (models, targets, urls). Committed.
   Two candidate locations, one shape: `.dz/ui-debugger/ui-debugger-mcp.json`
@@ -138,6 +146,7 @@ workspace: "./tmp/ui-debugger-mcp"
 managed vs attach: `cdpUrl` (web) / `adbSerial` (android) → attach, never start/stop.
 
 ## Per-project workspace
+
 `./tmp/ui-debugger-mcp/<project>/`
 - `chrome-user-data/` — persistent profile (login, cookies, storage).
 - `sessions/<id>/` — `story.md`, `screenshots/`, `findings.json`, `logs/`.
@@ -175,11 +184,13 @@ the prune. Two editor windows on two apps never see each other
 (`src/session/isolation.test.ts`).
 
 ## Login bypass (captcha)
+
 `?debug-ai=true` escape hatch in the app under test. Skips **captcha only**, not
 auth. Gate behind `ALLOW_AI_DEBUG_LOGIN` so it's off in prod. Captchas are the #1
 blocker for headless agents.
 
 ## Auth — named personas (`start_debug({as})`)
+
 `targets.<t>.auth.<name> = { path, fields, submit, expect? }` (web only). The
 recipe lives in config, not in every `goal` string.
 
@@ -202,6 +213,7 @@ spellings. Its signature is the named `Redactor` type, `(text: string) => string
 which every redactor parameter is annotated with. `describe` exposes names only.
 
 ## Target `notes` — preconditions, not a goal
+
 `targets.<t>.notes` (any adapter) = what is EXPECTED of this app: "needs seeded
 data — empty tables are expected on /new", "onboarding modal on first load".
 
@@ -218,6 +230,7 @@ not filed as a visual defect; a screen CONTRADICTING one is still reported.
 Self-look (control == vision) needs nothing: the driver carries them already.
 
 ## One run per cwd — never a wedged project
+
 A forgotten `end_session` must not need the out-of-band CLI to recover:
 - `describe` reports `session { id, status, goal }` — the run this server holds
   (active OR the retained auto-ended snapshot). The way back to a lost id.
@@ -231,6 +244,7 @@ caller is watching. The refusal names the id + `get_findings`/`end_session`/
 `replace:true`.
 
 ## Commands
+
 ```
 bun install
 bun run dev            # boot server, watch
@@ -249,18 +263,23 @@ That library check runs inside `bin/setup` only; it is NOT
 a public CLI subcommand (`main.ts` dispatches only init/status/stop).
 
 ## Coding Rules
+
 ### Think before coding
+
 - State assumptions. Uncertain → ask.
 - Multiple readings → present them, don't pick.
 
 ### Simplicity first
+
 - Minimum code. No speculative abstractions.
 - 200 lines that could be 50 → write 50.
 
 ### Surgical changes
+
 - Touch only what the task needs. No drive-by refactors.
 
 ### Quality
+
 - Files ≤ 500 LOC. One responsibility per file.
 - Zod at every boundary (config, MCP input, findings).
 - Custom error classes. Never generic `Error`.
@@ -268,6 +287,7 @@ a public CLI subcommand (`main.ts` dispatches only init/status/stop).
 - Fail fast. Surface errors loud. No silent fallback.
 
 ## Adapter contract (the one real seam)
+
 One interface so the agent loop is adapter-blind (`src/adapters/contract.ts`):
 required — `selectorDialect · open · find · click · type · pressKey · scroll ·
 readState · screenshot · waitFor · console · network · close`;
@@ -296,6 +316,7 @@ Credential header values are redacted to `<redacted, N chars>`: presence is
 diagnostic, the secret must NEVER enter the model's context or the logs.
 
 ## See also
+
 - `docs/idea/overview.md` — the problem + the idea.
 - `docs/idea/architecture.md` — full system design.
 - `docs/idea/adapters.md` — adapter contract + targets.

@@ -1,4 +1,5 @@
 ---
+
 description: Write a concise, self-contained execution plan to docs/plans/<YYYY>/<MM>/<DD>/<1NN>-<slug>/ for another AI to implement
 argument-hint: [what you want done]
 allowed-tools: Write, Read, Glob, Grep, Task, Bash
@@ -9,6 +10,7 @@ allowed-tools: Write, Read, Glob, Grep, Task, Bash
 Produce a concise plan another AI can execute with zero extra context. Plan only — no implementation, no code execution, no edits outside the plan dir.
 
 ## Goal
+
 $ARGUMENTS
 
 ## Steps
@@ -25,25 +27,30 @@ $ARGUMENTS
 # <Title>
 
 ## Goal
+
 1-2 sentences: what + why.
 
 ## Context
-- Stack facts the executor needs (Bun + TS, MCP stdio server, Vercel AI SDK agent loop running *inside* the server, OpenAI-compatible router / OpenRouter default, CDP for web / X11-Wayland for desktop / ADB for android behind one adapter contract, Zod at every boundary — only what's relevant).
+
+- Stack facts the executor needs (Bun + TS, MCP stdio server, Vercel AI SDK agent loop running _inside_ the server, OpenAI-compatible router / OpenRouter default, CDP for web / X11-Wayland for desktop / ADB for android behind one adapter contract, Zod at every boundary — only what's relevant).
 - Which actor it touches: smart agent (caller) / fast guy (driver) / vision guy (eyes) — see `docs/idea/models.md`.
 - Reference patterns: `src/<layer>/<thing>.ts:12` — follow this for Z.
 
 ## Plan files (execute in order)
+
 1. [`01-<aspect>.md`](01-<aspect>.md) — one line: what it covers.
 2. [`02-<aspect>.md`](02-<aspect>.md) — ...
 
 ## Done when
+
 - Verifiable acceptance criteria spanning the whole feature.
 
 ## Risks / open questions
+
 - Anything the executor must decide or watch.
 ```
 
-   **Each `<NN>-<aspect>.md`** — one slice of work. Sections:
+**Each `<NN>-<aspect>.md`** — one slice of work. Sections:
 
 ```markdown
 # <NN> — <Aspect>
@@ -51,15 +58,19 @@ $ARGUMENTS
 > Part of [`overview.md`](overview.md). Depends on: <NN-prior or "none">.
 
 ## Files to change
+
 - `path:line` — what changes, why.
 
 ## Steps
+
 1. Ordered, concrete actions. Reference `Class#method` / `file:line`, don't restate.
 
 ## Tests
+
 - What to add/run. Tests written with the code. Commands: `bun test`, `bun run typecheck`, `bun run lint`, `bun run build`. Browser e2e needs `dummy/web` built + Chromium.
 
 ## Done when
+
 - Verifiable acceptance criteria for this slice.
 ```
 
@@ -68,24 +79,25 @@ $ARGUMENTS
 ```yaml
 plan: <1NN>-<slug>
 title: <human title from overview.md>
-status: not_started        # not_started | in_progress | blocked | complete | superseded
-created_by: <git config user.name>   # who authored the plan
-worked_by: ""              # who is executing it; empty = unclaimed; executor fills with their git user.name
+status: not_started # not_started | in_progress | blocked | complete | superseded
+created_by: <git config user.name> # who authored the plan
+worked_by: "" # who is executing it; empty = unclaimed; executor fills with their git user.name
 owner: <git config user.name>
-percent: 0                 # 0–100, overall completion
-current_focus: ""          # where it's at right now / next slice to pick up
-slices:                    # one row per <NN>-<aspect>.md slice
+percent: 0 # 0–100, overall completion
+current_focus: "" # where it's at right now / next slice to pick up
+slices: # one row per <NN>-<aspect>.md slice
   - file: 01-<aspect>.md
-    status: not_started      # not_started | in_progress | complete
+    status: not_started # not_started | in_progress | complete
     percent: 0
-evidence: []               # commits/PRs proving progress, e.g. ["#24", "abc1234"]
+evidence: [] # commits/PRs proving progress, e.g. ["#24", "abc1234"]
 notes: ""
 last_updated: <YYYY-MM-DD>
 ```
 
-   Keep `status.yml` machine-readable (valid YAML, the enums above). It's the one file in the plan dir that IS a tracker — the `.md` slices stay reference maps (no checkboxes there).
+Keep `status.yml` machine-readable (valid YAML, the enums above). It's the one file in the plan dir that IS a tracker — the `.md` slices stay reference maps (no checkboxes there).
 
 ## Rules
+
 - Compact English. Fragments over sentences. `file:line` and `Class#method` symbol refs over prose. Tables for structured data.
 - Reference-only: point at code, don't paste it or re-explain it ("follow `x.ts` but ...").
 - No checkboxes (`[ ]`). Plain bullets. The plan is a reference map, not a tracker.
@@ -96,6 +108,7 @@ last_updated: <YYYY-MM-DD>
 - A slice that changes config keys must also cover `.ui-debugger-mcp.example.json` / `.mcp.example.json` and the docs; a slice that changes the MCP surface must cover `README.md` + `docs/reference.md`. Never plan a secret into a committed file (`.mcp.json` is gitignored).
 
 ## Output
+
 ```
 ✓ docs/plans/<YYYY>/<MM>/<DD>/<1NN>-<slug>/overview.md
   + 01-<aspect>.md, 02-<aspect>.md, … (one per area)

@@ -77,11 +77,11 @@ src/adapters/<name>/
 
 **Reference implementations:**
 
-| Adapter | Reads state via | Actions via |
-|---------|-----------------|-------------|
-| `browser/` | Playwright + DOM extraction | CDP `Input.*` events |
-| `desktop/` | AT-SPI2 over busctl (D-Bus) | xdotool (X11/XWayland) |
-| `android/` | `uiautomator dump` (view hierarchy) | `adb shell input` |
+| Adapter    | Reads state via                     | Actions via            |
+| ---------- | ----------------------------------- | ---------------------- |
+| `browser/` | Playwright + DOM extraction         | CDP `Input.*` events   |
+| `desktop/` | AT-SPI2 over busctl (D-Bus)         | xdotool (X11/XWayland) |
+| `android/` | `uiautomator dump` (view hierarchy) | `adb shell input`      |
 
 ---
 
@@ -174,7 +174,7 @@ export const TargetSchema = z.discriminatedUnion('adapter', [
   WebTargetSchema,
   DesktopTargetSchema,
   AndroidTargetSchema,
-  MyTargetSchema,          // add here
+  MyTargetSchema, // add here
 ]);
 ```
 
