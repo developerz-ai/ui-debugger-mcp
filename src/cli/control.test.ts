@@ -275,6 +275,61 @@ test('stop signals the live pid and marks the LIVE workspace stopped after a con
   expect(await readState(drifted.stateJson)).toBeNull(); // nothing invented in the new workspace
 });
 
+test('status follows a live run when the effective config moves from .dz to root', async () => {
+  const { live, drifted } = await startThenEditConfig();
+  const dzConfig = join(cwd, '.dz', 'ui-debugger', 'ui-debugger-mcp.json');
+  await writeFile(
+    join(cwd, '.ui-debugger-mcp.json'),
+    JSON.stringify({
+      workspace: './ws-b',
+      targets: { web: { adapter: 'browser', url: 'http://x' } },
+    }),
+    'utf8',
+  );
+  await rm(dzConfig);
+
+  await runStatus(cwd);
+
+  const out = logs.join('\n');
+  expect(out).toContain('live-1');
+  expect(out).toContain('target:   web');
+  expect(out).toContain('goal:     drifted run');
+  expect(out).toContain(`pid ${process.pid} — running`);
+  expect(out).toContain('status:   running');
+  expect(out).toContain('findings: no findings yet');
+  expect(out).toContain(live.root);
+  expect(out).toContain(drifted.root);
+});
+
+test('stop follows a live run when the effective config moves from .dz to root', async () => {
+  const { live, drifted } = await startThenEditConfig();
+  const dzConfig = join(cwd, '.dz', 'ui-debugger', 'ui-debugger-mcp.json');
+  await writeFile(
+    join(cwd, '.ui-debugger-mcp.json'),
+    JSON.stringify({
+      workspace: './ws-b',
+      targets: { web: { adapter: 'browser', url: 'http://x' } },
+    }),
+    'utf8',
+  );
+  await rm(dzConfig);
+  const kills: number[] = [];
+
+  await runStop(cwd, (pid) => kills.push(pid));
+
+  expect(kills).toEqual([process.pid]);
+  expect((await readState(live.stateJson))?.status).toBe('stopped');
+  expect(await readState(drifted.stateJson)).toBeNull();
+});
+
+test('status and stop reject an unreadable recorded live workspace as config drift', async () => {
+  const { live } = await startThenEditConfig();
+  await rm(live.stateJson);
+
+  await expect(runStatus(cwd)).rejects.toThrow(/Config drift.*no readable state breadcrumb/);
+  await expect(runStop(cwd)).rejects.toThrow(/Config drift.*no readable state breadcrumb/);
+});
+
 test('record stamps workspaceRoot and a no-drift status prints no drift line', async () => {
   const { live } = await startThenEditConfig();
   expect((await readState(live.stateJson))?.workspaceRoot).toBe(live.root);

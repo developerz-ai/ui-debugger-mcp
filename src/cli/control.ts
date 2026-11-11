@@ -52,9 +52,11 @@ function configWorkspace(cwd: string) {
  *
  * The server's workspace was fixed from the config at boot; the config may have
  * been edited since. The live pointer names the root the server really owns, so
- * it wins — even over an invalid config. No usable pointer (legacy server, no run
- * yet) → the config-resolved workspace, whose ConfigError then surfaces loud.
- * `drift` is set when the live root and the current config disagree.
+ * it wins — even over an invalid config. A recorded pointer without its matching
+ * breadcrumb is config drift, not evidence that no run exists: fail loud rather
+ * than falling back to the current config's possibly unrelated workspace. No
+ * pointer (legacy server, no run yet) → the config-resolved workspace, whose
+ * ConfigError then surfaces loud. `drift` is set when live and config roots differ.
  */
 async function resolveState(
   cwd: string,
@@ -64,14 +66,18 @@ async function resolveState(
   const liveRoot = await readLivePointer(cwd);
   if (liveRoot !== null) {
     const stateJson = join(liveRoot, 'state.json');
-    if ((await readState(stateJson)) !== null) {
-      if (config !== null && resolve(config.root) === resolve(liveRoot)) {
-        return { project, stateJson };
-      }
-      const now = config === null ? 'is unreadable or invalid' : `resolves to ${config.root}`;
-      const drift = `the live run's workspace is ${liveRoot}, but the config now ${now} — config edited since the server started`;
-      return { project, stateJson, drift };
+    if ((await readState(stateJson)) === null) {
+      throw new ConfigError(
+        `Config drift: recorded live workspace ${liveRoot} has no readable state breadcrumb at ${stateJson}. ` +
+          'The config may have changed since the server started; restore the live workspace or restart the server.',
+      );
     }
+    if (config !== null && resolve(config.root) === resolve(liveRoot)) {
+      return { project, stateJson };
+    }
+    const now = config === null ? 'is unreadable or invalid' : `resolves to ${config.root}`;
+    const drift = `the live run's workspace is ${liveRoot}, but the config now ${now} — config edited since the server started`;
+    return { project, stateJson, drift };
   }
   if (config === null) loadWorkspaceDir(cwd); // rethrows the ConfigError — fail loud
   return { project, stateJson: (config ?? workspacePaths(cwd)).stateJson };
