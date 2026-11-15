@@ -2,11 +2,11 @@
 
 Three actors, plain terms: **the smart agent, the fast guy, the vision guy.**
 
-| Nickname        | Role                                                                   | Where                     | Model                           | Sees pixels?                |
-| --------------- | ---------------------------------------------------------------------- | ------------------------- | ------------------------------- | --------------------------- |
-| **smart agent** | the boss — sets goals, reads findings, **fixes the code**, loops       | outside (Claude / caller) | the host's                      | via screenshots in findings |
-| **fast guy**    | the **driver** — controls browser/desktop/android, runs the click loop | in-server                 | `deepseek-v4-flash` (text)      | **no — blind**              |
-| **vision guy**  | the **eyes** — describes screenshots, judges how it looks              | in-server                 | `qwen3-vl-32b-instruct` (image) | **yes**                     |
+| Nickname        | Role                                                                   | Where                     | Model                        | Sees pixels?                |
+| --------------- | ---------------------------------------------------------------------- | ------------------------- | ---------------------------- | --------------------------- |
+| **smart agent** | the boss — sets goals, reads findings, **fixes the code**, loops       | outside (Claude / caller) | the host's                   | via screenshots in findings |
+| **fast guy**    | the **driver** — controls browser/desktop/android, runs the click loop | in-server                 | `particle-1:free` (text)     | **no — blind**              |
+| **vision guy**  | the **eyes** — describes screenshots, judges how it looks              | in-server                 | `nemotron-3.5-super-vl:free` | **yes**                     |
 
 The smart agent talks to the in-server agent over MCP (a conversation). Inside,
 the fast guy drives blind and asks the vision guy for eyes when needed. Three
@@ -61,18 +61,20 @@ one does the moving and asks — _"is the cup to my left?"_ — and acts on the 
 - **Swappable.** Both come from any **OpenAI-compatible router**, set **per
   role** — pick a tiny fast model to drive, a strong multimodal one to see.
 
-## Config — model roles (defaults: deepseek text, qwen image)
+## Config — model roles (free defaults, paid fallback)
 
 `.ui-debugger-mcp.json`:
 ```jsonc
 "models": {
-  "driver":  "deepseek/deepseek-v4-flash",        // fast guy — text, controls
-  "vision":  "qwen/qwen3-vl-32b-instruct",        // vision guy — image, describes
-  "summary": "deepseek/deepseek-v4-flash"          // optional — compress findings
+  "driver":   "particle-ai/particle-1:free",          // fast guy — text, controls
+  "vision":   "nvidia/nemotron-3.5-super-vl:free",    // vision guy — image, describes
+  "summary":  "baidu/ernie-5.5-flash-preview:free",   // optional — compress findings
+  "fallback": "deepseek/deepseek-v4.1-flash:floor"    // optional — paid, behind every role
 }
 ```
-Defaults if omitted: **deepseek for text** (driver + summary), **qwen for image**
-(vision). Capability-based assignment, same idea as [developerz-ai/ai-task-master](https://github.com/developerz-ai/ai-task-master)'s roles.
+Defaults if omitted: free OpenRouter models per role, with the paid `fallback`
+taking any call a free primary cannot serve (rate limit, outage, empty answer —
+[`config.md`](config.md#defaults-free-models-one-paid-fallback)). Capability-based assignment, same idea as [developerz-ai/ai-task-master](https://github.com/developerz-ai/ai-task-master)'s roles.
 Provider = any OpenAI-compatible endpoint (`OPENAI_BASE_URL` + an API key in
 `OPENAI_API_KEY` or `OPENROUTER_API_KEY`, `OPENAI_API_KEY` first when both are
 set); OpenRouter is the default — see

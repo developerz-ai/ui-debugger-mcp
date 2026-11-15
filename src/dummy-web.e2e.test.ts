@@ -214,7 +214,12 @@ const resultText = (r: CallToolResult): string => (r.content[0] as { text: strin
     const workspaceBase = join(tmpDir, 'workspace');
 
     const config: ResolvedConfig = {
-      models: { driver: 'mock/driver', vision: 'mock/vision', summary: 'mock/summary' },
+      models: {
+        driver: 'mock/driver',
+        vision: 'mock/vision',
+        summary: 'mock/summary',
+        fallback: 'mock/fallback',
+      },
       workspace: workspaceBase,
       targets: {
         web: {

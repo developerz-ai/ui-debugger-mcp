@@ -41,6 +41,7 @@ export const STARTER_CONFIG = {
     driver: DEFAULT_MODELS.driver,
     vision: DEFAULT_MODELS.vision,
     summary: DEFAULT_MODELS.summary,
+    fallback: DEFAULT_MODELS.fallback,
   },
   workspace: DEFAULT_WORKSPACE,
   targets: {

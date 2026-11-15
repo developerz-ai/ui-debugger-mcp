@@ -107,7 +107,12 @@ export async function bootServer(cwd: string, deps: BootDeps = {}): Promise<Boot
     baseURL: config.provider.baseUrl,
   };
   const provider = createOpenRouterProvider(providerOptions);
-  const roleModels = resolveModels(provider, config.models);
+  // Every switch to the paid fallback is reported on stderr (stdout is the
+  // JSON-RPC channel): a free primary that is permanently throttled shows up
+  // as a stream of these lines, not as a silently larger bill.
+  const roleModels = resolveModels(provider, config.models, (role, e) =>
+    console.error(`${NAME}: ${role} fell back ${e.primary} -> ${e.fallback} (${e.reason})`),
+  );
 
   // Self-look: control + vision on the SAME model AND the provider catalog
   // confirms it takes image input → `look` hands the frame to the driver
@@ -115,9 +120,12 @@ export async function bootServer(cwd: string, deps: BootDeps = {}): Promise<Boot
   // the safe separate-call path — its vision latch fails soft, while an
   // image pushed at a text-only driver would poison every later step.
   let selfLook = false;
+  // The fallback can serve any driver step, so it must see images too.
   if (config.models.driver === config.models.vision) {
     const { apiKey, baseURL } = resolveProviderConfig(providerOptions);
-    selfLook = (await supportsImageInput(baseURL, apiKey, config.models.driver)) === true;
+    const ids = [...new Set([config.models.driver, config.models.fallback])];
+    const caps = await Promise.all(ids.map((id) => supportsImageInput(baseURL, apiKey, id)));
+    selfLook = caps.every((cap) => cap === true);
   }
 
   // Wire the debug session service

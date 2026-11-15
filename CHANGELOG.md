@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Default models are free OpenRouter models, with a paid fallback behind
+  every role.** driver `particle-ai/particle-1:free`, vision
+  `nvidia/nemotron-3.5-super-vl:free`, summary
+  `baidu/ernie-5.5-flash-preview:free`; new optional `models.fallback`
+  (default `deepseek/deepseek-v4.1-flash:floor`, text + image + tools). A
+  primary that answers 404 / 408 / 429 / 5xx / a transport error, or nothing
+  at all, has the same call re-issued on the fallback, and stderr says so
+  (`<role> fell back <primary> -> <fallback> (<reason>)`); a 400 still
+  propagates. On the `dummy/web` fixture the free set found every planted bug
+  the old paid deepseek/qwen pair found, plus the visual ones it missed.
+  `describe` reports `models.fallback`.
+
 - **Publication is gated on a successful version-consistency validation of the
   checked-out revision.** The release job installed, built and published
   without running a single test, so the version-consistency checks — the

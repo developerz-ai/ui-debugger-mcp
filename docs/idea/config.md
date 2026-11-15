@@ -41,7 +41,7 @@ npx @developerz.ai/ui-debugger-mcp@latest init   # run in the project root
 
 `init` (idempotent — won't clobber existing files):
 1. creates the workspace dir `./tmp/ui-debugger-mcp/`
-2. writes a starter config — deepseek/qwen model defaults + a `web` target stub
+2. writes a starter config — the free-model defaults + a `web` target stub
    (`http://localhost:3000`) — only if absent, at `.dz/ui-debugger/ui-debugger-mcp.json`
    when the repo already has a `.dz/` dir, else at the root `.ui-debugger-mcp.json`
 3. adds `tmp/` to `.gitignore`
@@ -70,9 +70,10 @@ the root file is NOT read in that case.
 {
   "models": {
     // per-role, swappable — see models.md
-    "driver": "deepseek/deepseek-v4-flash", // fast guy — controls (blind, text)
-    "vision": "qwen/qwen3-vl-32b-instruct", // vision guy — describes screenshots
-    "summary": "deepseek/deepseek-v4-flash" // optional — compress findings
+    "driver": "particle-ai/particle-1:free", // fast guy — controls (blind, text)
+    "vision": "nvidia/nemotron-3.5-super-vl:free", // vision guy — describes screenshots
+    "summary": "baidu/ernie-5.5-flash-preview:free", // optional — compress findings
+    "fallback": "deepseek/deepseek-v4.1-flash:floor" // optional — paid model behind every role
   },
   "workspace": "./tmp/ui-debugger-mcp",
   "targets": {
@@ -256,9 +257,10 @@ Implemented layers — resolved ONCE, when the server boots (`config/load.ts`):
 2. env (`OPENAI_API_KEY` or `OPENROUTER_API_KEY` — the first wins when both are
    set — plus `OPENAI_BASE_URL`)
 3. built-in defaults — managed + headless web, OpenRouter base url, and:
-   - `driver` → `deepseek/deepseek-v4-flash` (text)
-   - `vision` → `qwen/qwen3-vl-32b-instruct` (image)
-   - `summary` → `deepseek/deepseek-v4-flash` (text)
+   - `driver` → `particle-ai/particle-1:free` (text, tools)
+   - `vision` → `nvidia/nemotron-3.5-super-vl:free` (image)
+   - `summary` → `baidu/ernie-5.5-flash-preview:free` (text)
+   - `fallback` → `deepseek/deepseek-v4.1-flash:floor` (text + image + tools)
 
 The layers govern disjoint fields, so no two of them compete for one key: the
 project file owns models / workspace / targets, env owns only provider
@@ -295,18 +297,28 @@ when both are set). No vendor lock-in (same posture as [developerz-ai/ai-task-ma
   strings are `provider/model`, with optional routing suffixes passed through
   verbatim (`:floor` cheapest, `:nitro` fastest). Suffixes are NOT free-form: a
   `#…` suffix is rejected outright (`… is not a valid model ID`, HTTP 400), so
-  the shipped defaults are plain catalog ids. If a run dies at step zero with
+  the shipped defaults are catalog ids (`:free` is part of the id) or `:floor`. If a run dies at step zero with
   that message, the model string in your config is the thing to fix.
 - **z.ai, DeepSeek, OpenAI, local (vLLM/Ollama), …** — point `OPENAI_BASE_URL`
   at their OpenAI-compatible URL and use that provider's model names.
 
-### Defaults (deepseek for text, qwen for image)
+### Defaults (free models, one paid fallback)
 
-| Role      | Default                      | Why                                               |
-| --------- | ---------------------------- | ------------------------------------------------- |
-| `driver`  | `deepseek/deepseek-v4-flash` | fast, cheap, text — the high-frequency click loop |
-| `vision`  | `qwen/qwen3-vl-32b-instruct` | multimodal — describes screenshots, judges looks  |
-| `summary` | `deepseek/deepseek-v4-flash` | compress findings for the smart agent             |
+| Role       | Default                              | Why                                                    |
+| ---------- | ------------------------------------ | ------------------------------------------------------ |
+| `driver`   | `particle-ai/particle-1:free`        | free, tools — the high-frequency click loop            |
+| `vision`   | `nvidia/nemotron-3.5-super-vl:free`  | free, multimodal — describes screenshots, judges looks |
+| `summary`  | `baidu/ernie-5.5-flash-preview:free` | free — compress findings for the smart agent           |
+| `fallback` | `deepseek/deepseek-v4.1-flash:floor` | paid, cheapest provider — takes over any failed call   |
+
+`:free` models are rate-limited (~20 requests/min per model, a daily cap) and
+can be throttled upstream at any time. So every role carries the `fallback`
+model: a primary that answers 404 / 408 / 429 / 5xx / a transport error, or
+returns nothing at all, has that same call re-issued on the fallback, and the
+server prints `ui-debugger-mcp: <role> fell back <primary> -> <fallback> (<reason>)`
+on stderr. A 400 is never retried elsewhere — it is a bad request. The fallback
+stands in for every role, so it must take tools AND images. It is plain
+request-level retry, so it works on any OpenAI-compatible gateway.
 
 Override any role in the project config. Cheap fast model drives; the
 vision model is spent only when eyes are needed. No code change to swap.

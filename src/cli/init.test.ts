@@ -415,13 +415,14 @@ test('an existing invalid config is never rejected — init still succeeds', () 
 });
 
 test('the emitted starter text is byte-identical to the documented defaults', () => {
-  // Pinned literally: models (driver/vision/summary), workspace and the single
+  // Pinned literally: models (driver/vision/summary/fallback), workspace and the single
   // `web` target must stay exactly what init has always written.
   const expected = `{
   "models": {
-    "driver": "deepseek/deepseek-v4-flash",
-    "vision": "qwen/qwen3-vl-32b-instruct",
-    "summary": "deepseek/deepseek-v4-flash"
+    "driver": "particle-ai/particle-1:free",
+    "vision": "nvidia/nemotron-3.5-super-vl:free",
+    "summary": "baidu/ernie-5.5-flash-preview:free",
+    "fallback": "deepseek/deepseek-v4.1-flash:floor"
   },
   "workspace": "./tmp/ui-debugger-mcp",
   "targets": {
