@@ -122,8 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   falling through to the root file. A fresh `init` writes to `.dz/` when the
   repo already has that directory, and to the root file otherwise.
 
-  This is the release the platform side of the `.dz/` migration waits on
-  (developerz-ai/developerz.ai#2964, epic #2958): until it is on npm, a
+  This is the release the platform side of the `.dz/` migration waits on:
+  until it is on npm, a
   consumer pinned to `@latest` gets 1.8.0, which knows only the root path.
 
 - `ActResult.navigated`, plus a note on the step that caused it, fed by a new
