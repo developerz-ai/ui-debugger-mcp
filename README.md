@@ -45,7 +45,7 @@ Picture a **boss**, a **fast blind driver**, and a **describer with eyes**:
    │             │ ◀─────── get_findings │   ┌────────────┐     ┌────────────┐   │
    │ sets goals  │                       │   │  fast guy  │ look│ vision guy │   │
    │ fixes code  │                       │   │  (driver)  │────▶│  (eyes)    │   │
-   │ loops       │                       │   │ deepseek   │◀────│  qwen3-vl  │   │
+   │ loops       │                       │   │ particle   │◀────│  nemotron  │   │
    └─────────────┘                       │   │ text·blind │ desc│ image      │   │
           ▲                              │   └─────┬──────┘     └────────────┘   │
           │ "works + looks nice"         │     observe / act (SQL-like)          │
@@ -62,10 +62,10 @@ Picture a **boss**, a **fast blind driver**, and a **describer with eyes**:
 - **smart agent** — the boss (Claude/caller). Sends a goal, reads findings, **fixes
   the code**, loops. Stays high-level — never clicks.
 - **fast guy** — the driver. Fast, cheap, **text-only and blind**. Runs the
-  click loop on structure (DOM / a11y tree / view hierarchy). Default: deepseek.
+  click loop on structure (DOM / a11y tree / view hierarchy). Default: particle-ai.
 - **vision guy** — the eyes. **Multimodal**. The driver calls `look` to ask
   _"does this look right? is the button centred?"_ and gets a description back.
-  Default: qwen. Spent only when visual judgment is needed.
+  Default: nvidia. Spent only when visual judgment is needed.
 
 One goal: **the UI works _and_ looks nice.** Full design in [`docs/idea/`](docs/idea/).
 
@@ -146,7 +146,7 @@ npx @developerz.ai/ui-debugger-mcp@latest init   # in your project root
 [`docs/idea/config.md`](docs/idea/config.md)):
 
 - creates the workspace dir `./tmp/ui-debugger-mcp/`
-- writes a starter config (default deepseek/qwen models, a `web` target stub) if
+- writes a starter config (default free models, a `web` target stub) if
   one doesn't already exist — at `.dz/ui-debugger/ui-debugger-mcp.json` when the
   repo already has a `.dz/` dir, else at the root `.ui-debugger-mcp.json`
 - adds `tmp/` to `.gitignore`
@@ -380,7 +380,7 @@ rest, so evidence from a run six ago is gone by design.
 **Run fails instantly: "… is not a valid model ID"**
 The model string in the project config is not a catalog id. OpenRouter takes
 `provider/model` with optional `:floor` / `:nitro` routing suffixes — a `#…`
-suffix is rejected outright. Use plain ids (`deepseek/deepseek-v4-flash`).
+suffix is rejected outright. Use catalog ids (`particle-ai/particle-1:free`).
 
 **Still running an old version after upgrading**
 `npx -y <pkg>` REUSES a cached install when one exists, so a bare
@@ -423,7 +423,9 @@ still land without it.
 - **Bun** + **TypeScript** (ships as npm, runs via `npx`/`bunx`)
 - **Vercel AI SDK** — the agent loop (fast driver + vision describer)
 - **Any OpenAI-compatible router** (OpenRouter default) — swap models per role.
-  Defaults: **deepseek** (text) drives, **qwen** (image) sees.
+  Defaults (all free): `particle-ai/particle-1:free` drives, `nvidia/nemotron-3.5-super-vl:free` sees,
+  `baidu/ernie-5.5-flash-preview:free` summarises; `deepseek/deepseek-v4.1-flash:floor` is the paid fallback
+  behind every role when a free model is rate-limited or down.
 - **CDP** for web, **X11/Wayland** for desktop, **ADB** for Android
 - stdio MCP transport
 

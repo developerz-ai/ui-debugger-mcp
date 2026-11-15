@@ -6,11 +6,14 @@
 
 import { z } from 'zod';
 
-/** Per-role model strings (OpenAI-compatible router; defaults: deepseek text, qwen image). */
+/** Per-role model strings (OpenAI-compatible router; defaults: free OpenRouter models). */
 export const ModelsSchema = z.strictObject({
   driver: z.string(), // fast guy — controls the target (blind, text)
   vision: z.string(), // vision guy — describes screenshots, judges looks
   summary: z.string().optional(), // optional — compress findings for the smart agent
+  // optional — the paid model every role falls back to when its primary is
+  // rate-limited / unavailable / empty. Must take tools AND images: it stands in for all three.
+  fallback: z.string().min(1).optional(),
 });
 
 /** Login bypass escape hatch — skips captcha only, not auth. */

@@ -94,6 +94,11 @@ export const DescribeResultSchema = z.object({
       driver: z.string().describe('Fast guy — drives the target (text-only).'),
       vision: z.string().describe('Vision guy — judges screenshots.'),
       summary: z.string().describe('Compresses findings for the caller.'),
+      fallback: z
+        .string()
+        .describe(
+          'Paid model that takes any call a role primary cannot serve (rate limit, outage, empty).',
+        ),
     })
     .describe('Resolved per-role model ids.'),
   workspace: z.string().describe('Per-project workspace path; evidence lands under it.'),

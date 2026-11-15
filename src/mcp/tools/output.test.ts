@@ -199,7 +199,7 @@ test('the describe output still parses a target and a run', () => {
         headless: true,
       },
     ],
-    models: { driver: 'deepseek', vision: 'qwen', summary: 'qwen' },
+    models: { driver: 'deepseek', vision: 'qwen', summary: 'qwen', fallback: 'deepseek' },
     workspace: '/tmp/ui-debugger-mcp',
     session: { id: '2026-07-27_14-30-05-0001', status: 'running', goal: 'make it work' },
   });

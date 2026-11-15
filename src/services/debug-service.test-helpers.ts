@@ -32,7 +32,7 @@ export const NOW = 1_700_000_000_000;
 
 /** The project config the suites drive: a web, a desktop and an android target. */
 export const CONFIG: ResolvedConfig = {
-  models: { driver: 'deepseek/x', vision: 'glm/y', summary: 'deepseek/z' },
+  models: { driver: 'deepseek/x', vision: 'glm/y', summary: 'deepseek/z', fallback: 'deepseek/f' },
   workspace: './tmp/ui-debugger-mcp',
   targets: {
     web: { adapter: 'browser', url: 'http://localhost:3000', headless: true },

@@ -75,5 +75,7 @@ profiles — out of scope for now.
 - Bun + TypeScript, ships as npm (`npx`/`bunx`), stdio MCP.
 - Vercel AI SDK for the agent loop (pattern from [developerz-ai/ai-task-master](https://github.com/developerz-ai/ai-task-master)).
 - Any OpenAI-compatible router (OpenRouter default) so models are swappable.
-  Defaults: deepseek (text) for driver/summary, qwen (image) for vision.
+  Each role defaults to a free OpenRouter model (particle driver, nvidia vision,
+  baidu summary).
+  A paid deepseek `fallback` stands behind every role.
 - Zod at every boundary. Biome. Files ≤ 500 LOC. Custom errors.

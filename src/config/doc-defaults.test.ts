@@ -59,8 +59,14 @@ const DEFAULT_BY_ROLE: Record<Role, string> = {
   summary: DEFAULT_MODELS.summary,
 };
 
-/** Every default id, in role order. */
-const DEFAULT_IDS: readonly string[] = ROLES.map((role) => DEFAULT_BY_ROLE[role]);
+/**
+ * Every default id, in role order, then the fallback — not a role (no actor
+ * runs on it by choice), but a default the docs name and must name exactly.
+ */
+const DEFAULT_IDS: readonly string[] = [
+  ...ROLES.map((role) => DEFAULT_BY_ROLE[role]),
+  DEFAULT_MODELS.fallback,
+];
 
 /** The provider + model segments of a default id (`vendor` + `vendor-model`). */
 function segments(id: string): readonly [string, string] {
@@ -135,8 +141,11 @@ function namesRoleDefault(token: string, id: string): boolean {
   return parts.length === 2 && parts.every((part) => part.toLowerCase() === vendor);
 }
 
-/** A word, optionally joined by `-`, `.` or `/` — `vendor/model`. */
-const TOKEN = /[A-Za-z0-9_]+(?:[-./][A-Za-z0-9_]+)*/g;
+/**
+ * A word, optionally joined by `-`, `.`, `/` or `:` — `vendor/model:free`. The
+ * `:` joins only when a word follows it, so a `Default: x` label stays split.
+ */
+const TOKEN = /[A-Za-z0-9_]+(?:[-./:][A-Za-z0-9_]+)*/g;
 
 /** A role named by a line — `driver`, `vision`, `summary`. */
 const ROLE = /\b(driver|vision|summary)\b/gi;
@@ -168,7 +177,7 @@ const DEFAULT_LABEL = /\bdefaults?\s*:\s*$/i;
  * a letter. `/` joins a full id's segments: a slot names A MODEL whatever
  * its spelling, digits or none.
  */
-const MODEL_NAME = /^[A-Za-z][A-Za-z0-9]*(?:[./-][A-Za-z0-9]+)*$/;
+const MODEL_NAME = /^[A-Za-z][A-Za-z0-9]*(?:[./:-][A-Za-z0-9]+)*$/;
 
 /**
  * A role slot — the value a `"driver":` / `vision:` key names.
@@ -194,7 +203,7 @@ function mixesLettersAndDigits(segment: string): boolean {
  * shape placeholder.
  */
 function isModelReference(token: string): boolean {
-  if (token.includes('-') && token.split(/[-./]/).some(mixesLettersAndDigits)) return true;
+  if (token.includes('-') && token.split(/[-./:]/).some(mixesLettersAndDigits)) return true;
   const parts = token.split('/');
   if (parts.length > 1) return parts.every((part) => KNOWN_SEGMENTS.has(part));
   return KNOWN_SEGMENTS.has(token);

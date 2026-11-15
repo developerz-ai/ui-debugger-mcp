@@ -51,16 +51,27 @@ export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 export const DEFAULT_WORKSPACE = './tmp/ui-debugger-mcp';
 
 /**
- * Per-role model defaults — deepseek for text (driver + summary), qwen-vl for image.
+ * Per-role model defaults — free OpenRouter models, one paid fallback behind them.
  *
- * Plain catalog ids, no routing suffix: the router rejects `#uptime` outright
- * (`… is not a valid model ID`, HTTP 400), so shipping it as the default driver
- * made a fresh install fail on its very first run. See `idea/models.md`.
+ * Measured 2026-11-14 on the `dummy/web` planted-bug fixture (real runs, real
+ * OpenRouter): particle-1 driving + nemotron-3.5-super-vl seeing found every
+ * planted bug (404s, the JSON error, the ReferenceError, both dead buttons, the
+ * invisible subtitle), where the previous paid deepseek-v4-flash + qwen3-vl pair
+ * missed the visual ones. `:free` models are rate-limited and throttled at will,
+ * so `fallback` (text + image + tools, the cheapest provider via `:floor`) takes
+ * any call a primary cannot serve — see `src/agent/fallback.ts`. Driver and
+ * summary sit on DIFFERENT free models so they never share one per-model limit.
+ *
+ * Plain catalog ids or router suffixes only: the router rejects `#uptime`
+ * outright (`… is not a valid model ID`, HTTP 400), so shipping it as the
+ * default driver made a fresh install fail on its very first run. See
+ * `idea/models.md`.
  */
 export const DEFAULT_MODELS: ResolvedModels = {
-  driver: 'deepseek/deepseek-v4-flash',
-  vision: 'qwen/qwen3-vl-32b-instruct',
-  summary: 'deepseek/deepseek-v4-flash',
+  driver: 'particle-ai/particle-1:free',
+  vision: 'nvidia/nemotron-3.5-super-vl:free',
+  summary: 'baidu/ernie-5.5-flash-preview:free',
+  fallback: 'deepseek/deepseek-v4.1-flash:floor',
 };
 
 /** Fully resolved per-role models — every role present after defaulting. */
@@ -68,6 +79,8 @@ export interface ResolvedModels {
   driver: string;
   vision: string;
   summary: string;
+  /** Paid model behind every role (`src/agent/fallback.ts`). */
+  fallback: string;
 }
 
 /** OpenAI-compatible router credentials, resolved from env + the OpenRouter default. */
@@ -153,6 +166,7 @@ export function loadConfig(opts: LoadOptions = {}): ResolvedConfig {
       driver: project.models?.driver ?? DEFAULT_MODELS.driver,
       vision: project.models?.vision ?? DEFAULT_MODELS.vision,
       summary: project.models?.summary ?? DEFAULT_MODELS.summary,
+      fallback: project.models?.fallback ?? DEFAULT_MODELS.fallback,
     },
     workspace: project.workspace ?? DEFAULT_WORKSPACE,
     targets: project.targets,

@@ -55,7 +55,7 @@ test('resolveRunTarget rejects a url override for a non-web target', () => {
 });
 
 const CONFIG: ResolvedConfig = {
-  models: { driver: 'd', vision: 'v', summary: 's' },
+  models: { driver: 'd', vision: 'v', summary: 's', fallback: 'f' },
   workspace: './tmp/ui-debugger-mcp',
   targets: {
     web: { adapter: 'browser', url: 'http://localhost:3000', headless: true },

@@ -17,7 +17,8 @@ const example = JSON.parse(
 test('accepts the example config verbatim', () => {
   const parsed = ConfigSchema.parse(example);
   expect(parsed.targets.web?.adapter).toBe('browser');
-  expect(parsed.models?.driver).toBe('deepseek/deepseek-v4-flash');
+  expect(parsed.models?.driver).toBe('particle-ai/particle-1:free');
+  expect(parsed.models?.fallback).toBe('deepseek/deepseek-v4.1-flash:floor');
   expect(parsed.workspace).toBe('./tmp/ui-debugger-mcp');
 });
 
