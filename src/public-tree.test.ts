@@ -206,3 +206,14 @@ test('a required run without the secret fails', () => {
   expect(privateWordsForRun(undefined, false)).toEqual([]);
   expect(privateWordsForRun('quimtel', true)).toHaveLength(1);
 });
+
+test("CI passes the secret and the required flag to this guard's run", () => {
+  // Deleting either line would switch the private-word check off without a red test.
+  const ci = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
+  const step = ci.slice(
+    ci.indexOf('- name: test\n'),
+    ci.indexOf('run: bun test', ci.indexOf('- name: test\n')),
+  );
+  expect(step).toContain(`${PRIVATE_WORDS_ENV}: \${{ secrets.${PRIVATE_WORDS_ENV} }}`);
+  expect(step).toContain(`${REQUIRED_ENV}: `);
+});
