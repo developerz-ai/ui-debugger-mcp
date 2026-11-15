@@ -208,12 +208,27 @@ test('a required run without the secret fails', () => {
 });
 
 test("CI passes the secret and the required flag to this guard's run", () => {
-  // Deleting either line would switch the private-word check off without a red test.
+  // Deleting, commenting out or weakening either line would switch the private-word check off
+  // with every test still green, so the step's live (uncommented) lines are matched exactly.
   const ci = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
-  const step = ci.slice(
-    ci.indexOf('- name: test\n'),
-    ci.indexOf('run: bun test', ci.indexOf('- name: test\n')),
-  );
-  expect(step).toContain(`${PRIVATE_WORDS_ENV}: \${{ secrets.${PRIVATE_WORDS_ENV} }}`);
-  expect(step).toContain(`${REQUIRED_ENV}: `);
+  const start = ci.indexOf('- name: test\n');
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = ci.indexOf('run: bun test', start);
+  expect(end).toBeGreaterThan(start);
+  const live = ci
+    .slice(start, end)
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line));
+  expect(
+    live.some((line) =>
+      /^\s+PUBLIC_TREE_PRIVATE_WORDS: \$\{\{ secrets\.PUBLIC_TREE_PRIVATE_WORDS \}\}\s*$/.test(
+        line,
+      ),
+    ),
+  ).toBe(true);
+  expect(
+    live.some((line) =>
+      /^\s+PUBLIC_TREE_PRIVATE_WORDS_REQUIRED: \$\{\{ .*&& '1' \|\| '' \}\}\s*$/.test(line),
+    ),
+  ).toBe(true);
 });
