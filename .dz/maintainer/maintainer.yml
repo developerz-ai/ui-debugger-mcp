@@ -31,3 +31,25 @@ release:
   # no release manager and no channel for the agent to publish on.
   manager: "none"
   channels: []
+
+# Added by the developerz.ai maintainer agent: blocks from the current template this file did not have. Each states the value already in effect; edit it like any other key.
+
+# branches: on at 60 because this file exists. A branch with no new commit
+# this long is tagged archive/<branch>/<date> at its last commit, then deleted.
+# false keeps every branch. See /docs/maintainer-yml.
+branches:
+  close_inactive_after_days: 60
+
+# escalate: what stays with a human.
+#   - `always` is the schema default, written out so you can see it.
+#   - `ask_before_acting` is empty by default: no pull request waits on a human
+#     ack. Write categories (e.g. [large_pr, breaking_change]) to opt in.
+#     `pr.human_merge` paths still hold; security, license and CLA still escalate.
+escalate:
+  always: [hostile_tone, direct_mention]
+
+# scout: the platform's daily survey of this repo files only what is already BROKEN
+# (red CI, failing tests, a security advisory, a broken build or link) — never an
+# improvement idea. `full` lets it file ideas too; `off` stops the survey.
+scout:
+  survey: broken_only
