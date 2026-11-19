@@ -318,6 +318,7 @@ diagnostic, the secret must NEVER enter the model's context or the logs.
 
 ## See also
 
+- `docs/standards/README.md` — the coding, structure and testing rules, each with its source.
 - `docs/idea/overview.md` — the problem + the idea.
 - `docs/idea/architecture.md` — full system design.
 - `docs/idea/adapters.md` — adapter contract + targets.
