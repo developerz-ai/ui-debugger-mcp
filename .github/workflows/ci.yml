@@ -12,8 +12,10 @@ concurrency:
 jobs:
   bun:
     name: bun (lint + typecheck + test)
-    # GitHub-hosted runner.
-    runs-on: ubuntu-22.04
+    # GitHub-hosted runner. The 22.04 image is deprecated (actions/runner-images#14254:
+    # deprecation 2026-09-17, retirement 2027-04-17) and the mitigation it names is
+    # 24.04/26.04/latest, so pin the explicit 24.04 image, not ubuntu-latest.
+    runs-on: ubuntu-24.04
     # 10 was too tight (run 34577257568 was cancelled at 10m17s mid-install).
     # 20 now exists for the retry's sake, not to accommodate a hang: three
     # bounded attempts (3 × 300s) + backoff (20s + 40s) + ~30s for the rest of
@@ -63,15 +65,20 @@ jobs:
       # No apt on any path. The install fetches the browser binaries from
       # Playwright's CDN over HTTPS, or fills in what the cache above is missing
       # — it never touches the Ubuntu mirrors, whose port-80 egress from these
-      # runners is what actually flakes (run 34580929047: one apt attempt
-      # crawled 11m before failing, the second was still crawling when the 20m
-      # ceiling killed the job).
+      # runners is what actually flakes (run 34580929047, on the then-default
+      # 22.04 image: one apt attempt crawled 11m before failing, the second was
+      # still crawling when the 20m ceiling killed the job).
       # The system libraries `install-deps` would add are already on the stock
-      # image: apt's own plan in that run listed all 14 runtime libs (libnss3,
-      # libgbm1, libasound2, libcups2, …) as UPGRADES, not new installs, and the
-      # only NEW packages were fonts — which affect glyph rendering in
-      # screenshots, and no CI assertion reads rendered output. The launch check
-      # in the next step gates that claim at runtime.
+      # image. On 22.04 apt's own plan in that run listed all 14 runtime libs
+      # (libnss3, libgbm1, libasound2, libcups2, …) as UPGRADES, not new
+      # installs, and the only NEW packages were fonts — which affect glyph
+      # rendering in screenshots, and no CI assertion reads rendered output.
+      # Noble (the 24.04 image the jobs pin) renamed the two time_t-transition
+      # packages, so those names read differently: `libasound2` is only a
+      # virtual package there and `libcups2` does not exist — the real names
+      # are `libasound2t64` / `libcups2t64` (packages.ubuntu.com, suite=noble),
+      # which the stock image ships. The launch check in the next step gates
+      # that claim at runtime.
       # The CLI is the repo-pinned playwright-core's own — NOT `bunx playwright`,
       # which resolves an unpinned version: run 34583721201 had it exit 0 in
       # 0.7s without fetching the headless shell the pinned version requires.
@@ -140,7 +147,10 @@ jobs:
     # user installs from npm works on the node floor package.json declares, so
     # this job packs the package, installs the tarball and runs the INSTALLED
     # CLI with node — the floor, not the dev version.
-    runs-on: ubuntu-22.04
+    # Same runner evidence as the `bun` job above: the 22.04 image is deprecated
+    # (actions/runner-images#14254: 2026-09-17, retires 2027-04-17), so both jobs
+    # pin the explicit 24.04 image instead of the migrating ubuntu-latest.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7

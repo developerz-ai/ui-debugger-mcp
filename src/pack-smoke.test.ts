@@ -250,6 +250,10 @@ function packSmokeJob(workflow: string): Job | undefined {
   return parseJobs(workflow).find((job) => job.key === 'pack-smoke');
 }
 
+function bunJob(workflow: string): Job | undefined {
+  return parseJobs(workflow).find((job) => job.key === 'bun');
+}
+
 function smokeStep(job: Job | undefined): Step | undefined {
   return job?.steps.find((step) =>
     executableLines(step.run).some((line) => line.trim() === SMOKE_COMMAND),
@@ -259,7 +263,19 @@ function smokeStep(job: Job | undefined): Step | undefined {
 /** G1 — the job exists, on the runner the repo pins, with a bounded timeout. */
 function hasPackSmokeJob(workflow: string): boolean {
   const job = packSmokeJob(workflow);
-  return job !== undefined && job.runsOn === 'ubuntu-22.04' && job.timeoutMinutes === '15';
+  return job !== undefined && job.runsOn === 'ubuntu-24.04' && job.timeoutMinutes === '15';
+}
+
+/**
+ * G1b — the `bun` job pins the same runner.
+ *
+ * `hasPackSmokeJob` guards the second job only, so the label the first job runs
+ * on could drift back to the deprecated 22.04 image or to `ubuntu-latest` —
+ * which the workflow's own comment rejects (it migrates) — with every gate
+ * green. The label is asserted exactly: any other value is a fail.
+ */
+function hasPinnedBunJob(workflow: string): boolean {
+  return bunJob(workflow)?.runsOn === 'ubuntu-24.04';
 }
 
 /** G2 — setup-node is pinned to the floor the manifest declares. */
@@ -472,11 +488,11 @@ function jobText(workflow: string, key: string): string {
   return lines.slice(start, end).join('\n');
 }
 
-/** Replace text inside the pack-smoke job only — the `bun` job has the same lines. */
-function mutateJob(workflow: string, from: string, to: string): string {
-  const block = jobText(workflow, 'pack-smoke');
+/** Replace text inside one job only — the jobs share lines like `runs-on:`. */
+function mutateJob(workflow: string, from: string, to: string, key = 'pack-smoke'): string {
+  const block = jobText(workflow, key);
   if (!block.includes(from)) {
-    throw new Error(`the pack-smoke job does not contain "${from}"`);
+    throw new Error(`the ${key} job does not contain "${from}"`);
   }
   return workflow.replace(block, block.replace(from, to));
 }
@@ -724,12 +740,31 @@ test('the workflow has a pack-smoke job on the pinned runner', () => {
   );
   // Mutation: the job runs somewhere else.
   expect(
-    hasPackSmokeJob(mutateJob(workflowText, 'runs-on: ubuntu-22.04', 'runs-on: macos-latest')),
+    hasPackSmokeJob(mutateJob(workflowText, 'runs-on: ubuntu-24.04', 'runs-on: macos-latest')),
   ).toBe(false);
   // Mutation: the job loses its ceiling.
   expect(
     hasPackSmokeJob(mutateJob(workflowText, 'timeout-minutes: 15', 'timeout-minutes: 360')),
   ).toBe(false);
+});
+
+test('the bun job runs on the pinned runner as well', () => {
+  expect(hasPinnedBunJob(workflowText)).toBe(true);
+
+  // Mutation: the job drifts to the migrating label ci.yml explicitly rejects.
+  expect(
+    hasPinnedBunJob(
+      mutateJob(workflowText, 'runs-on: ubuntu-24.04', 'runs-on: ubuntu-latest', 'bun'),
+    ),
+  ).toBe(false);
+  // Mutation: the job drifts back to a deprecated image.
+  expect(
+    hasPinnedBunJob(
+      mutateJob(workflowText, 'runs-on: ubuntu-24.04', 'runs-on: macos-latest', 'bun'),
+    ),
+  ).toBe(false);
+  // Mutation: the job is renamed away — nothing is left on the pinned runner.
+  expect(hasPinnedBunJob(workflowText.replace('  bun:', '  bun-renamed:'))).toBe(false);
 });
 
 test('the pack-smoke job pins setup-node to the floor the manifest declares', () => {
