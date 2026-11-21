@@ -46,3 +46,13 @@ from. `CLAUDE.md` is the source of truth; this page collects the rules in one pl
 | `bin/check` runs typecheck, lint, test; `bun run build` completes the four-step gate CI runs           | `bin/check`, `CONTRIBUTING.md`, `.github/workflows/ci.yml` |
 | Branches `feat/<topic>` or `fix/<topic>`; one logical change per PR; commits `type: short description` | `CONTRIBUTING.md`                                          |
 | Work in the one checkout, never git worktrees; parallel agents split disjoint files                    | `CLAUDE.md` (Note)                                         |
+| CI `bun` job ceiling 18m (1080s): 960s install retry budget + ~30s rest of job + ~90s headroom         | `.github/workflows/ci.yml`, `CONTRIBUTING.md`              |
+
+**CI `bun` job ceiling.** `timeout-minutes` is sized to the install retry budget, not to normal work:
+three bounded attempts (3 × 300s) plus backoff (20s + 40s) is 960s, and the rest of the job (lint,
+typecheck, test, build, e2e; the flaky BrowserAdapter integration suite is skipped in CI) was measured
+at ~30s. That is ~990s (16.5m), so an 18-minute ceiling (1080s) leaves ~90s of headroom while still
+giving every attempt its full 300s. The ceiling catches a catastrophic hang only: with 960s already
+committed to retries it cannot detect a five-minute regression, and lowering it below the budget would
+starve a legitimate retry. Never shrink the retry loop, its per-attempt 300s, or its 20s/40s backoff to
+make room for a lower ceiling.

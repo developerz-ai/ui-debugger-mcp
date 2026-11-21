@@ -81,9 +81,13 @@ test('makeExec passes a missing binary through raw as ENOENT', async () => {
 test('makeExec kills a wedged tool at the DEADLINE, not at its own default cap', async () => {
   // The adapter's own cap is 10s; the enclosing budget is 300ms. A tool that wedges
   // must be cut at the deadline — otherwise the run's remaining wall-clock is gone.
-  const exec = makeExec(process.env);
+  // The clock seam is frozen at the instant the budget is created. Reading the real
+  // clock again inside makeExec costs a millisecond or two, which makes the exact
+  // cap (and its error message) jitter between 299ms and 300ms under load.
+  const base = Date.now();
+  const exec = makeExec(process.env, 10_000, () => base);
   const started = Date.now();
-  const promise = exec('sleep', ['30'], { deadline: Date.now() + 300 });
+  const promise = exec('sleep', ['30'], { deadline: base + 300 });
   await expect(promise).rejects.toThrow(ExecTimeoutError);
   await expect(promise).rejects.toThrow(/`sleep` timed out after 300ms \(SIGKILLed/);
   const elapsed = Date.now() - started;
