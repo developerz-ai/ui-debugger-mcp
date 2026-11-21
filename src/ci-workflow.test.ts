@@ -81,7 +81,7 @@ function assertIsolatedIntegrationSteps(steps: WorkflowStep[]) {
     expect(step.run.some((line) => line === INTEGRATION_COMMAND)).toBe(true);
     expect(step.env.some((line) => line.startsWith('SKIP_BROWSER_INTEGRATION:'))).toBe(false);
     expect(step.raw).not.toMatch(/^ {8}if:/m);
-    expect(step.raw).not.toMatch(/^ {8}continue-on-error:\s*true\s*$/m);
+    expect(step.raw).not.toMatch(/^ {8}continue-on-error:\s*true(?:\s+#.*)?\s*$/m);
   }
 }
 
@@ -162,6 +162,7 @@ describe('CI integration coverage', () => {
       skipEnv: `${base}\n        env:\n          SKIP_BROWSER_INTEGRATION: "1"`,
       conditional: `        if: false\n${base}`,
       nonFatal: `${base}\n        continue-on-error: true`,
+      commentedNonFatal: `${base}\n        continue-on-error: true # integration`,
       commented:
         '        run: |\n          # bun test src/adapters/browser/browser-adapter.integration.test.ts',
     };
