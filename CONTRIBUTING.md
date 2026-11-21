@@ -66,7 +66,9 @@ The CI workflow (`.github/workflows/ci.yml`) has two jobs on every push and PR:
   `dummy/web` fixture build (`bun install --frozen-lockfile && bun run build`
   in `dummy/web`, which has its own lockfile). That fixture build only supplies
   the e2e fixture's `dist/`. Then `bun test` runs with
-  `SKIP_BROWSER_INTEGRATION=1`.
+  `SKIP_BROWSER_INTEGRATION=1`, followed by `bun run build` for the package.
+  The BrowserAdapter integration suite is skipped in CI's parallel test batch,
+  but `bin/check` runs it in an isolated invocation with no skip flag.
 - `pack-smoke`: the package-artifact requirement supersedes a source-job build
   claim. It builds the package, then smoke-tests the tarball's installed CLI on
   the Node floor (Node 22).
@@ -113,11 +115,11 @@ import { expect, test } from 'bun:test';
 
 Three test tiers used in this repo:
 
-| Tier                | Example                                                    | When to run                                                                         |
-| ------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Unit (fake adapter) | `src/agent/belt/act.test.ts`                               | always — no external deps                                                           |
-| Browser integration | `src/adapters/browser/browser-adapter.integration.test.ts` | skip-guarded via `SKIP_BROWSER_TESTS=1`; needs `CHROMIUM_PATH`                      |
-| Full-stack e2e      | `src/e2e.test.ts`                                          | always — uses `Bun.serve` fixture + in-memory MCP transport + `MockLanguageModelV3` |
+| Tier                | Example                                                    | When to run                                                                                                                      |
+| ------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Unit (fake adapter) | `src/agent/belt/act.test.ts`                               | always — no external deps                                                                                                        |
+| Browser integration | `src/adapters/browser/browser-adapter.integration.test.ts` | isolated run in `bin/check`; skipped by CI's parallel batch until CI gains an isolated step; needs Chromium (or `CHROMIUM_PATH`) |
+| Full-stack e2e      | `src/e2e.test.ts`                                          | always — uses `Bun.serve` fixture + in-memory MCP transport + `MockLanguageModelV3`                                              |
 
 Reference example: `src/index.test.ts`.
 
