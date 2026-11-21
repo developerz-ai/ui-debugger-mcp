@@ -9,8 +9,8 @@ bin/setup
 ```
 
 The one-command entry point is `bin/setup` — installs root + dummy/web deps and
-builds the e2e fixture's `dist/`. `bin/check` is the matching CI gate (typecheck,
-lint, test). Both run from any cwd and are the same commands CI runs.
+builds the e2e fixture's `dist/`. `bin/check` runs the local typecheck, lint, and
+test gate from any cwd; CI runs those legs directly.
 
 `bin/setup` selects and verifies the Bun version CI pins and fails loud when
 that version cannot be obtained, so setup never runs on an arbitrary ambient bun.
@@ -64,12 +64,12 @@ The CI workflow (`.github/workflows/ci.yml`) has two jobs on every push and PR:
 
 - `bun`: `bun run lint` (Biome), `bun run typecheck` (tsc --noEmit), then a
   `dummy/web` fixture build (`bun install --frozen-lockfile && bun run build`
-  in `dummy/web`, which has its own lockfile). That fixture build is distinct
-  from the package build: it only supplies the e2e fixture's `dist/`. Then
-  `bun test` (with `SKIP_BROWSER_INTEGRATION=1`) and finally the root package
-  build, `bun run build` (tsc emit to `dist/`).
-- `pack-smoke`: builds the package and smoke-tests the tarball's installed CLI
-  on the Node floor (Node 22).
+  in `dummy/web`, which has its own lockfile). That fixture build only supplies
+  the e2e fixture's `dist/`. Then `bun test` runs with
+  `SKIP_BROWSER_INTEGRATION=1`.
+- `pack-smoke`: the package-artifact requirement supersedes a source-job build
+  claim. It builds the package, then smoke-tests the tarball's installed CLI on
+  the Node floor (Node 22).
 
 ## Branch + PR conventions
 
