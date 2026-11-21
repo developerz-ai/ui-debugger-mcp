@@ -3,10 +3,11 @@
 # platform's Bun stack profile declares, so the first red leg fails the script
 # with a tail that names what was wrong.
 #
-# The local batch skips the BrowserAdapter integration suite for speed and
-# stability under parallel load. CI's separate, isolated step runs it without
-# the skip (`.github/workflows/ci.yml`); this batch only mirrors CI's parallel
-# `bun test`. Run `bin/setup` first.
+# Anything this runs, CI runs too. The parallel batch sets
+# `SKIP_BROWSER_INTEGRATION=1` the way CI does, so the BrowserAdapter integration
+# suite does not race the other files under the runner's 2-vCPU load; it then runs
+# on its own, isolated, with no SKIP flag, so the full suite is exercised in the
+# gate. Run `bin/setup` first.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -21,3 +22,6 @@ bun run lint
 
 echo "==> test"
 SKIP_BROWSER_INTEGRATION=1 bun test
+
+echo "==> test (BrowserAdapter integration, isolated)"
+bun test src/adapters/browser/browser-adapter.integration.test.ts
