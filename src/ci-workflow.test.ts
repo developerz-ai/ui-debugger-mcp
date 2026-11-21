@@ -19,6 +19,73 @@ const finalError = '::error::chromium install failed after 3 attempts — see ou
 const INTEGRATION_FILE = 'src/adapters/browser/browser-adapter.integration.test.ts';
 const INTEGRATION_COMMAND = `bun test ${INTEGRATION_FILE}`;
 
+/** The documented ceiling: docs/standards/README.md:49,54 (18m = 1080s). */
+const DOCUMENTED_TIMEOUT_MINUTES = 18;
+/** The stale value the merge-gate-owned workflow still carries. */
+const STALE_TIMEOUT_MINUTES = 20;
+/** 3 × 300s attempts + 20s + 40s backoff; ~30s for the rest of the job. */
+const RETRY_BUDGET_SECONDS = 3 * 300 + 20 + 40;
+const REST_OF_JOB_SECONDS = 30;
+
+/**
+ * The bun job's job-level `timeout-minutes`, parsed from the real workflow.
+ *
+ * Returns `null` when the job or its ceiling is absent: a missing ceiling is a
+ * hang guard lost, never a value the guard silently accepts.
+ */
+function bunTimeoutMinutes(text: string): number | null {
+  const lines = text.split('\n');
+  const start = lines.findIndex((line) => /^ {2}bun:\s*$/.test(line));
+  if (start === -1) return null;
+  const end = lines.findIndex((line, index) => index > start && /^ {2}\S/.test(line));
+  const stop = end === -1 ? lines.length : end;
+  for (const line of lines.slice(start + 1, stop)) {
+    const match = line.match(/^ {4}timeout-minutes:\s*(\d+)\s*$/);
+    if (match?.[1] !== undefined) return Number(match[1]);
+  }
+  return null;
+}
+
+/** True when the ceiling covers the full retry budget plus the rest of the job. */
+function fitsRetryBudget(minutes: number | null): boolean {
+  return minutes !== null && minutes * 60 >= RETRY_BUDGET_SECONDS + REST_OF_JOB_SECONDS;
+}
+
+/**
+ * The protected workflow records its landed ceiling in the comment above the
+ * scalar. While that comment still names 20, both the stale value and the
+ * documented target pass; once it names 18, only 18 passes. Every other value,
+ * including an absent ceiling, is drift or a lost hang guard.
+ */
+function acceptableBunTimeouts(text: string): number[] {
+  return /^ {4}# 20 now exists/m.test(text)
+    ? [STALE_TIMEOUT_MINUTES, DOCUMENTED_TIMEOUT_MINUTES]
+    : [DOCUMENTED_TIMEOUT_MINUTES];
+}
+
+function assertBunTimeout(text: string): void {
+  const minutes = bunTimeoutMinutes(text);
+  expect(minutes, 'the bun job must declare a job-level timeout-minutes').not.toBeNull();
+  if (minutes === null) return;
+  expect(fitsRetryBudget(minutes), `${minutes}m must cover the 960s retry budget`).toBe(true);
+  expect(acceptableBunTimeouts(text)).toContain(minutes);
+}
+
+/** Replace only the bun job's job-level ceiling, never a step-level one. */
+function withCeiling(text: string, minutes: number | null): string {
+  return text.replace(/^( {4}timeout-minutes:) \d+$/m, (line) =>
+    minutes === null ? '' : line.replace(/\d+$/, String(minutes)),
+  );
+}
+
+/** Flip the protected workflow's ceiling comment to the value its owner landed. */
+function withCeilingComment(text: string, minutes: number): string {
+  return text.replace(
+    /^( {4}# )\d+( now exists)/m,
+    (_line, prefix: string, suffix: string) => `${prefix}${minutes}${suffix}`,
+  );
+}
+
 // Parse the job's step graph, not prose. Shell comments retain their leading
 // `#` in a parsed `run:` line, so a commented-out integration command can never
 // equal the exact executable command (the mutation test below pins this).
@@ -131,6 +198,56 @@ function execute(body: string, statuses: number[], shell: string[]) {
 
 describe('CI integration coverage', () => {
   const steps = parseJobSteps(workflow, 'bun');
+
+  test('the bun job keeps a bounded ceiling that fits the install retry budget', () => {
+    expect(() => assertBunTimeout(workflow)).not.toThrow();
+    const minutes = bunTimeoutMinutes(workflow);
+    expect(minutes).not.toBeNull();
+    if (minutes === null) return;
+    expect(fitsRetryBudget(minutes)).toBe(true);
+    expect(acceptableBunTimeouts(workflow)).toContain(minutes);
+    expect(workflow).toMatch(/^ {4}timeout-minutes: \d+$/m);
+  });
+
+  test('the ceiling guard accepts 18 and rejects a wrong, starved or removed ceiling', () => {
+    // Alignment: the workflow owner moves both its comment and scalar to 18.
+    const aligned = withCeiling(withCeilingComment(workflow, 18), 18);
+    expect(aligned).toMatch(/^ {4}# 18 now exists/m);
+    expect(bunTimeoutMinutes(aligned)).toBe(18);
+    expect(acceptableBunTimeouts(aligned)).toEqual([DOCUMENTED_TIMEOUT_MINUTES]);
+    expect(() => assertBunTimeout(aligned)).not.toThrow();
+
+    for (const minutes of [15, 16, 17, 19, 20, 21, 30]) {
+      const mutant = withCeiling(aligned, minutes);
+      expect(mutant).not.toBe(aligned);
+      expect(bunTimeoutMinutes(mutant), String(minutes)).toBe(minutes);
+      expect(() => assertBunTimeout(mutant), String(minutes)).toThrow();
+    }
+    const removed = withCeiling(aligned, null);
+    expect(removed).not.toBe(aligned);
+    expect(bunTimeoutMinutes(removed)).toBeNull();
+    expect(() => assertBunTimeout(removed)).toThrow();
+
+    // Today's stale workflow: the comment pins 20, target 18 is also accepted,
+    // and every other ceiling (or none at all) still fails.
+    const stale = withCeilingComment(workflow, STALE_TIMEOUT_MINUTES);
+    expect(stale).toMatch(/^ {4}# 20 now exists/m);
+    for (const minutes of [STALE_TIMEOUT_MINUTES, DOCUMENTED_TIMEOUT_MINUTES]) {
+      const candidate = withCeiling(stale, minutes);
+      expect(bunTimeoutMinutes(candidate), String(minutes)).toBe(minutes);
+      expect(() => assertBunTimeout(candidate), String(minutes)).not.toThrow();
+    }
+    for (const minutes of [15, 16, 17, 19, 21]) {
+      expect(() => assertBunTimeout(withCeiling(stale, minutes)), String(minutes)).toThrow();
+    }
+    expect(() => assertBunTimeout(withCeiling(stale, null))).toThrow();
+
+    // The budget check is independent of the allowlist: 16m is exactly 960s,
+    // leaving nothing for lint/typecheck/test/e2e, while 17m does fit.
+    expect(fitsRetryBudget(16)).toBe(false);
+    expect(fitsRetryBudget(17)).toBe(true);
+    expect(fitsRetryBudget(null)).toBe(false);
+  });
 
   test('the parallel test step keeps its browser skip and the public-tree env', () => {
     const parallel = steps.find((step) => step.name === 'test' && step.run.includes('bun test'));
