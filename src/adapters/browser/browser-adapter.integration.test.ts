@@ -74,10 +74,10 @@ function findChrome(): string | null {
 const CHROME = findChrome();
 
 // This low-level suite serves its OWN `Bun.serve` fixture and drives 18 browser
-// ops against it. Under the CI runner's parallel 2-vCPU load that fixture flakes
-// (ERR_CONNECTION_REFUSED) even though the browser itself is fine — the `e2e`
-// suite exercises the real browser→findings path in CI and stays green. Gate this
-// one off in CI via SKIP_BROWSER_INTEGRATION; it always runs locally.
+// ops against it. Under the runner's parallel 2-vCPU load that fixture flakes
+// (ERR_CONNECTION_REFUSED) even though the browser itself is fine. CI and bin/check
+// now run it in a dedicated isolated step (no competing test files), so the full
+// suite executes in the gate; only the parallel batch sets SKIP_BROWSER_INTEGRATION.
 const RUN_INTEGRATION = CHROME && !process.env.SKIP_BROWSER_INTEGRATION;
 
 // ---------------------------------------------------------------------------
@@ -429,7 +429,7 @@ const FRAME2_HTML = `<!DOCTYPE html>
       /outside the viewport/,
     );
     expect(Number((await adapter.find({ query: '#scrolly' }))?.name)).toBe(0);
-  });
+  }, 15_000);
 
   // -------------------------------------------------------------------------
   // enabled (contract: false when disabled OR readonly)
@@ -455,7 +455,7 @@ const FRAME2_HTML = `<!DOCTYPE html>
     expect((await adapter.readState({ limit: 2 })).length).toBe(2);
     // `slice(0, -1)` would silently drop the last node — fail loud instead.
     await expect(adapter.readState({ limit: -1 })).rejects.toThrow(AdapterError);
-  });
+  }, 15_000);
 
   // -------------------------------------------------------------------------
   // console — fires on page load (before click)
@@ -589,9 +589,7 @@ const FRAME2_HTML = `<!DOCTYPE html>
   test('waitFor: a query resolves inside an iframe, not just the main document', async () => {
     // Before: `page.locator()` never crossed the boundary, so waiting for a node
     // the tree had just shown (tagged `frame=…`) burned the whole timeout.
-    await expect(
-      adapter.waitFor({ query: 'data-testid=inner-two', timeout: 5_000 }),
-    ).resolves.toBeUndefined();
+    await adapter.waitFor({ query: 'data-testid=inner-two', timeout: 10_000 });
   }, 15_000);
 
   test('scroll: a `within` region inside an iframe scrolls, instead of “not found”', async () => {

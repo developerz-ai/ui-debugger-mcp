@@ -325,7 +325,13 @@ export class BrowserAdapter implements Adapter {
     const deadline = opts.timeout === undefined ? undefined : Date.now() + opts.timeout;
     await this.#run('waitFor', async () => {
       if (opts.query) {
-        await waitAcrossFrames(this.#page, opts.query, opts.timeout);
+        // The wait gets the REMAINING budget, not a fresh full-length one. A
+        // per-test setup that already spent time loading leaves less than the
+        // requested timeout; granting the full amount again lets one uncancelled
+        // Playwright poll outlive its test and fire against the page after
+        // teardown closed it ("Target page, context or browser has been closed")
+        // and leaves a dangling process behind.
+        await waitAcrossFrames(this.#page, opts.query, remainingTimeout(deadline));
       }
       if (opts.networkIdle) {
         await this.#page.waitForLoadState('networkidle', { timeout: remainingTimeout(deadline) });
