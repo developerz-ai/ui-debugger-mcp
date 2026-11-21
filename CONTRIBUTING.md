@@ -9,8 +9,8 @@ bin/setup
 ```
 
 The one-command entry point is `bin/setup` — installs root + dummy/web deps and
-builds the e2e fixture's `dist/`. `bin/check` is the matching CI gate (typecheck,
-lint, test). Both run from any cwd and are the same commands CI runs.
+builds the e2e fixture's `dist/`. `bin/check` runs the local typecheck, lint, and
+test gate from any cwd; CI runs those legs directly.
 
 `bin/setup` selects and verifies the Bun version CI pins and fails loud when
 that version cannot be obtained, so setup never runs on an arbitrary ambient bun.
@@ -36,24 +36,23 @@ Boot the server in watch mode (for manual testing with an MCP client):
 bun run dev
 ```
 
-## CI gate — all four must pass before commit
+## Checks and CI
 
-`bin/check` runs typecheck + lint + test in one command. For the full four-step
-gate that matches CI exactly:
+Run the checks locally in one command, or step-by-step:
 
 ```bash
-bin/check           # typecheck + lint + test (the script CI runs)
-bun run build       # esbuild / tsc emit
+bin/check           # typecheck + lint + test (local one-command equivalent of CI's three legs)
 ```
 
-Or step-by-step:
-
 ```bash
-bun run lint        # Biome format + lint
-bun run typecheck   # tsc --noEmit
+bun run lint        # biome check .
+bun run typecheck   # tsc --noEmit -p tsconfig.json
 bun test            # bun:test suite (< 10 s)
-bun run build       # esbuild / tsc emit
+bun run build       # tsc -p tsconfig.build.json -> dist/ (package build)
 ```
+
+`bin/check` is a local convenience script. CI does not invoke it; it runs the
+legs below directly.
 
 Auto-fix most lint issues:
 
@@ -61,12 +60,18 @@ Auto-fix most lint issues:
 bun run lint:fix
 ```
 
-The CI workflow (`.github/workflows/ci.yml`) runs the same four steps on every push and PR.
-It also builds `dummy/web` ahead of `bun test` so the e2e suite finds the fixture's `dist/`.
-The parallel `bun test` batch sets `SKIP_BROWSER_INTEGRATION=1` so the rest of the suite keeps
-running in parallel. `bin/check` then runs `src/adapters/browser/browser-adapter.integration.test.ts`
-alone with no skip flag. CI still skips that suite: a dedicated isolated step after the batch
-must be added to the workflow before CI executes it.
+The CI workflow (`.github/workflows/ci.yml`) has two jobs on every push and PR:
+
+- `bun`: `bun run lint` (Biome), `bun run typecheck` (tsc --noEmit), then a
+  `dummy/web` fixture build (`bun install --frozen-lockfile && bun run build`
+  in `dummy/web`, which has its own lockfile). That fixture build only supplies
+  the e2e fixture's `dist/`. Then `bun test` runs with
+  `SKIP_BROWSER_INTEGRATION=1`, followed by `bun run build` for the package.
+  The BrowserAdapter integration suite is skipped in CI's parallel test batch,
+  but `bin/check` runs it in an isolated invocation with no skip flag.
+- `pack-smoke`: the package-artifact requirement supersedes a source-job build
+  claim. It builds the package, then smoke-tests the tarball's installed CLI on
+  the Node floor (Node 22).
 
 ## Branch + PR conventions
 
