@@ -36,24 +36,23 @@ Boot the server in watch mode (for manual testing with an MCP client):
 bun run dev
 ```
 
-## CI gate — all four must pass before commit
+## Checks and CI
 
-`bin/check` runs typecheck + lint + test in one command. For the full four-step
-gate that matches CI exactly:
+Run the checks locally in one command, or step-by-step:
 
 ```bash
-bin/check           # typecheck + lint + test (the script CI runs)
-bun run build       # esbuild / tsc emit
+bin/check           # typecheck + lint + test (local one-command equivalent of CI's three legs)
 ```
 
-Or step-by-step:
-
 ```bash
-bun run lint        # Biome format + lint
-bun run typecheck   # tsc --noEmit
+bun run lint        # biome check .
+bun run typecheck   # tsc --noEmit -p tsconfig.json
 bun test            # bun:test suite (< 10 s)
-bun run build       # esbuild / tsc emit
+bun run build       # tsc -p tsconfig.build.json -> dist/ (package build)
 ```
+
+`bin/check` is a local convenience script. CI does not invoke it; it runs the
+legs below directly.
 
 Auto-fix most lint issues:
 
@@ -61,8 +60,16 @@ Auto-fix most lint issues:
 bun run lint:fix
 ```
 
-The CI workflow (`.github/workflows/ci.yml`) runs the same four steps on every push and PR.
-It also builds `dummy/web` ahead of `bun test` so the e2e suite finds the fixture's `dist/`.
+The CI workflow (`.github/workflows/ci.yml`) has two jobs on every push and PR:
+
+- `bun`: `bun run lint` (Biome), `bun run typecheck` (tsc --noEmit), then a
+  `dummy/web` fixture build (`bun install --frozen-lockfile && bun run build`
+  in `dummy/web`, which has its own lockfile). That fixture build is distinct
+  from the package build: it only supplies the e2e fixture's `dist/`. Then
+  `bun test` (with `SKIP_BROWSER_INTEGRATION=1`) and finally the root package
+  build, `bun run build` (tsc emit to `dist/`).
+- `pack-smoke`: builds the package and smoke-tests the tarball's installed CLI
+  on the Node floor (Node 22).
 
 ## Branch + PR conventions
 
