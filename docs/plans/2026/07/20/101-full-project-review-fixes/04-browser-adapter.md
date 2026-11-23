@@ -4,20 +4,20 @@
 
 ## Files to change
 
-- `src/adapters/browser/browser-adapter.ts:571-577,584-588` — anything throwing after `launchPersistentContext`/`connectOverCDP` leaves the context open → zombie Chrome holds the persistent-profile lock, blocking every later run.
-- `src/adapters/browser/browser-adapter.ts:556-589` — `create()` failures (incl. profile-locked, the most common) escape as raw Playwright `Error`s, violating the file's own "every Playwright call wrapped to AdapterError" header.
-- `src/adapters/browser/browser-adapter.ts:672-676` — `scroll` with `within` has no viewport check (unlike `click` at `:646`) → off-screen region silently no-ops.
-- `src/adapters/browser/browser-adapter.ts:734-753` vs `src/adapters/contract.ts:91` — `Query.fields` projection silently ignored by `#collect` (observe re-projects, other consumers get full nodes).
-- `src/adapters/browser/browser-adapter.ts` — 775 LOC > 500 rule: extract in-page `NODE_EXTRACTOR` + DOM typings (~230 lines) to `src/adapters/browser/extractor.ts`.
-- Lows: `:750-751` validate `limit` (negative/NaN) like `cdp.ts:236-241` does; `:308` add `readonly`/`aria-readonly` (+ `fieldset[disabled]` ancestor) to `enabled` per `contract.ts:41`; `:766-774` `#run` must pass AdapterError through (attach original as `cause`), no double-wrap; `:585-586` attach mode picks `pages()[0]` arbitrarily — select the active page or document the single-tab constraint in `contract.ts`; `cdp.ts:349,356` wrap sink invocation in try/catch; `contract.ts:193,196` fix "Drain" wording (reads are non-destructive).
+- DONE (#202): `src/adapters/browser/lifecycle.ts:117-142`, where `launchHandles`/`attachHandles` wrap post-connect steps in `closeOnFailure` (`launch.ts:14-21`); a failure closes the context/browser, so no zombie Chrome holds the profile lock.
+- DONE (#202): `src/adapters/browser/lifecycle.ts:65-86`, where `openBrowserHandles` wraps `create()` failures in `createFailure(...)` (`launch.ts:34-37`) as `AdapterError`, including profile-locked.
+- DONE: `src/adapters/browser/browser-adapter.ts:289-303`, where `scroll` applies `#centerInViewport` (`:259-267`) when `within` is set, so off-screen regions no longer silently no-op.
+- DONE (superseded): `Query` no longer has `fields` (`src/adapters/contract.ts:114-123`; `NodeField` remains at `:89-90`); `#collect` (`browser-adapter.ts:403-433`) returns full nodes and projection lives in `src/agent/belt/observe.ts:339-343,466`. No adapter change needed.
+- DONE (#202): in-page `NODE_EXTRACTOR` + DOM typings extracted to `src/adapters/browser/extractor.ts`; `browser-adapter.ts` is now 513 lines.
+- Lows: `limit` validation is DONE via `capToLimit` (`src/adapters/limit.ts`), used at `browser-adapter.ts:39,432` and `cdp.ts:35,184,196`; `readonly`/`aria-readonly`/`fieldset[disabled]` handling is DONE in `src/adapters/browser/extractor.ts:212-248` (`enabled: interactable(el)` at `:248`, contract wording at `contract.ts:46`); `#run` AdapterError pass-through with `cause` is DONE at `browser-adapter.ts:501-512`; `pages()[0]` selection now lives in `lifecycle.ts:118,139` (still open: select the active page or document the single-tab constraint in `contract.ts`); CDP sink wrapping is DONE at `cdp.ts:467-475`; `contract.ts:193,196` now describe request resource type and error, so the stale "Drain" wording is gone.
 
 ## Steps
 
-1. Wrap post-connect steps of `#launch`/`#attach` in try/catch → `context.close()`/`browser.close()` then rethrow as `AdapterError` (profile-locked gets a clear message).
-2. `scroll`: apply the same `isOutsideViewport` guard before `mouse.move`.
-3. `#collect`: implement `fields` projection (reuse observe's projector) — or, if simpler, delete `fields` from `Query` and keep projection in observe only; pick one, update `contract.ts` doc either way.
-4. Extract `NODE_EXTRACTOR` module; no behavior change; both files ≤500 LOC after.
-5. Apply the lows (each ≤5 lines except attach-page selection — prefer documenting the constraint over guessing the active tab).
+1. DONE (#202): post-connect cleanup and `create()` wrapping live in `src/adapters/browser/lifecycle.ts` (`launchHandles`/`attachHandles`, `openBrowserHandles`), not in `browser-adapter.ts`.
+2. DONE: `scroll` viewport guard is `browser-adapter.ts:289-303` via `#centerInViewport` (`:259-267`).
+3. DONE: `fields` was removed from `Query` (`contract.ts:114-123`); projection is observe-only (`observe.ts:339-343,466`).
+4. DONE (#202): `NODE_EXTRACTOR` lives in `src/adapters/browser/extractor.ts`.
+5. Lows mostly DONE: limit via `capToLimit` (`src/adapters/limit.ts`), readonly via `extractor.ts:212-248`, `#run` passthrough via `browser-adapter.ts:501-512`, sink try/catch via `cdp.ts:467-475`. Only attach-page selection remains open at `lifecycle.ts:118,139`. Prefer documenting the constraint over guessing the active tab.
 
 ## Tests
 
