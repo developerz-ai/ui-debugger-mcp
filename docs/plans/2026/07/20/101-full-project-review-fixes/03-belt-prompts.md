@@ -8,7 +8,7 @@
 - `src/agent/prompts/web-addendum.ts:68-73` — "Enumerate frames via the Target domain" — no observe kind/act action exposes frames/tabs; unexecutable, burns steps.
 - `src/agent/prompts/web-addendum.ts:64-66` — teaches `hover`; `act.ts:34` has no hover action.
 - `src/agent/belt/observe.ts:260-266` + `web-addendum.ts:92-96` — console/network observes have no default `limit` (ring holds 1000) and the prompt mandates both after EVERY act; SDK re-sends every tool result each step → context grows entries×steps on chatty pages.
-- `src/agent/belt/act.ts:124,160-167` vs `src/adapters/browser/browser-adapter.ts:692-694` — bare `act({action:"wait"})` passes the belt but the adapter always throws (`waitFor requires query and/or networkIdle`).
+- `src/agent/belt/act.ts:124,160-167` vs `src/adapters/browser/browser-adapter.ts:319-322` — bare `act({action:"wait"})` passes the belt but the adapter always throws (`waitFor requires query and/or networkIdle`).
 - `src/agent/belt/observe.ts:77-83,104-108` — `within` NodeSchema requires `bounds`/`enabled`, but a fields-projected observe returns nodes without them; "pass a node exactly as returned" fails validation.
 - `src/agent/capabilities.ts:59` + `src/config/load.ts:35` — catalog probe is exact-match; suffixed ids (`#uptime`, `:free` — the shipped default driver id!) never match → self-look silently lost.
 - `src/agent/capabilities.ts:17-21,57-63` — `/models` response typed via `as` casts, not Zod.
