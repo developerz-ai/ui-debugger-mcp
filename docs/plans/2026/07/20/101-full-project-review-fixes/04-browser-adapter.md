@@ -9,7 +9,7 @@
 - DONE: `src/adapters/browser/browser-adapter.ts:289-303`, where `scroll` applies `#centerInViewport` (`:259-267`) when `within` is set, so off-screen regions no longer silently no-op.
 - DONE (superseded): `Query` no longer has `fields` (`src/adapters/contract.ts:114-123`; `NodeField` remains at `:89-90`); `#collect` (`browser-adapter.ts:403-433`) returns full nodes and projection lives in `src/agent/belt/observe.ts:339-343,466`. No adapter change needed.
 - DONE (#202): in-page `NODE_EXTRACTOR` + DOM typings extracted to `src/adapters/browser/extractor.ts`; `browser-adapter.ts` is now 513 lines.
-- Lows: `limit` validation is DONE via `capToLimit` (`src/adapters/limit.ts`), used at `browser-adapter.ts:39,432` and `cdp.ts:35,184,196`; `readonly`/`aria-readonly`/`fieldset[disabled]` handling is DONE in `src/adapters/browser/extractor.ts:212-248` (`enabled: interactable(el)` at `:248`, contract wording at `contract.ts:46`); `#run` AdapterError pass-through with `cause` is DONE at `browser-adapter.ts:501-512`; `pages()[0]` selection now lives in `lifecycle.ts:118,139` (still open: select the active page or document the single-tab constraint in `contract.ts`); CDP sink wrapping is DONE at `cdp.ts:467-475`; `contract.ts:193,196` now describe request resource type and error, so the stale "Drain" wording is gone.
+- Lows: `limit` validation is DONE via `capToLimit` (`src/adapters/limit.ts`), used at `browser-adapter.ts:39,432` and `cdp.ts:35,184,196`; `readonly`/`aria-readonly`/`fieldset[disabled]` handling is DONE in `src/adapters/browser/extractor.ts:212-248` (`enabled: interactable(el)` at `:248`, contract wording at `contract.ts:46`); `#run` AdapterError pass-through with `cause` is DONE at `browser-adapter.ts:501-512`; attach `pages()[0]` selection now lives in `lifecycle.ts:139` (still open: select the active page or document the single-tab constraint in `contract.ts`); CDP sink wrapping is DONE at `cdp.ts:467-475`; `contract.ts:193,196` now describe request resource type and error, so the stale "Drain" wording is gone.
 
 ## Steps
 
@@ -17,7 +17,7 @@
 2. DONE: `scroll` viewport guard is `browser-adapter.ts:289-303` via `#centerInViewport` (`:259-267`).
 3. DONE: `fields` was removed from `Query` (`contract.ts:114-123`); projection is observe-only (`observe.ts:339-343,466`).
 4. DONE (#202): `NODE_EXTRACTOR` lives in `src/adapters/browser/extractor.ts`.
-5. Lows mostly DONE: limit via `capToLimit` (`src/adapters/limit.ts`), readonly via `extractor.ts:212-248`, `#run` passthrough via `browser-adapter.ts:501-512`, sink try/catch via `cdp.ts:467-475`. Only attach-page selection remains open at `lifecycle.ts:118,139`. Prefer documenting the constraint over guessing the active tab.
+5. Lows mostly DONE: limit via `capToLimit` (`src/adapters/limit.ts`), readonly via `extractor.ts:212-248`, `#run` passthrough via `browser-adapter.ts:501-512`, sink try/catch via `cdp.ts:467-475`. Only attach-page selection remains open at `lifecycle.ts:139`. Prefer documenting the constraint over guessing the active tab.
 
 ## Tests
 
