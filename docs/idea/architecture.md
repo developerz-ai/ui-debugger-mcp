@@ -39,6 +39,7 @@
 
 The agent's models run **inside** this server (its own OpenAI-compatible key),
 not in the caller. So:
+
 - The smart agent sends **intent** ("log in, check checkout"), not keystrokes.
 - The small agent burns its own (cheap) tokens on the clicking grind.
 - The smart agent's context stays clean — it sees findings, not page dumps.
@@ -47,6 +48,7 @@ not in the caller. So:
 
 The smart agent and the small agent hold an **ongoing conversation** within a
 session:
+
 - Smart agent opens with a goal.
 - Small agent works, streams progress + findings.
 - Smart agent can **inject messages mid-run** — add work, redirect, ask a

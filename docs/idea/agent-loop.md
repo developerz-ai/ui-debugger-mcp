@@ -30,6 +30,7 @@ smart → end           done
 ## Mid-run message injection
 
 The smart agent can send messages **while the small agent is working**:
+
 - add work ("also check the mobile view")
 - redirect ("skip checkout, the login is the bug")
 - answer a question the small agent raised

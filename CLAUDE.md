@@ -8,6 +8,7 @@ small agent drives the target, gathers evidence, reports findings. Smart agent f
 code, asks again. Loop until the UI works. No human clicking.
 
 **Goal: stuff WORKS + LOOKS NICE.** Three actors (`docs/idea/models.md`):
+
 - **smart agent** — the boss (Claude/caller): sets goals, fixes code, loops.
 - **fast guy** — the driver (fast, text-only, blind): controls the target.
 - **vision guy** — the eyes (multimodal): describes screenshots, judges looks.
@@ -72,6 +73,7 @@ picks the binary via `executablePath`/`emulatorPath`.
 ## MCP tools (few, fat — not playwright-mcp)
 
 A **conversation**, not a remote control. Small agent owns the clicking loop.
+
 - `start_debug` — open a session with a goal `{ target, goal, criteria?, url?, as?, replace?, timeout? }`
   (`timeout` seconds; always capped — default 300s, max 2_147_483s (Node timer
   ceiling) — so a run never hangs forever).
@@ -135,6 +137,7 @@ project (cwd) → no run selector needed.
   without reading root.
 
 Project config shape:
+
 ```
 models:  { driver, vision, summary?, fallback? }   per-role; defaults: free models, paid fallback
 targets:
@@ -149,6 +152,7 @@ managed vs attach: `cdpUrl` (web) / `adbSerial` (android) → attach, never star
 ## Per-project workspace
 
 `./tmp/ui-debugger-mcp/<project>/`
+
 - `chrome-user-data/` — persistent profile (login, cookies, storage).
 - `sessions/<id>/` — `story.md`, `screenshots/`, `findings.json`, `logs/`.
 - `state.json` — session keyed by cwd.
@@ -233,6 +237,7 @@ Self-look (control == vision) needs nothing: the driver carries them already.
 ## One run per cwd — never a wedged project
 
 A forgotten `end_session` must not need the out-of-band CLI to recover:
+
 - `describe` reports `session { id, status, goal }` — the run this server holds
   (active OR the retained auto-ended snapshot). The way back to a lost id.
 - `start_debug({replace:true})` — opt-in takeover: ends the active run via
