@@ -64,6 +64,7 @@ one does the moving and asks — _"is the cup to my left?"_ — and acts on the 
 ## Config — model roles (free defaults, paid fallback)
 
 `.ui-debugger-mcp.json`:
+
 ```jsonc
 "models": {
   "driver":   "particle-ai/particle-1:free",          // fast guy — text, controls

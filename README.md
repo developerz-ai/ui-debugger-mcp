@@ -347,12 +347,14 @@ ui-debugger-mcp stop     # gracefully end the run (frees the browser + profile)
 **Chrome not found**
 The web adapter launches Chrome via the system PATH. Install Chrome/Chromium, or
 set `executablePath` in the project config (`.dz/…` or root):
+
 ```jsonc
 "web": { "adapter": "browser", "url": "...", "executablePath": "/usr/bin/chromium-browser" }
 ```
 
 **Session locked — "another run is active"**
 One Chrome profile = one run. If a previous run crashed without cleaning up:
+
 ```bash
 npx @developerz.ai/ui-debugger-mcp@latest stop   # graceful teardown
 ```
@@ -360,6 +362,7 @@ Or delete `./tmp/ui-debugger-mcp/<project>/state.json` and restart the MCP serve
 
 **Run times out with no findings**
 Default cap is 300 s. Raise it per-call:
+
 ```text
 start_debug { target: "web", goal: "...", timeout: 600 }
 ```
@@ -369,6 +372,7 @@ pattern.
 
 **`get_findings` returns empty `bugs[]` / `visual[]`**
 The run may still be in progress — use `wait` (ms) to long-poll:
+
 ```text
 get_findings { session_id: "...", wait: 30000 }
 ```

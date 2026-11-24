@@ -205,6 +205,7 @@ factory already returns an `Adapter` and the loop is adapter-blind.
 
 If your adapter needs a target-specific `open()` argument, check the builder's
 `openAddress` helper and its `adapter.open(...)` call, and extend that logic if needed:
+
 - Web receives the URL (the configured `url` or the per-run override).
 - Desktop receives the `window.title` hint, or an empty string when unset.
 - Android receives an empty string to boot/attach; the agent navigates to the app

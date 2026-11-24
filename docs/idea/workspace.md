@@ -104,6 +104,7 @@ generated for free from a run that already happened.
 counter suffix keeps two runs in the same second apart.
 
 Two properties, both load-bearing:
+
 - **Human-readable** — `ls sessions/` tells you when each run happened. The old
   epoch-ms ids (`1784985071909-0001`) needed a converter.
 - **Fixed-width** — byte order == chronological order, which is exactly what

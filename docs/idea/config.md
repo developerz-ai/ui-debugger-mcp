@@ -40,6 +40,7 @@ npx @developerz.ai/ui-debugger-mcp@latest init   # run in the project root
 ```
 
 `init` (idempotent — won't clobber existing files):
+
 1. creates the workspace dir `./tmp/ui-debugger-mcp/`
 2. writes a starter config — the free-model defaults + a `web` target stub
    (`http://localhost:3000`) — only if absent, at `.dz/ui-debugger/ui-debugger-mcp.json`
@@ -235,6 +236,7 @@ The server runs the web target one of two ways, picked by `cdpUrl`:
 | Use case        | normal local debugging                | a live/staging browser, a container, a remote CDP endpoint |
 
 Rules:
+
 - **Only launch/stop Chrome in managed mode.** If a `cdpUrl` is given, attach and
   drive it; do not touch its lifecycle or its profile.
 - `executablePath` lets the user point at a specific Chrome/Chromium binary
