@@ -4,7 +4,7 @@ Weekly checkup, Mondays 05:00 UTC, fired by `schedules: release-due`. It covers 
 
 ## Cadence: weekly, judged (owner, 2026-11-26)
 
-Only this Monday checkup cuts a release: at most one a week. A merge, a fix, a count of fixes or an interactive session never cuts one; a maintainer can still cut by hand. The only off-cycle release is `.dz/schedules/security-release.md`: a fix for a *published* first-tier advisory (GitHub Security Advisories, NVD, CISA KEV or the vendor's own) rated **high or critical (CVSS >= 7.0, or KEV-listed)** that affects what users install (the npm package and its runtime `dependencies`; not a `devDependencies`, test, `dummy/` fixture or docs-tooling package). Our own hardening with no published advisory waits for Monday.
+Only this Monday checkup cuts a release: at most one a week. A merge, a fix, a count of fixes or an interactive session never cuts one; a maintainer can still cut by hand. The only off-cycle release is `.dz/schedules/security-release.md`: a fix for a _published_ first-tier advisory (GitHub Security Advisories, NVD, CISA KEV or the vendor's own) rated **high or critical (CVSS >= 7.0, or KEV-listed)** that affects what users install (the npm package and its runtime `dependencies`; not a `devDependencies`, test, `dummy/` fixture or docs-tooling package). Our own hardening with no published advisory waits for Monday.
 
 ## Judge
 
@@ -26,15 +26,15 @@ jq -r .version package.json
 
 The pathspec names what reaches the published package (`files: [dist, README.md, LICENSE]`, built from `src/`). Tests, `dummy/`, docs and CI ship nothing.
 
-| Window | Do |
-|---|---|
-| a command above failed | no verdict: surface it, file nothing |
-| empty | nothing |
-| the stamped version is already ahead of `$last` | nothing: a release is in flight, watch `release.yml` |
-| the oldest shipping commit is under 24 h old | usually nothing: next week's checkup sees it |
-| `main`'s latest `ci.yml` push run is not `success` | nothing: `health` owns a red `main` |
-| a breaking change in the window | no release ask. If no open issue titled `Major release pending` exists, file one for a maintainer, with no release steps |
-| otherwise | judge it above; when a release is needed, one ask, **Release `<next>`**, listing the commits |
+| Window                                             | Do                                                                                                                       |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| a command above failed                             | no verdict: surface it, file nothing                                                                                     |
+| empty                                              | nothing                                                                                                                  |
+| the stamped version is already ahead of `$last`    | nothing: a release is in flight, watch `release.yml`                                                                     |
+| the oldest shipping commit is under 24 h old       | usually nothing: next week's checkup sees it                                                                             |
+| `main`'s latest `ci.yml` push run is not `success` | nothing: `health` owns a red `main`                                                                                      |
+| a breaking change in the window                    | no release ask. If no open issue titled `Major release pending` exists, file one for a maintainer, with no release steps |
+| otherwise                                          | judge it above; when a release is needed, one ask, **Release `<next>`**, listing the commits                             |
 
 `<next>`: a `feat` subject in the window is a minor, anything else a patch.
 

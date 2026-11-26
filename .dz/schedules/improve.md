@@ -6,12 +6,12 @@ Once a month, leave ui-debugger-mcp measurably better, so nobody has to touch it
 
 ## Signals
 
-| Signal | Command |
-|---|---|
-| the gate on fresh `main` | `bin/setup && bin/check` |
-| advisories | `bun audit --json`; act only on a package in runtime `dependencies` (`bun pm ls` shows the tree) |
-| dependency majors | `bun outdated`, and the Dependabot PRs closed red |
-| open bugs | `gh issue list --state open --label bug --json number,title,url` |
+| Signal                   | Command                                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------ |
+| the gate on fresh `main` | `bin/setup && bin/check`                                                                         |
+| advisories               | `bun audit --json`; act only on a package in runtime `dependencies` (`bun pm ls` shows the tree) |
+| dependency majors        | `bun outdated`, and the Dependabot PRs closed red                                                |
+| open bugs                | `gh issue list --state open --label bug --json number,title,url`                                 |
 
 Read a failing job's log before deciding anything. A red run whose log names a missing secret or a repository setting is the owner's to fix: escalate once, never delete the check or turn it into a green skip.
 

@@ -2,14 +2,14 @@
 
 Weekly checkup (Mondays 09:00 UTC) fired by `schedules: health`: the failures no issue or PR announces.
 
-| Signal | Command | Healthy |
-|---|---|---|
-| `main` is green | `gh run list --workflow ci.yml --branch main --event push --limit 1 --json conclusion,headSha,url`, then `git rev-parse origin/main` | `success` on the `origin/main` tip; a null conclusion or another sha is no verdict |
-| the last tag published | `t=$(git describe --tags --abbrev=0 --match 'v[0-9]*' origin/main); gh run list --workflow release.yml --limit 5 --json conclusion,headSha,headBranch,url` filtered to `headBranch == $t` | `success`; no run for that tag is no verdict |
-| npm carries it | `npm view @developerz.ai/ui-debugger-mcp version` against `${t#v}` | equal |
-| the MCP Registry carries it | `curl -fsS 'https://registry.modelcontextprotocol.io/v0/servers?search=io.github.developerz-ai/ui-debugger-mcp'` lists `${t#v}` | listed |
-| the stamped version is tagged | `jq -r .version package.json` against `$t` | equal, or an open release PR or in-flight run explains it |
-| Dependabot is not stuck | `gh pr list --app dependabot --state open --limit 100 --json number,updatedAt,statusCheckRollup` | no PR with failed checks and more than 7 days since `updatedAt` |
+| Signal                        | Command                                                                                                                                                                                   | Healthy                                                                            |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `main` is green               | `gh run list --workflow ci.yml --branch main --event push --limit 1 --json conclusion,headSha,url`, then `git rev-parse origin/main`                                                      | `success` on the `origin/main` tip; a null conclusion or another sha is no verdict |
+| the last tag published        | `t=$(git describe --tags --abbrev=0 --match 'v[0-9]*' origin/main); gh run list --workflow release.yml --limit 5 --json conclusion,headSha,headBranch,url` filtered to `headBranch == $t` | `success`; no run for that tag is no verdict                                       |
+| npm carries it                | `npm view @developerz.ai/ui-debugger-mcp version` against `${t#v}`                                                                                                                        | equal                                                                              |
+| the MCP Registry carries it   | `curl -fsS 'https://registry.modelcontextprotocol.io/v0/servers?search=io.github.developerz-ai/ui-debugger-mcp'` lists `${t#v}`                                                           | listed                                                                             |
+| the stamped version is tagged | `jq -r .version package.json` against `$t`                                                                                                                                                | equal, or an open release PR or in-flight run explains it                          |
+| Dependabot is not stuck       | `gh pr list --app dependabot --state open --limit 100 --json number,updatedAt,statusCheckRollup`                                                                                          | no PR with failed checks and more than 7 days since `updatedAt`                    |
 
 ## What to file
 
