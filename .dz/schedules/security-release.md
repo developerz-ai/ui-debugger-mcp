@@ -17,7 +17,7 @@ These are `.dz/schedules/release-due.md` § Decide's own commands and pathspec; 
 All four, each checked by you:
 
 1. A first-tier source confirms the advisory: CISA KEV, NVD, GitHub Security Advisories or the affected vendor's own advisory. Open it; a link in a commit is a pointer, not a confirmation.
-2. It names something the npm package ships: this code or a package in its production dependency tree, transitive included (`bun pm ls` shows the tree; a `dependencies` entry's own dependencies count). Something only `devDependencies`, a test, a `dummy/` fixture or docs tooling pulls in does not count. Confirm the release actually delivers the fixed version: `bun.lock` at the commit resolves it, and the package's published ranges let a fresh install pick it.
+2. It names something the npm package ships: this code or a package in its production dependency tree, transitive included (`bun pm ls --all` shows the tree; a `dependencies` entry's own dependencies count). Something only `devDependencies`, a test, a `dummy/` fixture or docs tooling pulls in does not count. Confirm the release delivers the fixed version to users: `bun.lock` does not reach an `npx`/`bunx` install, so `npm pack` the commit, `npm install --omit=dev` the tarball into an empty directory and check `npm ls <package>` resolves only unaffected versions. A fix that only the lockfile carries is not a fix for users: the package's own range must exclude the affected versions.
 3. It is rated **high or critical**: CVSS >= 7.0 in that source, or listed in CISA KEV. Medium and low wait for Monday.
 4. A commit since `$last` fixes it, and no release has carried that commit yet.
 
