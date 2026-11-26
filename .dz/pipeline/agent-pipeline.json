@@ -1,0 +1,4 @@
+{
+  "repo": "developerz-ai/ui-debugger-mcp",
+  "merge": { "reviewGate": "ci-only" }
+}

@@ -1,4 +1,6 @@
-# Weekly, with minor and patch updates grouped per ecosystem; a major update arrives on its own.
+# Weekly, grouped, quiet (owner, 2026-11-26): version updates Monday, minor and patch as one PR per
+# ecosystem; a major arrives on its own. Security updates open when an advisory lands, batched into
+# one `*-security` PR per ecosystem. The developerz.ai maintainer's own advisory watch is off.
 # The 14-day cooldown lets a compromised release get caught before it reaches us. Security updates
 # are unaffected.
 version: 2
@@ -9,23 +11,31 @@ updates:
       - "/dummy/web"
     schedule:
       interval: "weekly"
-      day: "tuesday"
+      day: "monday"
       time: "06:00"
     cooldown:
       default-days: 14
+    open-pull-requests-limit: 3
     groups:
       bun-minor-and-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+      bun-security:
+        applies-to: security-updates
+        patterns: ["*"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "tuesday"
+      day: "monday"
       time: "06:00"
     cooldown:
       default-days: 14
+    open-pull-requests-limit: 3
     groups:
       github-actions-minor-and-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+      github-actions-security:
+        applies-to: security-updates
+        patterns: ["*"]
