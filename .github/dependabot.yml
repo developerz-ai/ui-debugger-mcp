@@ -1,6 +1,6 @@
-# Weekly, grouped, quiet (owner, 2026-11-26): every ecosystem Monday; minor and patch updates as one
-# PR per ecosystem, security updates as one more; a major update arrives on its own. The
-# developerz.ai maintainer's own advisory watch is off, so this file is the dependency-advisory lane.
+# Weekly, grouped, quiet (owner, 2026-11-26): version updates Monday, minor and patch as one PR per
+# ecosystem; a major arrives on its own. Security updates open when an advisory lands, batched into
+# one `*-security` PR per ecosystem. The developerz.ai maintainer's own advisory watch is off.
 # The 14-day cooldown lets a compromised release get caught before it reaches us. Security updates
 # are unaffected.
 version: 2
