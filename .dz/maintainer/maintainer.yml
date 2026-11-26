@@ -12,6 +12,16 @@ pr:
   auto_merge_scope: own_and_dependency_bots
   # The two bots that review code here. Dependabot opens update PRs but reviews nothing.
   wait_for_other_bots: [coderabbit, copilot]
+  # A PR waiting on its author (red check, open thread, conflict) is closed after 60 days
+  # (owner, 2026-11-26: the open-source repos' 60-day stale rule).
+  close_awaiting_author_after_days: 60
+
+# Quiet issues are commented on, then closed, after 60 days; one waiting on its reporter for a
+# reproduction closes after 60 too (owner, 2026-11-26: the 60-day stale rule).
+triage:
+  stale_after_days: 60
+  stale_action: comment_then_close
+  close_unanswered_repro_after_days: 60
 
 handoff:
   # The bot scopes a qualified issue and hands it to the fleet without asking the reporter first.
@@ -39,7 +49,7 @@ release:
 # this long is tagged archive/<branch>/<date> at its last commit, then deleted.
 # false keeps every branch. See /docs/maintainer-yml.
 branches:
-  close_inactive_after_days: 14 # owner, 2026-11-26: two weeks idle, archive-tagged then deleted
+  close_inactive_after_days: 60 # owner, 2026-11-26: 60 days idle, archive-tagged then deleted
 
 # escalate: what stays with a human.
 #   - `always` is the schema default, written out so you can see it.
