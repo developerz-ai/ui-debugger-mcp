@@ -27,8 +27,9 @@ review:
   approval: false
 
 release:
-  # release.yml owns the release lane (`on: release: published` -> npm + MCP registry), so there is
-  # no release manager and no channel for the agent to publish on.
+  # release.yml owns the publish (`on: release: published` -> npm + MCP registry), so there is no
+  # release manager and no channel for the agent to publish on. Whether to release is the weekly
+  # `release-due` checkup's call (.dz/schedules/release-due.md): a merge never cuts one.
   manager: "none"
   channels: []
 
@@ -38,7 +39,7 @@ release:
 # this long is tagged archive/<branch>/<date> at its last commit, then deleted.
 # false keeps every branch. See /docs/maintainer-yml.
 branches:
-  close_inactive_after_days: 60
+  close_inactive_after_days: 14 # owner, 2026-11-26: two weeks idle, archive-tagged then deleted
 
 # escalate: what stays with a human.
 #   - `always` is the schema default, written out so you can see it.
@@ -53,3 +54,30 @@ escalate:
 # improvement idea. `full` lets it file ideas too; `off` stops the survey.
 scout:
   survey: broken_only
+
+# devops: off (owner, 2026-11-26): one PR per advisory was noise; Dependabot batches them weekly
+# instead (.github/dependabot.yml `*-security` groups).
+devops:
+  watch: off
+
+# The checkups nothing else triggers (owner, 2026-11-26: releases weekly and judged, routine
+# maintenance weekly, improvement monthly). Hours offset from the rest of the fleet.
+schedules:
+  - name: release-due
+    days: [mon]
+    hours_utc: [5]
+    brief_file: .dz/schedules/release-due.md
+  # The one exception: a published high/critical advisory fix that reaches users. Files an ask only.
+  - name: security-release
+    days: [tue, wed, thu, fri, sat, sun]
+    hours_utc: [6]
+    brief_file: .dz/schedules/security-release.md
+  - name: health
+    days: [mon]
+    hours_utc: [9]
+    brief_file: .dz/schedules/health.md
+  - name: improve
+    days: [mon]
+    weeks_of_month: [1]
+    hours_utc: [11]
+    brief_file: .dz/schedules/improve.md
