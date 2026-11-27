@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Release workflow waits (capped at 5 min) for npm to serve the new version
+  before registering it on the MCP Registry — 1.11.0's first run hit the
+  registry's 404 on a version npm had just published.
+
 ## [1.11.0] - 2026-11-27
 
 A multi-area quality sweep (#215): secrets kept out of the model's context and

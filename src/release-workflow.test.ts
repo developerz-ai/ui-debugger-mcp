@@ -286,3 +286,21 @@ test('both publication routes run through the same gated publish job', () => {
   expect(steps.length).toBeGreaterThan(0);
   expect(validationStep()).toBeDefined();
 });
+
+test('the registry publish waits (capped) for npm to serve the version first', () => {
+  const npm = mustFind('the npm publish step', npmPublishStep);
+  const registry = mustFind('the registry publish step', registryPublishStep);
+  const wait = mustFind('the npm propagation wait', () =>
+    steps.find((step) => step.run.includes('npm view') && step.run.includes('DEADLINE')),
+  );
+  // Between the two publishes: the registry resolves the npm version it registers.
+  expect(npm.line).toBeLessThan(wait.line);
+  expect(wait.line).toBeLessThan(registry.line);
+  // ONE wall-clock cap over lookups and sleeps; each lookup itself bounded.
+  expect(wait.run).toContain('DEADLINE=$((SECONDS + 300))');
+  expect(wait.run).toContain('timeout 30 npm view');
+  // Fatal on expiry, and the step can't be made skippable or non-fatal.
+  expect(wait.run).toMatch(/::error::.*\n?.*exit 1\s*$/);
+  expect(wait.continueOnError).toBe('');
+  expect(wait.if).toBe('');
+});
