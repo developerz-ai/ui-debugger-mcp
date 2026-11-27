@@ -33,7 +33,13 @@
 import type { ConsoleMessage, Frame, Page, Request, Response } from 'playwright-core';
 import type { CaptureSink, ConsoleEntry, LogQuery, NetworkEntry } from '../contract.js';
 import { capToLimit } from '../limit.js';
-import { BODY_WAIT_MS, readBodyWithin, readHeaders, withTimeout } from './exchange-read.js';
+import {
+  BODY_READ_MAX_BYTES,
+  BODY_WAIT_MS,
+  readBodyWithin,
+  readHeaders,
+  withTimeout,
+} from './exchange-read.js';
 import { filterConsole, filterNetwork } from './log-filters.js';
 import {
   formatConsoleLine,
@@ -168,6 +174,8 @@ export class CdpCapture {
   readonly #entryOf = new WeakMap<Request, NetworkEntry>();
   /** Entries whose log line was already streamed — the line lands once, when enrichment settles. */
   readonly #logged = new WeakSet<NetworkEntry>();
+  /** Request → its sanitized body, computed ONCE: every network read re-renders pending rows. */
+  readonly #requestBodies = new WeakMap<Request, string | undefined>();
   /** Detacher thunks captured at `start`, replayed at `stop`. */
   readonly #detachers: Array<() => void> = [];
   #started = false;
@@ -341,8 +349,21 @@ export class CdpCapture {
     return started === undefined ? undefined : at - started;
   }
 
-  /** The payload a request carried, capped — API traffic only (see {@link BODY_RESOURCE_TYPES}). */
+  /**
+   * The payload a request carried, redacted and capped — API traffic only (see
+   * {@link BODY_RESOURCE_TYPES}). Memoized per request, and an upload past
+   * {@link BODY_READ_MAX_BYTES} is never parsed: redaction needs the WHOLE body,
+   * and re-parsing a multi-MB upload on every poll of a pending row would block
+   * the event loop — so it is a size marker, never its raw (unredacted) prefix.
+   */
   #requestBodyOf(request: Request): string | undefined {
+    if (this.#requestBodies.has(request)) return this.#requestBodies.get(request);
+    const body = this.#sanitizedRequestBody(request);
+    this.#requestBodies.set(request, body);
+    return body;
+  }
+
+  #sanitizedRequestBody(request: Request): string | undefined {
     if (!BODY_RESOURCE_TYPES.has(request.resourceType())) return undefined;
     // `postData()` throws on some intercepted/streamed requests; a missing body is
     // never worth failing a capture over.
@@ -352,8 +373,10 @@ export class CdpCapture {
     } catch {
       return undefined;
     }
+    if (!data) return undefined;
+    if (data.length > BODY_READ_MAX_BYTES) return `<body not read, ${data.length} chars>`;
     // Redact BEFORE truncating: a cut JSON body no longer parses, so its secret would survive.
-    return data ? truncateBody(redactBody(data)) : undefined;
+    return truncateBody(redactBody(data));
   }
 
   readonly #onRequestFailed = (request: Request): void => {

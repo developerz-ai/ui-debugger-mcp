@@ -98,39 +98,51 @@ export function redactUrl(url: string): string {
 
 /**
  * A body key whose VALUE is a credential, matched on the key with case and
- * `_`/`-` folded away and any `user[password]` bracket path reduced to its last
- * segment — so `password`, `new_password`, `accessToken`, `client-secret`,
- * `x_api_key` all match. A suffix rule, not a list: a login body names its
+ * `_`/`-` folded away, and on EVERY segment of a bracket path — so `password`,
+ * `new_password`, `accessToken`, `client-secret`, `x_api_key`, `user[password]`
+ * and the array field `password[]` all match. A suffix rule, not a list: a login body names its
  * secret a dozen ways, and over-masking a pagination `nextPageToken` is the
  * cheap side of that trade.
  */
 const SENSITIVE_KEY = /(password|passwd|pwd|secret|token|apikey|authorization|otp|passcode)$/;
 
 function isSensitiveKey(key: string): boolean {
-  const last = /\[([^\]]*)\]$/.exec(key)?.[1] ?? key;
-  return SENSITIVE_KEY.test(last.toLowerCase().replace(/[-_]/g, ''));
+  return (key.match(/[^[\]]+/g) ?? []).some((segment) =>
+    SENSITIVE_KEY.test(segment.toLowerCase().replace(/[-_]/g, '')),
+  );
 }
 
 const marker = (length: number): string => `<redacted, ${length} chars>`;
 
-/** Mask credential-keyed values anywhere in a parsed JSON value; `true` if any was masked. */
+/**
+ * Mask credential-keyed values anywhere in a parsed JSON value; `true` if ANY
+ * credential key was seen — masked or not (a `null` one). The caller must then
+ * re-serialize: `JSON.parse` keeps only the LAST of duplicate keys, so the raw
+ * text of `{"password":"hunter2","password":null}` still holds the secret the
+ * parsed value no longer shows.
+ */
 function maskJson(value: unknown): boolean {
   if (value === null || typeof value !== 'object') return false;
-  let masked = false;
+  let seen = false;
   for (const [key, child] of Object.entries(value)) {
-    if (isSensitiveKey(key) && child !== null && typeof child !== 'boolean') {
+    if (isSensitiveKey(key)) {
+      seen = true;
+      if (child === null || typeof child === 'boolean') continue;
       const text = typeof child === 'object' ? JSON.stringify(child) : String(child);
       (value as Record<string, unknown>)[key] = marker(text.length);
-      masked = true;
     } else if (maskJson(child)) {
-      masked = true;
+      seen = true;
     }
   }
-  return masked;
+  return seen;
 }
 
-/** `a=1&b=2` — a form-urlencoded body, not prose that happens to hold an `=`. */
-const FORM_BODY = /^[^=&\s]+=[^&\s]*(&[^=&\s]+=[^&\s]*)*$/;
+/**
+ * `a=1&b=2` — a form-urlencoded body, not prose that happens to hold an `=`.
+ * Lenient where the format is: empty pairs (`a=1&&b=2`, a trailing `&`) and a
+ * bare key (`remember`) are valid; raw whitespace never is (it is `+`/`%20`).
+ */
+const FORM_BODY = /^&*[^=&\s]+(=[^&\s]*)?(&+[^=&\s]+(=[^&\s]*)?)*&*$/;
 
 /** A form key as the server reads it (`user%5Bpassword%5D` → `user[password]`). */
 function formKey(raw: string): string {
@@ -162,15 +174,17 @@ export function redactBody(body: string): string {
     return maskJson(parsed) ? JSON.stringify(parsed) : body;
   }
   if (!FORM_BODY.test(trimmed)) return body;
-  return trimmed
+  let masked = false;
+  const out = trimmed
     .split('&')
     .map((pair) => {
       const eq = pair.indexOf('=');
-      return isSensitiveKey(formKey(pair.slice(0, eq)))
-        ? `${pair.slice(0, eq)}=${marker(pair.length - eq - 1)}`
-        : pair;
+      if (eq === -1 || !isSensitiveKey(formKey(pair.slice(0, eq)))) return pair;
+      masked = true;
+      return `${pair.slice(0, eq)}=${marker(pair.length - eq - 1)}`;
     })
     .join('&');
+  return masked ? out : body;
 }
 
 // --- Normalizers ------------------------------------------------------------

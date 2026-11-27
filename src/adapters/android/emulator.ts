@@ -23,6 +23,12 @@ export type SpawnEmulator = (bin: string, args: string[]) => ChildProcess;
 export class ManagedEmulator {
   readonly #spawn: SpawnEmulator;
   #child: ChildProcess | null = null;
+  /**
+   * The process group we own. Outlives the child's liveness: a wrapper launcher may
+   * exit while the emulator it backgrounded keeps running in the same group, so the
+   * pid is kept until {@link ManagedEmulator.terminate} has reaped the group.
+   */
+  #group: number | null = null;
   /** Why the process is unusable (launch failure / early exit), or null. */
   #down: string | null = null;
 
@@ -59,6 +65,7 @@ export class ManagedEmulator {
       this.#child = null;
     });
     this.#child = child;
+    this.#group = child.pid ?? null;
   }
 
   /**
@@ -66,8 +73,8 @@ export class ManagedEmulator {
    * confirmed — a dropped handle leaves a SIGTERM-ignoring emulator orphaned for good.
    */
   async terminate(): Promise<void> {
-    const pid = this.#child?.pid;
-    if (pid !== undefined) await terminateGroup(pid);
+    if (this.#group !== null) await terminateGroup(this.#group);
+    this.#group = null;
     this.#child = null;
   }
 }
@@ -117,6 +124,9 @@ export async function awaitBooted(
         return pendingStateOrThrow(error);
       })
     ).trim();
+    // The emulator may have died while a successful reply was in flight.
+    const died = downError();
+    if (died) throw died;
     if (Date.now() >= deadline) {
       throw new AdapterError(`android: ${label} did not boot within ${ctx.bootWaitMs}ms`);
     }

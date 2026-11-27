@@ -252,3 +252,21 @@ test('redactBody leaves everything without a credential byte-for-byte untouched'
     expect(redactBody(body)).toBe(body);
   }
 });
+
+test('redactBody masks array fields and every bracket segment (`password[]`, `creds[password][0]`)', () => {
+  expect(redactBody('password[]=hunter2&user=bob')).toBe('password[]=<redacted, 7 chars>&user=bob');
+  expect(redactBody('password%5B%5D=pw')).toBe('password%5B%5D=<redacted, 2 chars>');
+  expect(redactBody('creds[password][0]=pw')).toBe('creds[password][0]=<redacted, 2 chars>');
+});
+
+test('redactBody accepts every valid form shape: trailing `&`, empty pairs, bare keys', () => {
+  expect(redactBody('email=a&password=hunter2&')).toBe('email=a&password=<redacted, 7 chars>&');
+  expect(redactBody('&password=pw&&remember')).toBe('&password=<redacted, 2 chars>&&remember');
+  expect(redactBody('remember')).toBe('remember');
+});
+
+test('redactBody never returns a duplicate-key JSON body whose parse hid the secret', () => {
+  const out = redactBody('{"password":"hunter2","password":null}');
+  expect(out).not.toContain('hunter2');
+  expect(out).toBe('{"password":null}');
+});

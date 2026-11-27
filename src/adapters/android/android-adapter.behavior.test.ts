@@ -801,12 +801,7 @@ describe('AndroidAdapter.waitFor abort', () => {
   test('a mid-wait abort rejects AbortError promptly, stops polling and drops its listener', async () => {
     const { adapter, ui } = makeAdapter();
     const controller = new AbortController();
-    const removed: string[] = [];
-    const real = controller.signal.removeEventListener.bind(controller.signal);
-    controller.signal.removeEventListener = ((type: string, ...rest: never[]) => {
-      removed.push(type);
-      return (real as (t: string, ...r: never[]) => void)(type, ...rest);
-    }) as typeof controller.signal.removeEventListener;
+    const live = trackListeners(controller.signal);
     ui.setSlow(100);
     const started = Date.now();
     const wait = adapter.waitFor({ query: 'Nope', timeout: 30_000, signal: controller.signal });
@@ -814,7 +809,7 @@ describe('AndroidAdapter.waitFor abort', () => {
     const err = await wait.catch((e: unknown) => e);
     expect((err as Error).name).toBe('AbortError');
     expect(Date.now() - started).toBeLessThan(90);
-    expect(removed).toContain('abort');
+    expect(live.size).toBe(0);
     // The loop stops after the in-flight dump: no further polls.
     await new Promise((r) => setTimeout(r, 500));
     expect(ui.calls).toBe(1);
@@ -823,8 +818,34 @@ describe('AndroidAdapter.waitFor abort', () => {
   test('a wait that succeeds removes its abort listener', async () => {
     const { adapter } = makeAdapter({ nodes: [makeNode()] });
     const controller = new AbortController();
+    const live = trackListeners(controller.signal);
     await adapter.waitFor({ query: 'Save', signal: controller.signal });
-    // Aborting afterwards must be inert (no unhandled rejection, no throw).
-    controller.abort();
+    expect(live.size).toBe(0);
+  });
+
+  test('a wait that times out removes its abort listener', async () => {
+    const { adapter } = makeAdapter();
+    const controller = new AbortController();
+    const live = trackListeners(controller.signal);
+    await adapter
+      .waitFor({ query: 'Nope', timeout: 20, signal: controller.signal })
+      .catch(() => undefined);
+    expect(live.size).toBe(0);
   });
 });
+
+/** Registered-listener identities on `signal` — what is still attached right now. */
+function trackListeners(signal: AbortSignal): Set<unknown> {
+  const live = new Set<unknown>();
+  const add = signal.addEventListener.bind(signal);
+  const remove = signal.removeEventListener.bind(signal);
+  signal.addEventListener = ((type: string, fn: unknown, opts?: unknown) => {
+    live.add(fn);
+    (add as (...a: unknown[]) => void)(type, fn, opts);
+  }) as typeof signal.addEventListener;
+  signal.removeEventListener = ((type: string, fn: unknown, opts?: unknown) => {
+    live.delete(fn);
+    (remove as (...a: unknown[]) => void)(type, fn, opts);
+  }) as typeof signal.removeEventListener;
+  return live;
+}

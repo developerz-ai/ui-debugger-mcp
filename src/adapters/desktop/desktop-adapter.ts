@@ -229,7 +229,9 @@ export class DesktopAdapter implements Adapter {
       const rankDeadline = Date.now() + rankMs;
       let candidates: Node[];
       try {
-        candidates = await this.#readNodes({ ...opts, limit: FIND_CANDIDATES }, rankMs);
+        // `partial`: a walk cut off by the cap still holds the matches it reached —
+        // an exact hit among them must win over the earlier substring one.
+        candidates = await this.#readNodes({ ...opts, limit: FIND_CANDIDATES }, rankMs, true);
       } catch (error) {
         if (error instanceof AdapterError && Date.now() >= rankDeadline) return first;
         throw error;
@@ -246,8 +248,8 @@ export class DesktopAdapter implements Adapter {
     return this.#run('readState', () => this.#readNodes(opts, this.#readWalkMs));
   }
 
-  /** One AT-SPI read shaped onto contract nodes, its walk capped at `walkMs` (loud on a partial tree). */
-  async #readNodes(opts: Query, walkMs: number): Promise<Node[]> {
+  /** One AT-SPI read shaped onto contract nodes, its walk capped at `walkMs` (loud on a partial tree unless `partial`). */
+  async #readNodes(opts: Query, walkMs: number, partial = false): Promise<Node[]> {
     const scope = this.#readScope();
     const region = opts.within !== undefined ? await this.#regionBounds(opts.within) : undefined;
     // A bounded query (role/name) + maxNodes let the AT-SPI walk skip describing
@@ -272,7 +274,7 @@ export class DesktopAdapter implements Adapter {
     const deadline = Date.now() + walkMs;
     const nodes = await this.#atspi.readTree({ query, maxNodes, scope, visibleOnly, deadline });
     // A walk that stopped on the clock (not on `maxNodes`) returned a partial tree.
-    if (Date.now() >= deadline && nodes.length < maxNodes) {
+    if (!partial && Date.now() >= deadline && nodes.length < maxNodes) {
       throw new AdapterError(
         `desktop: readState walk hit its ${walkMs}ms cap after ${nodes.length} nodes — ` +
           'the tree is too large to read whole; narrow it with `query`, `filters` or `within`',

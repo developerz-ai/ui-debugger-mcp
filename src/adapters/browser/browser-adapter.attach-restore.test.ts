@@ -15,10 +15,12 @@
  */
 
 import { expect, test } from 'bun:test';
+import type { Page } from 'playwright-core';
 import type { WebTarget } from '../../config/schema.js';
 import { AdapterError } from '../../errors.js';
 import { BrowserAdapter } from './browser-adapter.js';
 import { NAV_TIMEOUT_MS } from './launch.js';
+import { handBackTab } from './lifecycle.js';
 
 /** The injectable `chromium` seam's type, lifted off `BrowserAdapter.create` itself. */
 type Launcher = NonNullable<Parameters<typeof BrowserAdapter.create>[0]['chromium']>;
@@ -380,4 +382,11 @@ test('closing the opened tab is best-effort — a tab the owner already closed n
 
   await expect(adapter.close()).resolves.toBeUndefined();
   expect(events).toEqual(['browser.close']);
+});
+
+test('a tab close the browser never answers is abandoned at the cap — the hand-back returns', async () => {
+  const page = { close: () => new Promise<void>(() => undefined) } as unknown as Page;
+  const started = Date.now();
+  await handBackTab({ page, close: true }, 30);
+  expect(Date.now() - started).toBeLessThan(500);
 });

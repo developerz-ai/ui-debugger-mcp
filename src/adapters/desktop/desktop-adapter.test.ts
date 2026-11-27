@@ -944,3 +944,48 @@ test('find keeps its first hit when the exact-name ranking walk runs out of time
   expect((await adapter.find({ query: 'Save' }))?.name).toBe('Save As');
   expect(calls).toBe(2);
 });
+
+test('find uses an exact hit the ranking walk reached before its cap expired', async () => {
+  let calls = 0;
+  class RankPartialAtspi implements AtspiSource {
+    async readTree(): Promise<AtspiNode[]> {
+      calls += 1;
+      if (calls === 1) return [atspiNode({ name: 'Save As' })];
+      await new Promise((resolve) => setTimeout(resolve, 40)); // outlives the cap
+      return [atspiNode({ name: 'Save As' }), atspiNode({ name: 'Save' })];
+    }
+  }
+  const adapter = DesktopAdapter.create({
+    config,
+    atspi: new RankPartialAtspi(),
+    input: new FakePointer(),
+    capture: new FakeCapture(),
+    readWalkMs: 15,
+  });
+  expect((await adapter.find({ query: 'Save' }))?.name).toBe('Save');
+});
+
+test('close never signals the group of a launch that exited leaving it empty', async () => {
+  // An empty group's number may be reused by an unrelated group; only a group that
+  // still has members is worth remembering.
+  const adapter = DesktopAdapter.create({
+    config: { adapter: 'desktop', launch: 'true', window: { title: 'App' } },
+    atspi: new FakeAtspi([]),
+    input: new FakePointer(),
+    capture: new FakeCapture(),
+  });
+  await adapter.open('App');
+  await new Promise((resolve) => setTimeout(resolve, 200)); // let the leader's exit land
+  const realKill = process.kill;
+  const groupSignals: Array<number> = [];
+  process.kill = ((pid: number, signal?: string | number) => {
+    if (pid < 0 && signal !== 0) groupSignals.push(pid);
+    return realKill(pid, signal as never);
+  }) as typeof process.kill;
+  try {
+    await adapter.close();
+  } finally {
+    process.kill = realKill;
+  }
+  expect(groupSignals).toEqual([]);
+});

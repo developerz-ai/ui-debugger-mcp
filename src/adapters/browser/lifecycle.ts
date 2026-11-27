@@ -25,6 +25,7 @@ import { AdapterError } from '../../errors.js';
 import { capWait } from '../budget.js';
 import type { CaptureSink } from './cdp.js';
 import { CdpCapture } from './cdp.js';
+import { withTimeout } from './exchange-read.js';
 import {
   closeOnFailure,
   createFailure,
@@ -189,17 +190,24 @@ export type TabHandBack = { page: Page; url: string } | { page: Page; close: tru
  * and neither a wedged `goto` nor a tab the owner closed mid-run — reading a dead
  * handle's address throws — may fail the teardown or skip the disconnect that
  * follows (same best-effort posture as `closeOnFailure` in `launch.ts`).
- * `RESTORE_TIMEOUT_MS` caps the wait — teardown has no run budget to shorten.
+ * `waitMs` (default `RESTORE_TIMEOUT_MS`) caps BOTH waits — teardown has no run
+ * budget to shorten, and `page.close()` has no timeout of its own: a browser that
+ * keeps the socket open but never answers would otherwise block the disconnect.
  */
-export async function handBackTab(handBack: TabHandBack | null): Promise<void> {
+export async function handBackTab(
+  handBack: TabHandBack | null,
+  waitMs: number = RESTORE_TIMEOUT_MS,
+): Promise<void> {
   if (!handBack) return;
   try {
     if ('close' in handBack) {
-      await handBack.page.close();
+      const closing = handBack.page.close();
+      closing.catch(() => undefined); // abandoned past the cap: never unhandled
+      await withTimeout(closing, waitMs);
       return;
     }
     if (handBack.page.url() === handBack.url) return;
-    await handBack.page.goto(handBack.url, { timeout: RESTORE_TIMEOUT_MS });
+    await handBack.page.goto(handBack.url, { timeout: waitMs });
   } catch {
     // Best-effort only — the caller's disconnect must still happen.
   }

@@ -7,7 +7,7 @@
 
 import { type ChildProcess, spawn } from 'node:child_process';
 import { AdapterError } from '../../errors.js';
-import { terminateGroup } from './proc.js';
+import { groupAlive, terminateGroup } from './proc.js';
 
 /**
  * Appended to the early-exit diagnosis when the launch command itself exits (code
@@ -65,7 +65,10 @@ export class ManagedApp {
         // and `stop` never kills a recycled process group.
         if (this.#child?.proc === proc) {
           this.#child = null;
-          this.#lingering = proc.pid ?? null;
+          // Remember the group only while it still has members: a pgid cannot be
+          // reused while one lives, but an EMPTY group's number can name an unrelated
+          // group by the time `stop` signals it.
+          this.#lingering = proc.pid !== undefined && groupAlive(proc.pid) ? proc.pid : null;
         }
         reject(
           new AdapterError(

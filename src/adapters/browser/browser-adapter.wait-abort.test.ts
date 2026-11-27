@@ -29,8 +29,8 @@ function timeoutError(ms: number): Error {
  * A managed adapter over one page whose selector never appears (`matches: false`)
  * or appears at once, and whose networkidle wait hangs until its timeout.
  */
-async function adapterWith(opts: { matches: boolean }) {
-  const calls = { frameWaits: 0 };
+async function adapterWith(opts: { matches: boolean; hold?: Promise<void> }) {
+  const calls = { frameWaits: 0, loadStateWaits: 0 };
   const frame = {
     parentFrame: () => null,
     isDetached: () => false,
@@ -38,6 +38,7 @@ async function adapterWith(opts: { matches: boolean }) {
       first: () => ({
         waitFor: async ({ timeout }: { timeout: number }) => {
           calls.frameWaits += 1;
+          if (opts.hold) await opts.hold;
           if (opts.matches) return;
           await Bun.sleep(timeout);
           throw timeoutError(timeout);
@@ -51,6 +52,7 @@ async function adapterWith(opts: { matches: boolean }) {
     url: () => 'about:blank',
     frames: () => [frame],
     waitForLoadState: async (_state: string, { timeout }: { timeout: number }) => {
+      calls.loadStateWaits += 1;
       await Bun.sleep(timeout);
       throw timeoutError(timeout);
     },
@@ -150,4 +152,24 @@ test('the abort listener is removed on success and on timeout too', async () => 
     .catch((e: unknown) => e);
   expect(error).toBeInstanceOf(AdapterError); // an expiry stays an ordinary adapter failure
   expect(late.live.size).toBe(0);
+});
+
+test('a selector that resolves AFTER the abort never starts the networkidle phase', async () => {
+  let release = (): void => undefined;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const { adapter, calls } = await adapterWith({ matches: true, hold });
+  const controller = new AbortController();
+  const waiting = adapter
+    .waitFor({ query: '#x', networkIdle: true, timeout: 10_000, signal: controller.signal })
+    .catch((e: unknown) => e);
+  await Bun.sleep(10);
+  controller.abort();
+  expect(((await waiting) as Error).name).toBe('AbortError');
+
+  release(); // the abandoned selector wait now succeeds…
+  await Bun.sleep(20);
+  expect(calls.frameWaits).toBe(1);
+  expect(calls.loadStateWaits).toBe(0); // …and must not open a new Playwright wait
 });

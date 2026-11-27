@@ -112,3 +112,55 @@ describe('managed boot: failure releases the emulator', () => {
     }
   });
 });
+
+describe('managed boot: late emulator death', () => {
+  test('an emulator that dies while getprop answers 1 is not marked booted', async () => {
+    const child = makeFakeEmulator(undefined);
+    const adb: Adb = {
+      shell: async () => {
+        child.emit('exit', 1, null);
+        return '1';
+      },
+      execOut: async () => new Uint8Array(),
+      adb: async (args) => (args[0] === 'get-state' ? 'device' : ''),
+    };
+    const err = await managed(adb, () => child)
+      .open('')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as AdapterError).message).toContain('exited before boot');
+  });
+});
+
+describe('managed boot: wrapper exits, group survives', () => {
+  test('a failed open still reaps the group after the launcher process exited', async () => {
+    // A wrapper that backgrounds the real emulator in its own group and exits.
+    const child = spawn('sh', ['-c', 'sleep 60 & echo $!; exit 0'], {
+      detached: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    let sleeper = 0;
+    child.stdout?.on('data', (d) => {
+      sleeper = Number(String(d).trim());
+    });
+    const adb: Adb = {
+      shell: async () => '0',
+      execOut: async () => new Uint8Array(),
+      adb: async (args) => (args[0] === 'get-state' ? 'unknown' : ''),
+    };
+    try {
+      const err = await managed(adb, () => child, 2000)
+        .open('')
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(AdapterError);
+      expect(sleeper).toBeGreaterThan(0);
+      expect(() => process.kill(sleeper, 0)).toThrow();
+    } finally {
+      try {
+        process.kill(-(child.pid as number), 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+  });
+});

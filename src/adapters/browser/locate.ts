@@ -74,12 +74,16 @@ export async function waitAcrossFrames(
       const slice = Math.min(WAIT_SLICE_MS, Math.max(1, deadline - Date.now()));
       try {
         await frame.locator(selector).first().waitFor({ state: 'visible', timeout: slice });
-        return;
       } catch (error) {
         // Not-here-yet (a slice timing out) and a frame that vanished are both
         // "try the next one"; a bad selector is the caller's mistake — fail loud.
         if (!isTimeout(error) && !isFrameGone(error, frame.isDetached())) throw error;
+        continue;
       }
+      // Found — but a match that lands AFTER an abort must not let the caller go on
+      // to its next phase (a networkidle wait) for a run that already ended.
+      if (signal?.aborted) throw abortError(signal);
+      return;
     }
   } while (Date.now() < deadline);
   if (signal?.aborted) throw abortError(signal);
