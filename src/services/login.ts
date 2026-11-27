@@ -220,7 +220,7 @@ export async function performLogin(adapter: Adapter, options: LoginOptions): Pro
       }
       const wait = capWait(NAVIGATION_SETTLE_MS, remainingMs(deadline));
       await assertAlreadySignedIn(adapter, options, key, node, wait);
-      const step = `profile already signed in as "${name}" (pre-run, no form submitted) → ${node}`;
+      const step = `profile already signed in as "${name}" ('expect' marker shown; pre-run, no form submitted) → ${node}`;
       await log(`auth: ${step}`);
       return [...steps, { step, ok: true, note }];
     }

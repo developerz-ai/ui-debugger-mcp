@@ -14,7 +14,7 @@ import { createSecretRedactor } from '../../redact.js';
 import type { EvidenceRecorder } from './look.js';
 import { createObserveTool, ObserveInputSchema, runObserve } from './observe.js';
 import { type FindingsWriter, runReport } from './report.js';
-import { resolveTargetRef } from './target-refs.js';
+import { resolveTargetRef, targetRefFor } from './target-refs.js';
 import { type ActTrail, createActTrail } from './trail.js';
 import { coerceWithin } from './tree-targets.js';
 
@@ -904,17 +904,18 @@ test('a redacted tree read scrubs persona values from value, name, frame AND the
   // The node stays addressable through an opaque reference that resolves, for
   // THIS adapter only, back to the real selector.
   const ref = res.nodes[1]?.target ?? '';
-  expect(ref).toMatch(/^ref=\d+$/);
+  expect(ref).toBe('@@ref:1');
   expect(resolveTargetRef(adapter, ref)).toBe('role=button[name="Account hunter2" i]');
   // Re-reading hands out the SAME reference — the registry does not grow per read.
   const again = await runObserve(adapter, recorder(), { kind: 'tree' }, REDACT);
   if (again.kind !== 'tree') throw new Error('expected tree result');
   expect(again.nodes[1]?.target).toBe(ref);
-  // A reference from another run's adapter, or one never issued, fails loud.
-  expect(() => resolveTargetRef(fakeAdapter({}).adapter, ref)).toThrow(AgentError);
-  expect(resolveTargetRef(adapter, 'role=button[name="Save" i]')).toBe(
-    'role=button[name="Save" i]',
-  );
+  // Only the EXACT string this adapter issued resolves. Another run's adapter, a
+  // reference nobody issued, and look-alike plain selectors all pass through.
+  expect(resolveTargetRef(fakeAdapter({}).adapter, ref)).toBe(ref);
+  for (const plain of ['@@ref:2', 'ref=1', 'aria-ref=1', ' @@ref:1', '@@ref:01', 'text=@@ref:1']) {
+    expect(resolveTargetRef(adapter, plain)).toBe(plain);
+  }
 });
 
 test('observe resolves an opaque reference passed back as query or within', async () => {
@@ -931,4 +932,13 @@ test('observe resolves an opaque reference passed back as query or within', asyn
   await runObserve(adapter, recorder(), { kind: 'tree', query: ref, within: ref }, REDACT);
   expect(rec.readState?.query).toBe('role=button[name="Account hunter2" i]');
   expect(rec.readState?.within).toBe('role=button[name="Account hunter2" i]');
+});
+
+test('issuing references stays cheap and stable across many distinct selectors', async () => {
+  const { adapter } = fakeAdapter({});
+  const refs = Array.from({ length: 2000 }, (_, i) => targetRefFor(adapter, `text=secret ${i}`));
+  expect(new Set(refs).size).toBe(2000);
+  // Re-issuing returns the same reference, and each resolves to its own selector.
+  expect(targetRefFor(adapter, 'text=secret 1234')).toBe(refs[1234] as string);
+  expect(resolveTargetRef(adapter, refs[1999] as string)).toBe('text=secret 1999');
 });

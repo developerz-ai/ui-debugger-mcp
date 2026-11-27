@@ -897,10 +897,10 @@ test('an opaque ref target resolves to the real selector at the adapter — the 
   expect(calls.find[0]?.query).toBe('role=button[name="Account hunter2" i]');
   expect(JSON.stringify(res)).not.toContain('hunter2');
   expect(res.label).toBe('click button "Account <redacted, 7 chars>"');
-  // A reference nobody issued fails loud, naming only the reference.
-  await expect(execute({ action: 'click', target: 'ref=99' })).rejects.toThrow(
-    /unknown target reference "ref=99"/,
-  );
+  // A plain selector that merely LOOKS like a reference reaches the adapter untouched.
+  await execute({ action: 'click', target: 'ref=1' });
+  await execute({ action: 'click', target: '@@ref:99' });
+  expect(calls.find.slice(1).map((q) => q.query)).toEqual(['ref=1', '@@ref:99']);
   // `switch_tab` targets are tab indexes, never references.
-  await expect(execute({ action: 'switch_tab', target: 'ref=1' })).rejects.toThrow(/switch_tab/);
+  await expect(execute({ action: 'switch_tab', target: ref })).rejects.toThrow(/switch_tab/);
 });

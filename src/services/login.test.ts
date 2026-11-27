@@ -367,8 +367,17 @@ test('the sole persona on an already-signed-in profile is accepted, with no form
   const { adapter, calls } = bounced((q) => q === '#account-menu');
   const steps = await performLogin(adapter, PROVABLE);
   expect(steps.at(-1)?.step).toBe(
-    'profile already signed in as "admin" (pre-run, no form submitted) → http://localhost:5173/dashboard',
+    `profile already signed in as "admin" ('expect' marker shown; pre-run, no form submitted) → http://localhost:5173/dashboard`,
   );
+  expect(calls.some((c) => c.fn === 'type' || c.fn === 'click')).toBe(false);
+});
+
+test('a signed-in page that happens to have a password field is still accepted on its marker', async () => {
+  // A dashboard with a change-password form: the `expect` marker is the proof and
+  // is checked FIRST — a password input only shapes the diagnosis when it is absent.
+  const { adapter, calls } = bounced((q) => q === '#account-menu' || q.includes('type="password"'));
+  const steps = await performLogin(adapter, PROVABLE);
+  expect(steps.at(-1)?.step).toContain('profile already signed in as "admin"');
   expect(calls.some((c) => c.fn === 'type' || c.fn === 'click')).toBe(false);
 });
 

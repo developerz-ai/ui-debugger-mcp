@@ -235,7 +235,7 @@ async function performAct(
   origin?: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  // An opaque `ref=N` target (issued by `observe` for a selector that would carry
+  // An opaque `@@ref:N` target (issued by `observe` for a selector that would carry
   // a run secret) resolves to the real selector HERE, never in the driver's
   // context. `switch_tab`'s target is a tab index, `navigate`'s a URL — not selectors.
   const selector = raw.action === 'switch_tab' || raw.action === 'navigate';

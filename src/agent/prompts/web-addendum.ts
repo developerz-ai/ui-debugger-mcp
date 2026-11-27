@@ -96,7 +96,7 @@ Each row is a full exchange: \`method\`, \`url\`, \`status\`, \`ok\`, \`duration
 Credentials arrive as \`<redacted, N chars>\` — header values, and the signed-in
 persona's values wherever they appear (bodies, urls, node names and \`value\`s).
 Deliberate, never a bug. Presence is what you need (a missing \`cookie\` explains a
-401). Such a node's \`target\` is an opaque \`ref=N\` — copy it like any other.
+401). Such a node's \`target\` is an opaque \`@@ref:N\` — copy it like any other.
 
 - \`filters:{duration_gte:1000}\` — slow enough to be a UX bug.
 - \`filters:{body_contains:"error"}\` — failures that still returned 200.

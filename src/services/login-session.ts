@@ -19,6 +19,12 @@ const PASSWORD_INPUT = 'css=input[type="password" i]';
  *    redirect), AND
  *  - its `expect` marker shows there, within `waitMs`.
  *
+ * The marker is checked FIRST and is the whole proof — which is why it should
+ * identify the ACCOUNT (the username shown), not just "someone is signed in". A
+ * password input does not veto it (a dashboard has a change-password form); it
+ * only decides which failure this is once the marker is absent, and then the
+ * marker gets a single read instead of a wait: that page is a login form.
+ *
  * A persona with no `expect` is never reused. The ABSENCE of a login form proves
  * nothing: `/login` also redirects to a public error or maintenance page, which
  * has no password field either. Everything else fails loud, saying which it was.
@@ -30,29 +36,37 @@ export async function assertAlreadySignedIn(
   url: string,
   waitMs: number,
 ): Promise<void> {
+  const marker = solePersona === true ? persona.expect : undefined;
+  const asksForPassword = (await adapter.find({ query: PASSWORD_INPUT })) !== null;
+  if (marker !== undefined) {
+    if (asksForPassword) {
+      if ((await adapter.find({ query: marker })) !== null) return;
+    } else {
+      try {
+        await adapter.waitFor({ query: marker, timeout: waitMs });
+        return;
+      } catch {
+        // absent — diagnosed below
+      }
+    }
+  }
+
   const landed = `auth persona '${name}': opening ${loginUrl} landed on ${url}`;
-  if ((await adapter.find({ query: PASSWORD_INPUT })) !== null) {
+  if (asksForPassword) {
     throw new AuthError(
       `${landed}, which still shows a password field — a login page, not a signed-in profile — ` +
         `but no input matching field '${key}'. ${FIELD_KEY_HINT} If the login page moved, point ` +
         "the persona's 'path' at it.",
     );
   }
-  let why: string;
+  let why = `'${persona.expect}' ('expect') never appeared there`;
   if (solePersona !== true) {
     why = "this target has other personas, so the session may be someone else's";
   } else if (persona.expect === undefined) {
     why =
       "the persona has no 'expect' to prove it (a page with no login form may just as well be an " +
-      "error page) — set 'expect' to a selector that only exists once signed in, and the next " +
-      'run reuses the session';
-  } else {
-    try {
-      await adapter.waitFor({ query: persona.expect, timeout: waitMs });
-      return;
-    } catch {
-      why = `'${persona.expect}' ('expect') never appeared there`;
-    }
+      "error page) — set 'expect' to a selector that only exists once signed in AS THIS ACCOUNT " +
+      '(e.g. the username shown), and the next run reuses the session';
   }
   throw new AuthError(
     `${landed} — the app redirected away from its login page, so this browser profile is ` +
