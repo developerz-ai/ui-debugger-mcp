@@ -23,6 +23,7 @@ import { createAdapter } from '../adapters/factory.js';
 import { createActTool } from '../agent/belt/act.js';
 import { createLookTool, createSelfLookTool } from '../agent/belt/look.js';
 import { createObserveTool } from '../agent/belt/observe.js';
+import { withRedactedOutput } from '../agent/belt/redact-output.js';
 import { createReportTool } from '../agent/belt/report.js';
 import { createActTrail } from '../agent/belt/trail.js';
 import { createDebugAgent, runDebugLoop } from '../agent/loop.js';
@@ -42,6 +43,7 @@ import {
   type WorkspacePaths,
 } from '../session/workspace.js';
 import { performLogin, type ResolvedAuth, resolveAuth } from './login.js';
+import { redactFailure } from './login-failure.js';
 import { createReplayStep } from './replay.js';
 import { createSummarize } from './summarize.js';
 
@@ -393,12 +395,15 @@ export async function buildSession(
       model: models.driver,
       tools: {
         observe: withToolLog('observe', createObserveTool(adapter, store, trail, redact), logAgent),
-        act: withToolLog('act', createActTool(adapter, store, trail, origin), logAgent),
+        act: withToolLog('act', createActTool(adapter, store, trail, origin, redact), logAgent),
         look: withToolLog(
           'look',
           selfLook
             ? createSelfLookTool(adapter, store)
-            : createLookTool(adapter, models.vision, store, trail, notes),
+            : withRedactedOutput(
+                createLookTool(adapter, models.vision, store, trail, notes),
+                redact,
+              ),
           logAgent,
         ),
         report: withToolLog(
@@ -450,13 +455,24 @@ export async function buildSession(
   return {
     session,
     open: async (timeoutMs) => {
+      const opened = Date.now();
       await adapter.open(openAddress(targetConfig), timeoutMs);
       if (!auth) return;
+      // The login gets what the first navigation LEFT of the budget, not the budget again.
+      const left =
+        timeoutMs === undefined ? undefined : Math.max(0, timeoutMs - (Date.now() - opened));
       // Out-of-band and BEFORE the loop: the driver never sees the credentials, and
       // a login that cannot complete fails `start_debug` outright instead of handing
       // back a run that will report every screen behind it as empty. See `login.ts`.
       // Login awaits this sink so open() returns with its auth trail durable.
-      const steps = await signIn(adapter, auth, targetConfig, flushAgentLog, timeoutMs);
+      let steps: Step[];
+      try {
+        steps = await signIn(adapter, auth, targetConfig, flushAgentLog, left);
+      } catch (err) {
+        // This failure IS the `start_debug` result, past every log sink — and it quotes
+        // the page it is stuck on, whose URL holds the password after a GET submit.
+        throw redactFailure(err, redact);
+      }
       for (const step of steps) trail.record(step);
     },
     run,
@@ -471,9 +487,11 @@ function signIn(
   log: (line: string) => void,
   timeoutMs?: number,
 ): Promise<Step[]> {
-  const base = target.adapter === 'browser' ? target.url : undefined;
+  const web = target.adapter === 'browser' ? target : undefined;
+  const base = web?.url;
   return performLogin(adapter, {
     ...auth,
+    solePersona: Object.keys(web?.auth ?? {}).length === 1,
     loginUrl: resolveTargetUrl(auth.persona.path, base),
     timeoutMs,
     log,

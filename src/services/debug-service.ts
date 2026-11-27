@@ -35,11 +35,11 @@
 
 import type { ResolvedConfig } from '../config/load.js';
 import { SessionBusyError, SessionNotFoundError, SessionSettledError } from '../errors.js';
-import { type Findings, FindingsSchema } from '../findings/schema.js';
+import type { Findings } from '../findings/schema.js';
 import type { SessionManager } from '../session/manager.js';
-import type { Session, SnapshotField } from '../session/session.js';
+import type { Session } from '../session/session.js';
 import { noopStatePort, type StatePort } from '../session/state-file.js';
-import { generateSessionId, workspacePaths } from '../session/workspace.js';
+import { allocateSessionId, workspacePaths } from '../session/workspace.js';
 import { selectTargets } from './catalog.js';
 import type {
   Ack,
@@ -54,9 +54,10 @@ import type {
   StartInput,
   StartResult,
 } from './debug-api.js';
+import { foreignSnapshot, projectFindings } from './foreign-findings.js';
 import { RetainedSnapshot } from './retained-snapshot.js';
 import type { SessionBuilder } from './session-builder.js';
-import { assertConfigFresh, assertNoForeignRun } from './start-guards.js';
+import { assertConfigFresh, assertNoForeignRun, assertStartNotAborted } from './start-guards.js';
 
 // The contract types live in `debug-api.ts` — the service stays what callers import.
 export type {
@@ -76,20 +77,6 @@ export type {
 
 /** Default wall-clock cap on a debug run before it auto-ends (overridable per run). */
 export const DEFAULT_SESSION_TIMEOUT_MS = 300_000;
-
-/**
- * Narrow a findings object to the requested keys — the `fields` projection for a
- * snapshot read off disk (a live {@link Session} projects its own).
- */
-function projectFindings(findings: Findings, fields: readonly SnapshotField[]): Partial<Findings> {
-  const out: Partial<Findings> = {};
-  for (const field of fields) {
-    // Assigning key-by-key off a validated object; the index signature is what
-    // makes this need the cast, not any doubt about the value's type.
-    (out as Record<string, unknown>)[field] = findings[field];
-  }
-  return out;
-}
 
 export class DebugService implements DebugApi {
   readonly #manager: SessionManager<Session>;
@@ -119,6 +106,13 @@ export class DebugService implements DebugApi {
    * *and wait for it*, instead of exiting with a half-launched Chrome on the lock.
    */
   #starting: { controller: AbortController; settled: Promise<void> } | undefined;
+  /**
+   * The run the last `end_session` closed, with its teardown — what makes a REPEAT
+   * of that call a no-op that still waits for (and fails with) the first one.
+   */
+  #ended: { session: Session; done: Promise<void> } | undefined;
+  /** The teardown in flight (or the last one, settled) — a barrier, so it never rejects. */
+  #tearing: Promise<void> = Promise.resolve();
 
   constructor(deps: DebugServiceDeps) {
     this.#manager = deps.manager;
@@ -227,7 +221,10 @@ export class DebugService implements DebugApi {
     // The caller asked to take the project over. Before the breadcrumb, so the
     // takeover's `clear()` cannot wipe the record of the run replacing it.
     if (replace === true) await this.#takeOverActive();
-    const id = generateSessionId(this.#now());
+    // Skips an id whose session dir already exists: a server restarted within the
+    // same second restarts its counter too, and the session create is exclusive.
+    const workspace = workspacePaths(cwd, this.#config.workspace);
+    const id = await allocateSessionId(workspace, this.#now());
     // The breadcrumb goes down BEFORE the launch: a cold Chrome start takes 5-20s,
     // and until `state.json` exists the run is invisible out-of-band — `status`
     // prints "no debug run recorded" and `stop` never signals, while a real browser
@@ -240,7 +237,7 @@ export class DebugService implements DebugApi {
     await this.#state.record({ sessionId: id, target, goal });
 
     try {
-      this.#assertStartNotAborted(signal, id);
+      assertStartNotAborted(signal, id);
       const built = await this.#build({
         id,
         target,
@@ -252,7 +249,7 @@ export class DebugService implements DebugApi {
       });
 
       try {
-        this.#assertStartNotAborted(signal, id);
+        assertStartNotAborted(signal, id);
         this.#manager.start(cwd, built.session);
       } catch (err) {
         await built.session.close().catch(() => undefined);
@@ -264,7 +261,7 @@ export class DebugService implements DebugApi {
 
       try {
         await built.open(remaining());
-        this.#assertStartNotAborted(signal, id);
+        assertStartNotAborted(signal, id);
         built.session.start(built.run);
       } catch (err) {
         await this.#manager.end(cwd).catch(() => undefined);
@@ -282,19 +279,6 @@ export class DebugService implements DebugApi {
       await this.#state.clear(id).catch(() => undefined);
       throw err;
     }
-  }
-
-  /**
-   * Stop a start that the shutdown path has cancelled (SIGTERM, a CLI `stop`, the
-   * MCP client dying). The caller tears down whatever it had already built.
-   */
-  #assertStartNotAborted(signal: AbortSignal, id: string): void {
-    if (!signal.aborted) return;
-    throw new SessionSettledError(
-      `Debug run '${id}' was torn down while it was still starting — this ui-debugger-mcp server ` +
-        'is shutting down (SIGTERM, `ui-debugger-mcp stop`, or the MCP client disconnected). ' +
-        'Nothing was left running; start again once the server is back.',
-    );
   }
 
   /**
@@ -321,7 +305,9 @@ export class DebugService implements DebugApi {
     this.#clearTimeout();
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
-      void this.endActive().catch(() => undefined);
+      // Ends the run it was armed for, and ONLY that: `endActive` would also abort
+      // a `replace:true` start in flight, failing it as "server is shutting down".
+      void this.#endRetaining().catch(() => undefined);
     }, ms);
   }
 
@@ -339,7 +325,8 @@ export class DebugService implements DebugApi {
    * drains the inbox, so an ack then would drop the message.
    */
   send({ session_id, message }: SendInput): Ack {
-    const session = this.#require(session_id);
+    // Readable, not just active: an auto-ended run answers "settled", not "no such session".
+    const session = this.#requireReadable(session_id);
     if (session.status !== 'running') {
       throw new SessionSettledError(
         `Debug run '${session_id}' has already settled ('${session.status}') — the driver is no ` +
@@ -367,22 +354,11 @@ export class DebugService implements DebugApi {
       // Our own memory has no such run — but another live server on this project
       // might, and `start_debug` has already named that session to this caller.
       // Answering "no such session" there is a contradiction; serve what it flushed.
-      const foreign = await this.#foreignSnapshot(session_id);
+      const foreign = await foreignSnapshot(this.#state, session_id, error);
       if (foreign) return fields ? projectFindings(foreign, fields) : foreign;
       throw error;
     }
     return fields ? session.snapshot(fields, wait) : session.snapshot(undefined, wait);
-  }
-
-  /**
-   * A foreign run's findings as last flushed to disk, or `null` if this id names no
-   * such run — we do not own that run, so there is nothing to long-poll.
-   */
-  async #foreignSnapshot(session_id: string): Promise<Findings | null> {
-    const raw = await this.#state.foreignFindings(session_id);
-    if (raw === null) return null;
-    const parsed = FindingsSchema.safeParse(raw);
-    return parsed.success ? parsed.data : null;
   }
 
   /** List configured targets (the whole catalog, or one when named) plus resolved models/workspace. */
@@ -421,20 +397,43 @@ export class DebugService implements DebugApi {
    * retained snapshot, so `end_session` stays the one explicit forget.
    */
   async end({ session_id }: EndInput): Promise<Ack> {
-    if (this.#forgetRetained(session_id)) return { ok: true, session_id };
-    this.#require(session_id);
-    this.#clearTimeout();
-    try {
-      await this.#manager.end(this.#cwd);
-    } finally {
-      // Clear the breadcrumb even when the close throws: the manager frees the slot
-      // before closing, so a stale `running` state.json would make a later CLI
-      // `stop` SIGTERM a healthy server. The close error still propagates. Scoped
-      // to `session_id` — `#require` verified it — so a successor that records
-      // itself while this teardown is in flight is untouched.
-      await this.#state.clear(session_id);
+    const retained = this.#retained.peek();
+    if (retained !== undefined && this.#forgetRetained(session_id)) {
+      this.#ended = { session: retained, done: Promise.resolve() };
+      return { ok: true, session_id };
     }
+    // Idempotent: a repeat for the run it just ended succeeds and says so — once that
+    // teardown SETTLED (final status; its close error too). Other unknown ids fail loud.
+    const ended = this.#ended;
+    if (ended?.session.id === session_id) {
+      await ended.done;
+      return { ok: true, session_id, already_ended: { status: ended.session.status } };
+    }
+    const session = this.#require(session_id);
+    this.#clearTimeout();
+    const done = this.#teardown(session_id);
+    this.#ended = { session, done };
+    await done;
     return { ok: true, session_id };
+  }
+
+  /**
+   * Close the active run, then drop its breadcrumb — even when the close throws.
+   * The ONE teardown, for every way a run ends, so {@link endActive} can wait on it.
+   */
+  #teardown(session_id: string): Promise<void> {
+    const done = (async () => {
+      try {
+        await this.#manager.end(this.#cwd);
+      } finally {
+        // The manager frees the slot before closing, so a stale `running` state.json
+        // would make a later CLI `stop` SIGTERM a healthy server. Scoped to
+        // `session_id`: a successor recording itself mid-teardown is untouched.
+        await this.#state.clear(session_id);
+      }
+    })();
+    this.#tearing = done.catch(() => undefined);
+    return done;
   }
 
   /**
@@ -451,19 +450,21 @@ export class DebugService implements DebugApi {
       starting.controller.abort();
       await starting.settled;
     }
+    // Slot-free is not torn-down: a timeout or `end_session` teardown in flight has
+    // emptied the manager, and shutdown must not exit before that close has settled.
+    await this.#tearing;
+    await this.#endRetaining();
+  }
+
+  /** End the active run (if any) nobody asked to end, keeping it readable. */
+  async #endRetaining(): Promise<void> {
     if (!this.#manager.has(this.#cwd)) return;
     // Nobody asked for this end, so nobody has read the results yet: retain the
     // session (settled + closed) so `get_findings` still serves them. Captured
     // before the close, so a failing teardown leaves them reachable anyway.
     const ending = this.#manager.get(this.#cwd);
     this.#retained.retain(ending);
-    // Same contract as `end()`: the breadcrumb clears even when the close throws —
-    // scoped to the run being ENDED, never a successor's.
-    try {
-      await this.#manager.end(this.#cwd);
-    } finally {
-      await this.#state.clear(ending.id);
-    }
+    await this.#teardown(ending.id);
   }
 
   /**

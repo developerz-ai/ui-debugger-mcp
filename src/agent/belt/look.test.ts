@@ -116,7 +116,7 @@ test('captures the frame and sends it to the vision model with the question', as
   // both a text part (the question) and the captured image part are sent
   expect(content).toEqual([
     { type: 'text', text: 'Question: is the button centred?' },
-    { type: 'image', image: PNG, mediaType: 'image/png' },
+    { type: 'file', data: PNG, mediaType: 'image/png' },
   ]);
   expect(seen[0]?.messages[0]?.role).toBe('user');
   expect(typeof seen[0]?.system).toBe('string');
@@ -316,7 +316,7 @@ test('no question/expect → still prompts for a general description', async () 
   await runLook(adapter, generate, recorder, {});
   expect(seen[0]?.messages[0]?.content).toEqual([
     { type: 'text', text: 'Describe what you see and flag any visual issues.' },
-    { type: 'image', image: PNG, mediaType: 'image/png' },
+    { type: 'file', data: PNG, mediaType: 'image/png' },
   ]);
 });
 
@@ -429,7 +429,10 @@ test('createLookTool threads the tool abort signal into the vision generateText 
     { toolCallId: 't1', messages: [], abortSignal: controller.signal, context: {} },
   );
   // Without the signal a stalled vision provider would block session teardown.
-  expect(seenSignals).toEqual([controller.signal]);
+  // (It arrives combined with the per-call deadline, so assert it PROPAGATES.)
+  expect(seenSignals[0]?.aborted).toBe(false);
+  controller.abort();
+  expect(seenSignals[0]?.aborted).toBe(true);
   expect((result as { description: string }).description).toBe('A blue button, centred.');
 });
 
@@ -534,7 +537,7 @@ test('a normal UI frame stays PNG — never re-encoded, never a second capture',
   await runLook(adapter, generate, recorder, { question: 'centred?' });
 
   expect(asked).toEqual(['png']); // one capture, no JPEG round-trip
-  expect(imagePartOf(seen)).toEqual({ type: 'image', image: png, mediaType: 'image/png' });
+  expect(imagePartOf(seen)).toEqual({ type: 'file', data: png, mediaType: 'image/png' });
   expect(saved[0]?.data).toBe(png);
 });
 
@@ -549,7 +552,7 @@ test('a photo-heavy frame falls back to high-quality JPEG, and the evidence matc
   await runLook(adapter, generate, recorder, { question: 'centred?' });
 
   expect(asked).toEqual(['png', 'jpeg']);
-  expect(imagePartOf(seen)).toEqual({ type: 'image', image: jpeg, mediaType: 'image/jpeg' });
+  expect(imagePartOf(seen)).toEqual({ type: 'file', data: jpeg, mediaType: 'image/jpeg' });
   // The saved evidence is the frame the model judged, not the discarded PNG.
   expect(saved[0]?.data).toBe(jpeg);
   expect(saved[0]?.extension).toBe('jpg');
@@ -564,7 +567,7 @@ test('a JPEG that did not actually help is discarded — we keep whichever is sm
   const { generate, seen } = fakeVision(cleanReply);
   await runLook(adapter, generate, recorder, { question: 'centred?' });
 
-  expect(imagePartOf(seen)).toEqual({ type: 'image', image: png, mediaType: 'image/png' });
+  expect(imagePartOf(seen)).toEqual({ type: 'file', data: png, mediaType: 'image/png' });
   expect(saved[0]?.data).toBe(png);
 });
 
@@ -595,10 +598,10 @@ test('createSelfLookTool returns the frame itself and maps it to multimodal tool
   });
   expect(modelOutput?.type).toBe('content');
   const value = (modelOutput as { value: Array<{ type: string }> }).value;
-  expect(value.map((v) => v.type)).toEqual(['text', 'file-data']);
-  const media = value[1] as unknown as { data: string; mediaType: string };
+  expect(value.map((v) => v.type)).toEqual(['text', 'file']);
+  const media = value[1] as unknown as { data: { type: string; data: string }; mediaType: string };
   expect(media.mediaType).toBe('image/png');
-  expect(media.data).toBe(output.frame);
+  expect(media.data).toEqual({ type: 'data', data: output.frame });
 });
 
 // --- the evidence trail: createLookTool records what the vision guy surfaced --
@@ -686,4 +689,85 @@ test('no trail wired — the look behaves exactly as before', async () => {
   const result = (await callLook(look)) as { description: string; screenshot: string };
   expect(result.description).toBe('A blue button, centred.');
   expect(result.screenshot).toBe('screenshots/001-q.png');
+});
+
+/** A vision model that never answers on its own — it settles only when its signal aborts. */
+function stalledVision(seen: AbortSignal[]) {
+  return new MockLanguageModelV3({
+    doGenerate: ({ abortSignal }) =>
+      new Promise<never>((_resolve, reject) => {
+        if (!abortSignal) return;
+        seen.push(abortSignal);
+        if (abortSignal.aborted) reject(abortSignal.reason);
+        abortSignal.addEventListener('abort', () => reject(abortSignal.reason), { once: true });
+      }),
+  });
+}
+
+const lookOptions = (abortSignal: AbortSignal) => ({
+  toolCallId: 't1',
+  messages: [],
+  abortSignal,
+  context: {},
+});
+
+test('a stalled vision provider is cut off at the per-call deadline with a steering error, and the gate releases', async () => {
+  const trail = createActTrail();
+  const seen: AbortSignal[] = [];
+  const look = createLookTool(
+    fakeAdapter(PNG),
+    stalledVision(seen),
+    fakeRecorder().recorder,
+    trail,
+    undefined,
+    20,
+  );
+  const attempt = look.execute?.({ question: 'q' }, lookOptions(new AbortController().signal));
+  await expect(attempt as Promise<unknown>).rejects.toThrow(AgentError);
+  await expect(attempt as Promise<unknown>).rejects.toThrow(/did not answer within 20ms/);
+  // The in-flight provider request was aborted, not orphaned.
+  expect(seen[0]?.aborted).toBe(true);
+  // Failure path releases the trail gate: a terminal read does not hang.
+  expect((await trail.settled()).visual).toEqual([]);
+});
+
+test('a run abort during look stays an abort — never relabelled as a vision timeout', async () => {
+  const controller = new AbortController();
+  const seen: AbortSignal[] = [];
+  const look = createLookTool(fakeAdapter(PNG), stalledVision(seen), fakeRecorder().recorder);
+  const attempt = Promise.resolve(
+    look.execute?.({ question: 'q' }, lookOptions(controller.signal)),
+  ).catch((e: unknown) => e);
+  // Abort only once the provider request is genuinely IN FLIGHT — past the
+  // screenshot capture, with the model holding its signal.
+  while (seen.length === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+  expect(seen[0]?.aborted).toBe(false);
+  const reason = new DOMException('run ended', 'AbortError');
+  controller.abort(reason);
+  const error = await attempt;
+  // The in-flight request was cancelled, and the rejection IS the run's abort.
+  expect(seen[0]?.aborted).toBe(true);
+  expect(error).toBe(reason);
+});
+
+test('the per-call deadline timer is cleared once the vision call settles', async () => {
+  const seenSignals: AbortSignal[] = [];
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options) => {
+      if (options.abortSignal) seenSignals.push(options.abortSignal);
+      return slowVision(cleanReply, 0).doGenerate(options);
+    },
+  });
+  const look = createLookTool(
+    fakeAdapter(PNG),
+    model,
+    fakeRecorder().recorder,
+    undefined,
+    undefined,
+    15,
+  );
+  await look.execute?.({ question: 'q' }, lookOptions(new AbortController().signal));
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  // A live timer would have aborted the (finished) call's signal by now.
+  expect(seenSignals[0]?.aborted).toBe(false);
 });

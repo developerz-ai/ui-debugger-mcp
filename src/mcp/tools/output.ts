@@ -39,6 +39,13 @@ export const AckSchema = z.object({
     .literal(true)
     .describe('The call was accepted; a failure arrives as an error result instead.'),
   session_id: z.string().min(1).describe('The run this ack is for.'),
+  already_ended: z
+    .object({ status: z.enum(FINDINGS_STATUSES).describe('The status that run ended on.') })
+    .optional()
+    .describe(
+      'Only on a repeat end_session for the run the previous call closed: nothing was done ' +
+        'this time — the run was already ended.',
+    ),
 }) satisfies z.ZodType<Ack>;
 
 /** One configured target's public shape — secrets (api keys, profiles) stay out. */

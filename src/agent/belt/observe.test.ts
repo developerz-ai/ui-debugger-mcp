@@ -12,9 +12,11 @@ import { AdapterError, AgentError } from '../../errors.js';
 import type { Findings } from '../../findings/schema.js';
 import { createSecretRedactor } from '../../redact.js';
 import type { EvidenceRecorder } from './look.js';
-import { coerceWithin, createObserveTool, ObserveInputSchema, runObserve } from './observe.js';
+import { createObserveTool, ObserveInputSchema, runObserve } from './observe.js';
 import { type FindingsWriter, runReport } from './report.js';
+import { resolveTargetRef, targetRefFor } from './target-refs.js';
 import { type ActTrail, createActTrail } from './trail.js';
+import { coerceWithin } from './tree-targets.js';
 
 /** A fake {@link EvidenceRecorder} recording every saved frame. */
 function fakeEvidenceRecorder(): {
@@ -839,4 +841,105 @@ test('no trail wired — observe behaves exactly as before', async () => {
   )) as { kind: string; count: number };
   expect(res.kind).toBe('console');
   expect(res.count).toBe(5);
+});
+
+test('a redacted network read scrubs persona values from url, bodies, error and header values', async () => {
+  // The pre-run login POST sits in the capture buffer: without redaction the
+  // driver's first `observe network` ships the persona password to the provider,
+  // and the SDK re-sends that tool result on every later step.
+  const login: NetworkEntry = {
+    method: 'POST',
+    url: 'http://x/api/login?next=hunter2',
+    status: 401,
+    ok: false,
+    resourceType: 'fetch',
+    error: 'rejected hunter2',
+    timestamp: 1,
+    requestBody: '{"email":"a@b.co","password":"hunter2"}',
+    responseBody: '{"echo":"hunter2"}',
+    requestHeaders: { 'x-debug': 'hunter2', accept: '*/*' },
+    responseHeaders: { 'x-echo': 'pw=hunter2' },
+  };
+  const { adapter } = fakeAdapter({ network: [login] });
+  const res = await runObserve(adapter, recorder(), { kind: 'network' }, REDACT);
+  if (res.kind !== 'network') throw new Error('expected network result');
+  expect(JSON.stringify(res)).not.toContain('hunter2');
+  const entry = res.entries[0];
+  expect(entry?.requestBody).toBe('{"email":"a@b.co","password":"<redacted, 7 chars>"}');
+  expect(entry?.requestHeaders).toEqual({ 'x-debug': '<redacted, 7 chars>', accept: '*/*' });
+  // Everything that is not a secret is untouched — the exchange stays diagnostic.
+  expect(entry).toMatchObject({ method: 'POST', status: 401, ok: false, timestamp: 1 });
+  // Un-wired (no persona): the entry passes through as the SAME object.
+  const plain = await runObserve(adapter, recorder(), { kind: 'network' });
+  if (plain.kind !== 'network') throw new Error('expected network result');
+  expect(plain.entries[0]).toEqual(login);
+});
+
+test('a redacted tree read scrubs persona values from value, name, frame AND the generated target', async () => {
+  const field: Node = {
+    role: 'textbox',
+    name: 'Password',
+    bounds: { x: 0, y: 0, width: 10, height: 10 },
+    enabled: true,
+    value: 'hunter2',
+  };
+  // A page that echoes the persona value in visible text, inside an iframe whose
+  // URL carries it too — the name feeds the generated selector.
+  const menu: Node = {
+    role: 'button',
+    name: 'Account hunter2',
+    bounds: { x: 0, y: 20, width: 10, height: 10 },
+    enabled: true,
+    frame: 'http://x/embed?user=hunter2',
+  };
+  const { adapter } = fakeAdapter({ nodes: [field, menu] });
+  const res = await runObserve(adapter, recorder(), { kind: 'tree' }, REDACT);
+  if (res.kind !== 'tree') throw new Error('expected tree result');
+  expect(JSON.stringify(res)).not.toContain('hunter2');
+  expect(res.nodes[0]?.value).toBe('<redacted, 7 chars>');
+  // A secret-free selector is untouched — the driver copies it verbatim.
+  expect(res.nodes[0]?.target).toBe('role=textbox[name="Password" i]');
+  expect(res.nodes[1]?.name).toBe('Account <redacted, 7 chars>');
+  expect(res.nodes[1]?.frame).toBe('http://x/embed?user=<redacted, 7 chars>');
+  // The node stays addressable through an opaque reference that resolves, for
+  // THIS adapter only, back to the real selector.
+  const ref = res.nodes[1]?.target ?? '';
+  expect(ref).toBe('@@ref:1');
+  expect(resolveTargetRef(adapter, ref)).toBe('role=button[name="Account hunter2" i]');
+  // Re-reading hands out the SAME reference — the registry does not grow per read.
+  const again = await runObserve(adapter, recorder(), { kind: 'tree' }, REDACT);
+  if (again.kind !== 'tree') throw new Error('expected tree result');
+  expect(again.nodes[1]?.target).toBe(ref);
+  // Only the EXACT string this adapter issued resolves. Another run's adapter, a
+  // reference nobody issued, and look-alike plain selectors all pass through.
+  expect(resolveTargetRef(fakeAdapter({}).adapter, ref)).toBe(ref);
+  for (const plain of ['@@ref:2', 'ref=1', 'aria-ref=1', ' @@ref:1', '@@ref:01', 'text=@@ref:1']) {
+    expect(resolveTargetRef(adapter, plain)).toBe(plain);
+  }
+});
+
+test('observe resolves an opaque reference passed back as query or within', async () => {
+  const menu: Node = {
+    role: 'button',
+    name: 'Account hunter2',
+    bounds: { x: 0, y: 20, width: 10, height: 10 },
+    enabled: true,
+  };
+  const { adapter, rec } = fakeAdapter({ nodes: [menu] });
+  const first = await runObserve(adapter, recorder(), { kind: 'tree' }, REDACT);
+  if (first.kind !== 'tree') throw new Error('expected tree result');
+  const ref = first.nodes[0]?.target ?? '';
+  await runObserve(adapter, recorder(), { kind: 'tree', query: ref, within: ref }, REDACT);
+  expect(rec.readState?.query).toBe('role=button[name="Account hunter2" i]');
+  expect(rec.readState?.within).toBe('role=button[name="Account hunter2" i]');
+});
+
+// Correctness only: this does NOT prove the O(1) issuance (a linear scan would pass too).
+test('references stay distinct, stable and resolvable across many selectors', async () => {
+  const { adapter } = fakeAdapter({});
+  const refs = Array.from({ length: 2000 }, (_, i) => targetRefFor(adapter, `text=secret ${i}`));
+  expect(new Set(refs).size).toBe(2000);
+  // Re-issuing returns the same reference, and each resolves to its own selector.
+  expect(targetRefFor(adapter, 'text=secret 1234')).toBe(refs[1234] as string);
+  expect(resolveTargetRef(adapter, refs[1999] as string)).toBe('text=secret 1999');
 });

@@ -18,6 +18,7 @@
  *    the spec-blessed form, not inline path strings the caller has to notice.
  */
 
+import { pathToFileURL } from 'node:url';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { EVIDENCE_FIELD_NAMES } from '../../findings/schema.js';
 
@@ -49,7 +50,9 @@ function resourceLink(path: string): ResourceLinkContent {
   const mimeType = mimeTypeFor(path);
   return {
     type: 'resource_link',
-    uri: new URL(path, 'file://').href,
+    // Not `new URL(path, 'file://')`: that reads a `#` or `?` in a directory name as
+    // a fragment/query, and the link then names a file that does not exist.
+    uri: pathToFileURL(path).href,
     name: path.split('/').pop() ?? path,
     ...(mimeType !== undefined && { mimeType }),
   };

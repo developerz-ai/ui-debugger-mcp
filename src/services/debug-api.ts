@@ -62,6 +62,11 @@ export interface SendInput {
 export interface Ack {
   ok: true;
   session_id: string;
+  /**
+   * Only on a REPEAT `end_session` for the run the previous one closed: nothing
+   * was done this time, and this is the status that run ended on.
+   */
+  already_ended?: { status: SessionStatus };
 }
 
 /** `get_findings` input — snapshot (optionally long-poll / project a subset). */

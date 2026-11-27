@@ -121,6 +121,10 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 interface FakeOptions {
   /** Selectors that resolve to a node; everything else resolves to null. */
   matches?: (query: string) => boolean;
+  /** Nothing resolves for this many REAL ms after `open` — a form still rendering. */
+  rendersAfterMs?: number;
+  /** URL the tab reports BEFORE the submit — an app that bounced off its login page. */
+  opensOn?: string;
   /** URL reported as the active tab AFTER submit (before it is the login page). */
   landsOn?: string;
   /** No `tabs` method — a target with no tab concept. */
@@ -162,6 +166,8 @@ function fakeAdapter(options: FakeOptions = {}): { adapter: Adapter; calls: Call
   const calls: Call[] = [];
   const matches = options.matches ?? (() => true);
   let submitted = false;
+  /** When the login page was opened — the clock a rendering form is measured against. */
+  let openedAt = 0;
   /** When the submit happened — the clock a PENDING redirect is measured against. */
   let submittedAt = 0;
   /** How many settle observations the proof has made — the "late redirect" clock. */
@@ -177,9 +183,11 @@ function fakeAdapter(options: FakeOptions = {}): { adapter: Adapter; calls: Call
     open: async (target) => {
       if (options.openDelayMs) await delay(options.openDelayMs);
       calls.push({ fn: 'open', arg: target });
+      openedAt = Date.now();
     },
     find: async (opts: Query) => {
       const query = opts.query ?? '';
+      if (Date.now() - openedAt < (options.rendersAfterMs ?? 0)) return null;
       return matches(query) ? node(query) : null;
     },
     click: async (target) => {
@@ -225,7 +233,7 @@ function fakeAdapter(options: FakeOptions = {}): { adapter: Adapter; calls: Call
   }
   /** The URL the tab is on: the login page until the redirect lands. */
   function landed(): string {
-    if (!submitted) return LOGIN_URL;
+    if (!submitted) return options.opensOn ?? LOGIN_URL;
     if (options.landsOnAfter) {
       return observations >= options.landsOnAfter.afterObservations
         ? options.landsOnAfter.url
@@ -325,8 +333,170 @@ test('performLogin marks every step as the pre-run login, not a driver decision'
 
 test('performLogin fails loud when a field selector resolves nothing', async () => {
   const { adapter } = fakeAdapter({ matches: (q) => !q.includes('password') });
-  await expect(performLogin(adapter, OPTS)).rejects.toThrow(AuthError);
-  await expect(performLogin(adapter, OPTS)).rejects.toThrow(/field 'password'/);
+  const opts = { ...OPTS, timeoutMs: 300 };
+  await expect(performLogin(adapter, opts)).rejects.toThrow(AuthError);
+  await expect(performLogin(adapter, opts)).rejects.toThrow(/field 'password'/);
+});
+
+test('a login form that renders AFTER load is waited for, not reported as a missing field', async () => {
+  // An SPA mounts its form after an auth check, and `find` does not wait: the
+  // first lookup right after `load` saw nothing and the persona was blamed.
+  const { adapter, calls } = fakeAdapter({ rendersAfterMs: 400 });
+  const steps = await performLogin(adapter, OPTS);
+  expect(calls.filter((c) => c.fn === 'type' && c.text === 'hunter2')).toHaveLength(1);
+  expect(steps.at(-1)?.step).toContain('signed in as "admin"');
+});
+
+// --- a persistent profile that is already signed in -----------------------------
+// The profile kept the last run's session, so the app bounces /login → /dashboard.
+// WHO is signed in cannot be read off a redirect: it is taken as this persona only
+// when the target has no other, and its `expect` (when set) shows on the landing page.
+
+/** An app that redirects its login page away; only `shown` selectors exist there. */
+const bounced = (shown: (query: string) => boolean = () => false) =>
+  fakeAdapter({ matches: shown, opensOn: 'http://localhost:5173/dashboard' });
+
+/** The sole persona, WITH the marker that proves a session: the only reusable shape. */
+const PROVABLE: LoginOptions = {
+  ...OPTS,
+  solePersona: true,
+  persona: { ...PERSONA, expect: '#account-menu' },
+};
+
+test('the sole persona on an already-signed-in profile is accepted, with no form submitted', async () => {
+  const { adapter, calls } = bounced((q) => q === '#account-menu');
+  const steps = await performLogin(adapter, PROVABLE);
+  expect(steps.at(-1)?.step).toBe(
+    `profile already signed in as "admin" ('expect' marker shown; pre-run, no form submitted) → http://localhost:5173/dashboard`,
+  );
+  expect(calls.some((c) => c.fn === 'type' || c.fn === 'click')).toBe(false);
+});
+
+test('a signed-in page that happens to have a password field is still accepted on its marker', async () => {
+  // A dashboard with a change-password form: the `expect` marker is the proof and
+  // is checked FIRST — a password input only shapes the diagnosis when it is absent.
+  const { adapter, calls } = bounced((q) => q === '#account-menu' || q.includes('type="password"'));
+  const steps = await performLogin(adapter, PROVABLE);
+  expect(steps.at(-1)?.step).toContain('profile already signed in as "admin"');
+  expect(calls.some((c) => c.fn === 'type' || c.fn === 'click')).toBe(false);
+});
+
+test('the marker is WAITED for on a page with a password field too — it may render late', async () => {
+  // The marker is not in the tree yet (`find` misses) but arrives within the wait.
+  const { adapter, calls } = bounced((q) => q.includes('type="password"'));
+  const steps = await performLogin(adapter, { ...PROVABLE, timeoutMs: 400 });
+  expect(steps.at(-1)?.step).toContain('profile already signed in as "admin"');
+  expect(calls.some((c) => c.fn === 'waitFor' && c.arg === '#account-menu')).toBe(true);
+});
+
+test('a redirected page with a password field and NO marker is a login page, not a session', async () => {
+  const { adapter, calls } = fakeAdapter({
+    matches: (q) => q.includes('type="password"'),
+    opensOn: 'http://localhost:5173/dashboard',
+    waitFails: true,
+  });
+  const error = await performLogin(adapter, { ...PROVABLE, timeoutMs: 400 }).catch(
+    (e: unknown) => e,
+  );
+  expect(error).toBeInstanceOf(AuthError);
+  expect((error as AuthError).message).toMatch(/still shows a password field/);
+  expect((error as AuthError).message).toMatch(/no input matching field 'email'/);
+  expect(calls.some((c) => c.fn === 'type' || c.fn === 'click')).toBe(false);
+});
+
+test('a session whose `expect` marker is already showing is accepted without sitting out the render window', async () => {
+  // Every run on a signed-in profile takes this path: the marker is the proof, so
+  // there is nothing left to wait for once it shows on the redirected page.
+  const { adapter } = bounced((q) => q === '#account-menu');
+  const started = Date.now();
+  await performLogin(adapter, PROVABLE);
+  expect(Date.now() - started).toBeLessThan(1_000);
+});
+
+test('a redirect off the login page is NOT a session without an `expect` to prove it', async () => {
+  // `/login` → a public error or maintenance page: no password field there either.
+  // Absence of a login form proves nothing — the run would go on signed out.
+  const { adapter } = bounced();
+  const error = await performLogin(adapter, { ...OPTS, solePersona: true, timeoutMs: 400 }).catch(
+    (e: unknown) => e,
+  );
+  expect(error).toBeInstanceOf(AuthError);
+  expect((error as AuthError).message).toMatch(/no 'expect'/);
+  expect((error as AuthError).message).toContain('http://localhost:5173/dashboard');
+});
+
+test('a login page the app CANONICALISED is still a login page — never "already signed in"', async () => {
+  // `/login` served as `/en/login`: the URL differs, but this is the form. A late
+  // render there must be waited for and filled, not read as a signed-in profile.
+  const late = fakeAdapter({ rendersAfterMs: 400, opensOn: 'http://localhost:5173/en/login' });
+  const steps = await performLogin(late.adapter, { ...OPTS, solePersona: true });
+  expect(late.calls.filter((c) => c.fn === 'type' && c.text === 'hunter2')).toHaveLength(1);
+  expect(steps.some((s) => s.step.includes('already signed in'))).toBe(false);
+
+  // …and a mistyped key there is a missing field, never a silently signed-out run.
+  const typo = fakeAdapter({
+    matches: (q) => !q.includes('email'),
+    opensOn: 'http://localhost:5173/en/login',
+  });
+  const error = await performLogin(typo.adapter, {
+    ...OPTS,
+    solePersona: true,
+    timeoutMs: 400,
+  }).catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(AuthError);
+  expect((error as AuthError).message).toMatch(/no input matching field 'email'/);
+  expect((error as AuthError).message).toContain('http://localhost:5173/en/login');
+  expect((error as AuthError).message).toMatch(/still shows a password field/);
+});
+
+test('a rejected login on a canonicalised login page is still a rejected login', async () => {
+  // The form lives on `/en/login`; staying THERE after the submit is the failure,
+  // even though it was never the configured `/login`.
+  const { adapter } = fakeAdapter({
+    opensOn: 'http://localhost:5173/en/login',
+    landsOn: 'http://localhost:5173/en/login?error=1',
+  });
+  await expect(performLogin(adapter, { ...OPTS, timeoutMs: 300 })).rejects.toThrow(/did not take/);
+});
+
+test('samePage ignores a trailing slash the server adds', () => {
+  expect(samePage('http://x/login/', 'http://x/login')).toBe(true);
+  expect(samePage('http://x/login', 'http://x/login/?next=1')).toBe(true);
+  expect(samePage('http://x/', 'http://x')).toBe(true);
+  expect(samePage('http://x/login/reset', 'http://x/login')).toBe(false);
+});
+
+test('an already-signed-in profile is NOT assumed to be this persona when the target has others', async () => {
+  const { adapter, calls } = bounced();
+  const error = await performLogin(adapter, { ...OPTS, timeoutMs: 400 }).catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(AuthError);
+  expect((error as AuthError).message).toMatch(/ALREADY signed in/);
+  expect((error as AuthError).message).toMatch(/other personas/);
+  expect((error as AuthError).message).toContain('http://localhost:5173/dashboard');
+  expect(calls.some((c) => c.fn === 'type')).toBe(false);
+});
+
+test("the sole persona's `expect` must show on the landing page for the session to be accepted", async () => {
+  const expecting = {
+    ...OPTS,
+    solePersona: true,
+    timeoutMs: 400,
+    persona: { ...PERSONA, expect: '#account-menu' },
+  };
+
+  const shown = bounced((q) => q === '#account-menu');
+  const steps = await performLogin(shown.adapter, expecting);
+  expect(steps.at(-1)?.step).toContain('profile already signed in as "admin"');
+  expect(shown.calls.some((c) => c.fn === 'waitFor' && c.arg === '#account-menu')).toBe(true);
+
+  const missing = fakeAdapter({
+    matches: () => false,
+    opensOn: 'http://localhost:5173/dashboard',
+    waitFails: true,
+  });
+  await expect(performLogin(missing.adapter, expecting)).rejects.toThrow(
+    /'#account-menu' \('expect'\) never appeared/,
+  );
 });
 
 test('performLogin fails loud when the submit control resolves nothing', async () => {

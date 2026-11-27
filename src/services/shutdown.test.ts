@@ -52,16 +52,45 @@ test('a teardown that never returns still exits once the deadline passes', async
 
 test('a failing teardown still exits, and exits exactly once', async () => {
   const exits: number[] = [];
+  const warnings: string[] = [];
   const shutdown = createShutdown({
     endActive: async () => {
       throw new Error('adapter close blew up');
     },
     exit: (code) => exits.push(code),
     timeoutMs: 20,
+    warn: (line) => warnings.push(line),
   });
 
   shutdown(0);
   await tick(60); // the deadline would have fired here had the timer not been cleared
 
   expect(exits).toEqual([0]);
+  // The failure is said out loud, once — and the cleared deadline adds no second line.
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]).toContain('adapter close blew up');
+});
+
+test('a second trigger mid-teardown never exits ahead of the first teardown', async () => {
+  // A dying client closes stdin AND sends SIGTERM. `endActive` answers the second
+  // call at once (the slot is already free), so a per-invocation guard exited the
+  // process while the first teardown was still closing the browser.
+  const exits: number[] = [];
+  const closing = Promise.withResolvers<void>();
+  let calls = 0;
+  const shutdown = createShutdown({
+    endActive: () => (calls++ === 0 ? closing.promise : Promise.resolve()),
+    exit: (code) => exits.push(code),
+    timeoutMs: 1_000,
+  });
+
+  shutdown(0); // stdin EOF
+  shutdown(130); // then the signal
+  await tick(10);
+  expect(exits).toEqual([]); // the first teardown is still in flight
+  expect(calls).toBe(1);
+
+  closing.resolve();
+  await tick(10);
+  expect(exits).toEqual([0]); // once, with the first trigger's code
 });

@@ -314,7 +314,7 @@ export async function runLook(
         role: 'user',
         content: [
           { type: 'text', text: buildPrompt(input) },
-          { type: 'image', image: frame.bytes, mediaType: frame.mediaType },
+          { type: 'file', data: frame.bytes, mediaType: frame.mediaType },
         ],
       },
     ],
@@ -361,7 +361,7 @@ export interface SelfLookResult {
   mediaType: 'image/png' | 'image/jpeg';
   /** The question/expectation echoed back so the driver judges against it. */
   prompt: string;
-  /** Base64 frame — mapped to a `file-data` part via `toModelOutput`. */
+  /** Base64 frame — mapped to a `file` part via `toModelOutput`. */
   frame: string;
 }
 
@@ -369,7 +369,7 @@ export interface SelfLookResult {
  * Build `look` for a MULTIMODAL driver (self-look): when control + vision are the
  * SAME model, a second blind vision call wastes a round-trip and drops the run's
  * context — instead the tool returns the frame itself as multimodal tool output
- * (`toModelOutput` → `content` with a `file-data` part), so the driver looks at
+ * (`toModelOutput` → `content` with a `file` part), so the driver looks at
  * the screenshot with its own eyes, in full conversation context.
  *
  * Older frames are pruned from the transcript by the loop (`pruneStaleFrames`) so
@@ -410,11 +410,18 @@ export function createSelfLookTool(adapter: Adapter, recorder: EvidenceRecorder)
             'The frame is attached — judge it yourself and record any visual findings ' +
             `(cite ${output.screenshot} as the evidence path).`,
         },
-        { type: 'file-data', data: output.frame, mediaType: output.mediaType },
+        { type: 'file', data: { type: 'data', data: output.frame }, mediaType: output.mediaType },
       ],
     }),
   });
 }
+
+/**
+ * Hard cap on ONE vision call. Without it a stalled vision provider holds the
+ * step until the run's wall-clock timeout — the whole run dies verdict-less over
+ * a single screenshot the driver could have done without.
+ */
+export const VISION_TIMEOUT_MS = 90_000;
 
 /**
  * Build the `look` tool bound to one adapter + vision model + recorder, for the belt.
@@ -429,21 +436,34 @@ export function createLookTool(
   recorder: EvidenceRecorder,
   trail?: ActTrail,
   notes?: readonly string[],
+  timeoutMs = VISION_TIMEOUT_MS,
 ) {
   const modelId = typeof vision === 'string' ? vision : vision.modelId;
   // Forward the abort signal into the vision call: on end_session / wall-clock
   // timeout the SDK aborts the tool's execute — without the signal a stalled
   // vision provider would block Session.close() (abort + await run) indefinitely.
-  const generate: VisionGenerate = async ({ system, messages, abortSignal }) => {
+  const generate: VisionGenerate = async ({ system, messages, abortSignal: runSignal }) => {
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), timeoutMs);
+    const abortSignal = runSignal ? AbortSignal.any([runSignal, deadline.signal]) : deadline.signal;
     try {
       const { text } = await generateText({ model: vision, system, messages, abortSignal });
       return { text };
     } catch (e) {
+      // OUR deadline, not the run's teardown: a steering error the driver can act on.
+      if (deadline.signal.aborted && runSignal?.aborted !== true) {
+        throw new AgentError(
+          `look: vision model '${modelId}' did not answer within ${timeoutMs}ms — carry on with observe (tree/console/network); retry look at most once`,
+          { cause: e },
+        );
+      }
       const message = e instanceof Error ? e.message : String(e);
       if (isImageRejection(message)) {
         throw new VisionUnavailableError(visionUnavailableMessage(modelId, message));
       }
       throw e;
+    } finally {
+      clearTimeout(timer);
     }
   };
   const execute = createLookExecute(adapter, generate, recorder, notes);

@@ -24,7 +24,7 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { rm, stat } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import { ReplayError } from '../errors.js';
 import type { ScreenshotFrame } from '../session/findings-store.js';
@@ -73,6 +73,9 @@ const DEFAULTS = { secondsPerFrame: 2, width: 1280, height: 720, fps: 30, crf: 2
  * than let the upload fail on the other side.
  */
 export const GITHUB_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
+
+/** How much of ffmpeg's stderr is kept while it runs — the failure message quotes its tail. */
+const STDERR_TAIL_CHARS = 4_000;
 
 /** Common installed font paths probed for burned-in captions (Linux + macOS). */
 const FONT_CANDIDATES = [
@@ -228,7 +231,8 @@ function spawnFfmpeg(bin: string): ReplayEncoder {
       const child = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'], signal });
       let stderr = '';
       child.stderr?.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString();
+        // Only the tail is ever reported; ffmpeg narrates a long encode on stderr.
+        stderr = (stderr + chunk.toString()).slice(-STDERR_TAIL_CHARS);
       });
       child.on('error', (err) =>
         reject(new ReplayError(`ffmpeg ('${bin}') failed to launch: ${err.message}`)),
@@ -289,7 +293,15 @@ export function createReplayStep(deps: ReplayStepDeps): ReplayStep {
       return { kind: 'skipped', note };
     }
     const replayFrames = frames.map((f) => ({ path: f.path, caption: f.label }));
-    const path = await renderReplay(encode, replayFrames, deps.output, cfg, signal);
+    let path: string | null;
+    try {
+      path = await renderReplay(encode, replayFrames, deps.output, cfg, signal);
+    } catch (error) {
+      // A failed or aborted encode leaves a truncated clip behind. Nothing points
+      // at it, but it sits in the session dir looking like evidence — remove it.
+      await rm(deps.output, { force: true }).catch(() => undefined);
+      throw error;
+    }
     if (path === null) return { kind: 'skipped' };
     const bytes = await sizeOf(path);
     if (bytes !== null && bytes > GITHUB_UPLOAD_LIMIT_BYTES) {

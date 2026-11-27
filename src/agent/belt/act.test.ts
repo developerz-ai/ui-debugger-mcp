@@ -18,6 +18,7 @@ import {
   type StepRecorder,
 } from './act.js';
 import { createReportTool } from './report.js';
+import { targetRefFor } from './target-refs.js';
 import { createActTrail } from './trail.js';
 
 /** Calls the fake adapter recorded, to assert routing + ordering. */
@@ -112,6 +113,9 @@ function fakeRecorder(): { recorder: StepRecorder; rec: RecorderCalls } {
   };
   return { recorder, rec };
 }
+
+/** Identity redactor — a run with no auth persona. */
+const NO_REDACT = (line: string): string => line;
 
 const button: Node = {
   role: 'button',
@@ -470,7 +474,7 @@ test('navigate without target → throws AgentError', async () => {
 test('createActTool exposes a described tool with an input schema', () => {
   const { adapter } = fakeAdapter(button);
   const { recorder } = fakeRecorder();
-  const act = createActTool(adapter, recorder);
+  const act = createActTool(adapter, recorder, undefined, undefined, NO_REDACT);
   expect(typeof act.description).toBe('string');
   expect(act.inputSchema).toBeDefined();
 });
@@ -657,13 +661,11 @@ test('the act tool serializes concurrent calls — batched types never interleav
     },
   };
 
-  const tool = createActTool(slow, fakeRecorder().recorder);
+  const tool = createActTool(slow, fakeRecorder().recorder, undefined, undefined, NO_REDACT);
   const run = (text: string) =>
-    (tool as unknown as { execute: (input: ActInput) => Promise<ActResult> }).execute({
-      action: 'type',
-      target: 'Field',
-      text,
-    });
+    (
+      tool as unknown as { execute: (input: ActInput, options: object) => Promise<ActResult> }
+    ).execute({ action: 'type', target: 'Field', text }, {});
 
   await Promise.all([run('email'), run('password')]);
 
@@ -690,7 +692,7 @@ test('two acts queued in ONE step: a report racing them still sees BOTH', async 
       await new Promise((resolve) => setTimeout(resolve, 5));
     },
   };
-  const act = createActTool(named, fakeRecorder().recorder, trail);
+  const act = createActTool(named, fakeRecorder().recorder, trail, undefined, NO_REDACT);
 
   const written: Findings[] = [];
   const report = createReportTool(
@@ -703,7 +705,7 @@ test('two acts queued in ONE step: a report racing them still sees BOTH', async 
     () => trail.settled(),
   );
   const call = (t: unknown, input: unknown): Promise<unknown> =>
-    (t as { execute: (i: unknown) => Promise<unknown> }).execute(input);
+    (t as { execute: (i: unknown, o: object) => Promise<unknown> }).execute(input, {});
 
   await Promise.all([
     call(act, { action: 'click', target: 'A' }),
@@ -729,13 +731,11 @@ test('a failed act does not wedge the queue for the next one', async () => {
       }
     },
   };
-  const tool = createActTool(flaky, fakeRecorder().recorder);
+  const tool = createActTool(flaky, fakeRecorder().recorder, undefined, undefined, NO_REDACT);
   const run = (text: string) =>
-    (tool as unknown as { execute: (input: ActInput) => Promise<ActResult> }).execute({
-      action: 'type',
-      target: 'Field',
-      text,
-    });
+    (
+      tool as unknown as { execute: (input: ActInput, options: object) => Promise<ActResult> }
+    ).execute({ action: 'type', target: 'Field', text }, {});
 
   const failed = run('first');
   const after = run('second');
@@ -768,4 +768,139 @@ test('type without clear still appends — the default is unchanged', async () =
   });
   expect(calls.pressKey).toEqual([]);
   expect(calls.type.map((c) => c.text)).toEqual(['more']);
+});
+
+test('type with clear and EMPTY text empties the field — clearing is a real intent, not a missing operand', async () => {
+  const { adapter, calls } = fakeAdapter(button);
+  const res = await runAct(adapter, fakeRecorder().recorder, {
+    action: 'type',
+    target: '#title',
+    text: '',
+    clear: true,
+  });
+  expect(calls.order.slice(0, 3)).toEqual(['type', 'pressKey', 'pressKey']);
+  expect(calls.type).toHaveLength(1); // the focusing type only — nothing typed after the delete
+  expect(res.label).toBe('type 0 chars into button "Save" (replacing)');
+  // Without `clear`, empty text is still a missing operand.
+  await expect(
+    runAct(adapter, fakeRecorder().recorder, { action: 'type', target: '#title', text: '' }),
+  ).rejects.toThrow("act 'type' requires 'text'");
+});
+
+test('an act still queued when the run is aborted never drives the target, and releases the gate', async () => {
+  const trail = createActTrail();
+  const { adapter, calls } = fakeAdapter(button);
+  const controller = new AbortController();
+  const slow: Adapter = {
+    ...adapter,
+    click: async (target) => {
+      await adapter.click(target);
+      // The run ends (timeout / end_session) while act #1 is mid-flight.
+      controller.abort();
+    },
+  };
+  const tool = createActTool(slow, fakeRecorder().recorder, trail, undefined, NO_REDACT);
+  const run = (target: string) =>
+    (
+      tool as unknown as {
+        execute: (input: ActInput, options: { abortSignal: AbortSignal }) => Promise<ActResult>;
+      }
+    ).execute({ action: 'click', target }, { abortSignal: controller.signal });
+
+  const [first, second] = await Promise.allSettled([run('#one'), run('#two')]);
+
+  expect(first.status).toBe('fulfilled'); // already in flight — it finishes
+  expect(second.status).toBe('rejected');
+  expect(calls.click).toHaveLength(1);
+  expect(calls.find).toHaveLength(1); // act #2 never even resolved its target
+  // The gate is released on the abort path: a terminal read does not hang.
+  const evidence = await trail.settled();
+  expect(evidence.steps.map((step) => step.ok)).toEqual([true, false]);
+  expect(evidence.steps[1]?.note).toContain('Abort');
+});
+
+test('createActTool with the run redactor: a persona value in a reload/tab URL never reaches the driver', async () => {
+  const redact = (text: string) => text.replaceAll('hunter2', '<redacted, 7 chars>');
+  const { adapter } = fakeAdapter(button);
+  // A GET-submitting login form: the typed value lands in the URL the act reports.
+  const leaky: Adapter = {
+    ...adapter,
+    takeUnrequestedLoads: async () => ['http://x/welcome?pw=hunter2'],
+    tabs: async () => [
+      { index: 0, url: 'http://x/welcome?pw=hunter2', title: 'hi hunter2', active: true },
+      { index: 1, url: 'http://x/help', title: 'Help', active: false },
+    ],
+  };
+  const run = (tool: ReturnType<typeof createActTool>) =>
+    (
+      tool as unknown as { execute: (input: ActInput, options: object) => Promise<ActResult> }
+    ).execute({ action: 'click', target: '#go' }, {});
+
+  const wired = await run(
+    createActTool(leaky, fakeRecorder().recorder, undefined, undefined, redact),
+  );
+  expect(JSON.stringify(wired)).not.toContain('hunter2');
+  expect(wired.navigated).toEqual(['http://x/welcome?pw=<redacted, 7 chars>']);
+  expect(wired.tabs?.[1]?.url).toBe('http://x/help');
+});
+
+test('an aborted run cancels an in-flight act wait — the wait gets the run signal and the step lands as failed', async () => {
+  const trail = createActTrail();
+  const { adapter, calls } = fakeAdapter(button);
+  // An adapter that honours `WaitOptions.signal`: it blocks until aborted.
+  const waiting: Adapter = {
+    ...adapter,
+    waitFor: (opts) => {
+      calls.waitFor.push(opts);
+      return new Promise<void>((_resolve, reject) => {
+        opts.signal?.addEventListener('abort', () => reject(opts.signal?.reason), { once: true });
+      });
+    },
+  };
+  const controller = new AbortController();
+  const tool = createActTool(waiting, fakeRecorder().recorder, trail, undefined, NO_REDACT);
+  const attempt = (
+    tool as unknown as {
+      execute: (input: ActInput, options: { abortSignal: AbortSignal }) => Promise<ActResult>;
+    }
+  ).execute(
+    { action: 'wait', target: '#never', timeout: 60_000 },
+    { abortSignal: controller.signal },
+  );
+  // Let the queued act reach the adapter, then end the run.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(calls.waitFor[0]?.signal).toBe(controller.signal);
+  controller.abort();
+
+  await expect(attempt).rejects.toThrow();
+  // Released on the abort path: the gate is idle and the trail tells the truth.
+  const evidence = await trail.settled();
+  expect(evidence.steps).toHaveLength(1);
+  expect(evidence.steps[0]?.ok).toBe(false);
+});
+
+test('an opaque ref target resolves to the real selector at the adapter — the secret never crosses the tool boundary', async () => {
+  const redact = (text: string) => text.replaceAll('hunter2', '<redacted, 7 chars>');
+  const account: Node = { ...button, name: 'Account hunter2' };
+  const { adapter, calls } = fakeAdapter(account);
+  // What `observe` issues for a node whose selector carries a persona value.
+  const ref = targetRefFor(adapter, 'role=button[name="Account hunter2" i]');
+  const trail = createActTrail();
+  const tool = createActTool(adapter, fakeRecorder().recorder, trail, undefined, redact);
+  const execute = (input: ActInput) =>
+    (
+      tool as unknown as { execute: (input: ActInput, options: object) => Promise<ActResult> }
+    ).execute(input, {});
+
+  const res = await execute({ action: 'click', target: ref });
+
+  expect(calls.find[0]?.query).toBe('role=button[name="Account hunter2" i]');
+  expect(JSON.stringify(res)).not.toContain('hunter2');
+  expect(res.label).toBe('click button "Account <redacted, 7 chars>"');
+  // A plain selector that merely LOOKS like a reference reaches the adapter untouched.
+  await execute({ action: 'click', target: 'ref=1' });
+  await execute({ action: 'click', target: '@@ref:99' });
+  expect(calls.find.slice(1).map((q) => q.query)).toEqual(['ref=1', '@@ref:99']);
+  // `switch_tab` targets are tab indexes, never references.
+  await expect(execute({ action: 'switch_tab', target: ref })).rejects.toThrow(/switch_tab/);
 });

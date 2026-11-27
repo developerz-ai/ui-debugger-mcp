@@ -11,6 +11,7 @@
  */
 
 import { expect, test } from 'bun:test';
+import { mkdir } from 'node:fs/promises';
 import {
   AdapterError,
   SessionBusyError,
@@ -18,14 +19,23 @@ import {
   SessionSettledError,
 } from '../errors.js';
 import type { LoopRunner } from '../session/session.js';
-import { DEFAULT_SESSION_TIMEOUT_MS } from './debug-service.js';
 import {
+  _resetCounter,
+  generateSessionId,
+  sessionPaths,
+  workspacePaths,
+} from '../session/workspace.js';
+import { DEFAULT_SESSION_TIMEOUT_MS, DebugService } from './debug-service.js';
+import {
+  CONFIG,
   CWD,
   fakeBuilder,
   makeService,
   manager,
   NOW,
+  spyState,
   tick,
+  tmpDir,
   useTempWorkspace,
 } from './debug-service.test-helpers.js';
 import type { SessionBuilder } from './session-builder.js';
@@ -273,5 +283,73 @@ test('end aborts the run, closes the adapter, and frees the lock', async () => {
   expect(ack).toEqual({ ok: true, session_id });
   expect(manager.has(CWD)).toBe(false);
   expect(log.adapters[0]?.closeCalls).toBe(1);
-  await expect(svc.end({ session_id })).rejects.toThrow(SessionNotFoundError);
+  // idempotentHint, honoured: the repeat is a success that says so, and closes nothing.
+  expect(await svc.end({ session_id })).toEqual({
+    ok: true,
+    session_id,
+    already_ended: { status: 'failed' },
+  });
+  expect(log.adapters[0]?.closeCalls).toBe(1);
+  // An id this server never ended is still a loud miss.
+  await expect(svc.end({ session_id: 'never-existed' })).rejects.toThrow(SessionNotFoundError);
+});
+
+test('a session id whose directory already exists is skipped, not handed out again', async () => {
+  // A server restarted within the same wall-clock second restarts its counter:
+  // it would hand out `…-0001` again, and the session create is exclusive.
+  const taken = generateSessionId(NOW);
+  _resetCounter();
+  await mkdir(sessionPaths(workspacePaths(CWD, tmpDir), taken).root, { recursive: true });
+  const svc = new DebugService({
+    manager,
+    config: { ...CONFIG, workspace: tmpDir },
+    cwd: CWD,
+    build: fakeBuilder().build,
+    now: () => NOW,
+  });
+
+  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
+
+  expect(session_id).not.toBe(taken);
+  expect(session_id).toBe(taken.replace(/0001$/, '0002'));
+});
+
+test('a failed foreign-run lookup does not replace the "no such session" answer', async () => {
+  const state = {
+    ...spyState().state,
+    foreignFindings: async () => {
+      throw new AdapterError('EACCES: state.json');
+    },
+  };
+  const svc = makeService(fakeBuilder().build, { state });
+
+  const error = await svc.getFindings({ session_id: 'ghost' }).catch((e: unknown) => e);
+
+  expect(error).toBeInstanceOf(SessionNotFoundError);
+  expect((error as Error).message).toContain('No active debug session');
+  expect((error as Error).message).toContain('EACCES: state.json');
+  expect((error as Error).cause).toBeInstanceOf(AdapterError);
+});
+
+test('a repeat end_session racing the first waits for the teardown and reports its FINAL status', async () => {
+  const { build, log } = fakeBuilder();
+  const svc = makeService(build);
+  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
+
+  const [first, repeat] = await Promise.all([svc.end({ session_id }), svc.end({ session_id })]);
+
+  expect(first).toEqual({ ok: true, session_id });
+  // Never `running`: the repeat answered only once the run it names had settled.
+  expect(repeat).toEqual({ ok: true, session_id, already_ended: { status: 'failed' } });
+  expect(log.adapters[0]?.closeCalls).toBe(1);
+});
+
+test('a repeat end_session sees the close error the first one hit', async () => {
+  const svc = makeService(fakeBuilder({ closeFails: true }).build);
+  const { session_id } = await svc.start({ target: 'web', goal: 'x' });
+
+  const outcomes = await Promise.allSettled([svc.end({ session_id }), svc.end({ session_id })]);
+
+  expect(outcomes.map((o) => o.status)).toEqual(['rejected', 'rejected']);
+  await expect(svc.end({ session_id })).rejects.toThrow('close failed');
 });

@@ -1,32 +1,20 @@
 /**
  * Web-target addendum for the debug agent system prompt.
  *
- * Teaches CDP reach: which domains to use, why, and the DOM-first rule.
+ * Teaches web reach: tree queries, selectors, console/network, iframes, tabs.
  * Appended to the base prompt by `compose.ts` when target is "web".
  *
  * Provider-agnostic — no vendor tricks; any competent model drives the same loop.
  */
 
 export const WEB_ADDENDUM_PROMPT = `\
-## Web target — CDP reach
+## Web target
 
-Your browser connection is the Chrome DevTools Protocol: DOM, console, network,
-input, screenshots on the current page.
+You drive ONE browser page: DOM tree, console, network, input, screenshots.
 
-| CDP domain | Gives you | Reach via |
-|------------|-----------|-----------|
-| \`Page\`    | navigate, wait for load, screenshot | \`act({action:"navigate"})\`, \`observe({kind:"screenshot"})\` |
-| \`DOM\`     | element tree, attributes, text | \`observe({kind:"tree"})\` |
-| \`Network\` | status, failed requests, timing | \`observe({kind:"network"})\` |
-| \`Log\`     | console messages, JS errors | \`observe({kind:"console"})\` |
-
-### DOM-first
-
-1. \`observe({kind:"tree"})\` — roles, names, bounds, enabled state.
-2. Element not in the tree → scroll or wait, then re-observe.
-3. \`observe({kind:"console"})\` + \`observe({kind:"network"})\` (filtered) after
-   actions that plausibly error — errors land there before they show visually.
-4. Only when the tree has no answer: \`look\`.
+- Element not in the tree → scroll or wait, then re-observe.
+- Errors land in console/network before they show visually (see below).
+- Only when the tree has no answer: \`look\`.
 
 ### Tree queries
 
@@ -105,11 +93,15 @@ Each row is a full exchange: \`method\`, \`url\`, \`status\`, \`ok\`, \`duration
 (\`{"error":"password too short"}\`); that string turns a finding into a fix. The
 \`requestBody\` shows whether the UI even sent what you typed.
 
-Credential header values arrive as \`<redacted, N chars>\` — deliberate. Presence is
-what you need (a missing \`cookie\` explains a 401), never the secret.
+Credentials arrive as \`<redacted, N chars>\` — header values, and the signed-in
+persona's values wherever they appear (bodies, urls, node names and \`value\`s).
+Deliberate, never a bug. Presence is what you need (a missing \`cookie\` explains a
+401). Such a node's \`target\` is an opaque \`@@ref:N\` — copy it like any other.
 
 - \`filters:{duration_gte:1000}\` — slow enough to be a UX bug.
 - \`filters:{body_contains:"error"}\` — failures that still returned 200.
+- \`filters:{pending_eq:true}\` — still in flight (no response yet): the hung call
+  behind a spinner.
 
 A default \`network\` read hides SUCCESSFUL static assets and reports the count as
 \`hidden\` — on a dev server they outnumber API calls ~15:1. Failed assets are always
@@ -126,24 +118,21 @@ on a node you can see → check for \`frame\`, and prefer clicking the node obje
 ### Tabs — a click can open one
 
 With more than one tab open, every \`act\` result carries \`tabs\`
-(\`index\`, \`id\`, \`url\`, \`title\`, \`active\`, \`visible\`). \`active\` means the controlled
-page; \`visible\` measures live document visibility, NOT OS-window focus. Attachment
-adopts a page without foregrounding it, so an active page can be hidden.
-A click on an external link, an OAuth button
-or \`target="_blank"\` opens a new tab and **you stay on the old one** — a click that
-seems to have done nothing means check \`tabs\` before calling the button broken.
+(\`index\`, \`id\`, \`url\`, \`title\`, \`active\`, \`visible\`). \`active\` = the page you
+control; \`visible\` = document visibility, NOT window focus (an active page can be
+hidden). A click on an external link, an OAuth button or \`target="_blank"\` opens a
+new tab and **you stay on the old one** — a click that seems to have done nothing
+means check \`tabs\` before calling the button broken.
 
 - \`observe({kind:"tabs"})\` — list them.
 - \`act({action:"switch_tab", target:"1"})\` — drive the tab at index 1 from now on
   and explicitly bring it forward. Console and network capture follow you; the
   previous tab's records are kept.
 
-\`index\` is a POSITION — it shifts when an earlier tab closes. \`id\` is the tab
-(\`tab-1\`, \`tab-2\`, …) and follows the PAGE for the whole run, so it survives the
-shift. A console or network row carries that same label as \`tab\`: a row with
-\`tab:"tab-2"\` came from the tab whose \`id\` is \`tab-2\`. To drive that tab, find
-its \`id\` in the CURRENT \`tabs\` listing and switch to that entry's \`index\` — the
-label is NOT an index, and \`switch_tab\` rejects it.
+\`index\` is a POSITION — it shifts when an earlier tab closes. \`id\` (\`tab-1\`,
+\`tab-2\`, …) follows the PAGE for the whole run; console/network rows carry it as
+\`tab\`. To drive that tab, find its \`id\` in the CURRENT \`tabs\` listing and switch
+to that entry's \`index\` — the label is NOT an index, and \`switch_tab\` rejects it.
 
 Switch back the same way when the popup flow is done.
 `;

@@ -113,15 +113,16 @@ test('createOpenRouterProvider: uses provided baseURL', () => {
   }
 });
 
-test('createOpenRouterProvider: uses OPENAI_BASE_URL env var fallback', () => {
+test('resolveProviderConfig: OPENAI_BASE_URL is not a second source — an unvalidated env value never reaches the provider', () => {
   const originalBaseURL = process.env.OPENAI_BASE_URL;
   try {
-    withEnv({ OPENAI_API_KEY: 'test-key' }, () => {
-      delete process.env.OPENAI_BASE_URL;
-      process.env.OPENAI_BASE_URL = 'https://env-base-url/v1';
-      const provider = createOpenRouterProvider();
-      expect(provider).toBeDefined();
-    });
+    process.env.OPENAI_BASE_URL = '  not-a-url  ';
+    expect(resolveProviderConfig({ apiKey: 'test-key' }).baseURL).toBe(
+      'https://openrouter.ai/api/v1',
+    );
+    expect(
+      resolveProviderConfig({ apiKey: 'test-key', baseURL: 'https://custom.api/v1' }).baseURL,
+    ).toBe('https://custom.api/v1');
   } finally {
     delete process.env.OPENAI_BASE_URL;
     if (originalBaseURL) process.env.OPENAI_BASE_URL = originalBaseURL;

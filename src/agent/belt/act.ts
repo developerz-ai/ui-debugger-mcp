@@ -31,7 +31,11 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import type { Adapter, Node, TabInfo } from '../../adapters/contract.js';
 import { AgentError } from '../../errors.js';
+import type { Redactor } from '../../redact.js';
 import type { LogChannel } from '../../session/findings-store.js';
+import { withRedactedOutput } from './redact-output.js';
+import { assertSameOrigin } from './same-origin.js';
+import { resolveTargetRef } from './target-refs.js';
 import type { ActTrail } from './trail.js';
 
 /** The action verbs `act` routes to the shared contract. */
@@ -225,39 +229,20 @@ function failureNote(error: unknown): string {
 }
 
 /** Perform one action against the contract and return its target-derived step label. */
-/**
- * Refuse a `navigate` that leaves the app under test.
- *
- * Observed end-to-end: driven at the local fixture with the goal "debug the Nimbus
- * Store home page", the driver's FIRST action was
- * `navigate → https://nimbus-store.vercel.app` — a public site it inferred from the
- * goal text. It never returned, and the run ended with six confident, fully-evidenced
- * bugs about a stranger's production app, with nothing in the output hinting the
- * target had been left. The smart agent would have gone hunting for a CORS bug that
- * does not exist in its repo.
- *
- * `origin` is the run's own origin (web only; empty for desktop/android, whose
- * `navigate` means a window title or an app package). Same-origin URLs and relative
- * paths pass; anything else fails loud, naming where the driver is supposed to be.
- * A run that wanders off the app under test is worse than a run that stops.
- */
-function assertSameOrigin(target: string, origin: string | undefined): void {
-  if (!origin) return; // non-web target, or no origin to enforce
-  let destination: URL;
-  try {
-    destination = new URL(target, origin); // relative paths resolve against the app
-  } catch {
-    return; // not URL-shaped — let the adapter reject it with its own message
-  }
-  if (destination.origin === origin) return;
-  throw new AgentError(
-    `act 'navigate' refused: '${target}' leaves the app under test (${origin}). ` +
-      'Findings about another site cannot be acted on. Use a path or a URL on ' +
-      `${origin}; if the app genuinely lives elsewhere, the smart agent must pass that url to start_debug.`,
-  );
-}
-
-async function performAct(adapter: Adapter, input: ActInput, origin?: string): Promise<string> {
+async function performAct(
+  adapter: Adapter,
+  raw: ActInput,
+  origin?: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  // An opaque `@@ref:N` target (issued by `observe` for a selector that would carry
+  // a run secret) resolves to the real selector HERE, never in the driver's
+  // context. `switch_tab`'s target is a tab index, `navigate`'s a URL — not selectors.
+  const selector = raw.action === 'switch_tab' || raw.action === 'navigate';
+  const input =
+    selector || raw.target === undefined
+      ? raw
+      : { ...raw, target: resolveTargetRef(adapter, raw.target) };
   switch (input.action) {
     case 'click': {
       const node = await resolve(adapter, required(input.target, 'target', 'click'));
@@ -265,9 +250,9 @@ async function performAct(adapter: Adapter, input: ActInput, origin?: string): P
       return `click ${describeNode(node)}`;
     }
     case 'type': {
-      // Validate `text` before resolving the target: a stale selector must not mask
-      // the real `requires 'text'` failure, nor cost an unnecessary `find()`.
-      const text = required(input.text, 'text', 'type');
+      // Validate `text` before resolving: a stale selector must not mask the real
+      // `requires 'text'` failure. Empty text WITH `clear` is valid: empty the field.
+      const text = input.clear && input.text === '' ? '' : required(input.text, 'text', 'type');
       const node = await resolve(adapter, required(input.target, 'target', 'type'));
       if (input.clear === true) {
         // `type` appends by design (it focuses and types, it does not `fill`), so
@@ -283,7 +268,7 @@ async function performAct(adapter: Adapter, input: ActInput, origin?: string): P
         await adapter.type(node, '');
         await adapter.pressKey('Control+a');
         await adapter.pressKey('Delete');
-        await adapter.type(node, text);
+        if (text !== '') await adapter.type(node, text);
         return `type ${text.length} chars into ${describeNode(node)} (replacing)`;
       }
       await adapter.type(node, text);
@@ -299,8 +284,7 @@ async function performAct(adapter: Adapter, input: ActInput, origin?: string): P
       // Every adapter needs something to block on — a bare `wait` can only throw
       // (`waitFor requires query and/or networkIdle`). Reject it HERE so the driver
       // gets a steering message from its own tool, and the dead step lands on the
-      // trail, instead of an adapter error it has to decode. A `timeout` alone is a
-      // sleep, which the loop has no use for.
+      // trail. A `timeout` alone is a sleep, which the loop has no use for.
       if (!input.target && input.networkIdle !== true) {
         throw new AgentError(
           "act 'wait' requires 'target' (a selector to wait for) and/or 'networkIdle': true",
@@ -310,6 +294,8 @@ async function performAct(adapter: Adapter, input: ActInput, origin?: string): P
         query: input.target,
         networkIdle: input.networkIdle,
         timeout: input.timeout,
+        // The run's abort cancels the wait — a 60s wait must not outlive its run.
+        signal,
       });
       return `wait for ${describeWait(input.target, input.networkIdle, input.timeout)}`;
     }
@@ -357,6 +343,7 @@ export async function runAct(
   trail?: ActTrail,
   entered?: () => void,
   origin?: string,
+  signal?: AbortSignal,
 ): Promise<ActResult> {
   // Enter the gate BEFORE the first await, so a same-step terminal read sees this
   // act in flight rather than an empty trail. `entered` is the release of a
@@ -368,7 +355,8 @@ export async function runAct(
   // no target-derived label, and an unlabelled failed step is not evidence.
   let label = describeAttempt(input);
   try {
-    label = await performAct(adapter, input, origin);
+    signal?.throwIfAborted(); // still queued when the run ended: never drive the target
+    label = await performAct(adapter, input, origin, signal);
     const png = await adapter.screenshot();
     const screenshot = await recorder.saveScreenshot(label, png);
     const navigated = await takeLoads(adapter);
@@ -447,13 +435,16 @@ async function extraTabs(adapter: Adapter): Promise<{ tabs?: TabInfo[] }> {
  * Build the `act` tool bound to one adapter + recorder, for the debug agent's belt.
  * `trail` (when wired by the loop) is the run's shared step trail, so every act —
  * the ones that worked and the ones that threw — lands in the persisted findings.
- * `origin` is the app under test's origin (web only); see {@link assertSameOrigin}.
+ * `origin` is the app's origin (web only; see {@link assertSameOrigin}). `redact`, the
+ * run's secret redactor, masks every string of the result and of a thrown error —
+ * REQUIRED, so a forgotten wire fails the typecheck instead of leaking.
  */
 export function createActTool(
   adapter: Adapter,
   recorder: StepRecorder,
-  trail?: ActTrail,
-  origin?: string,
+  trail: ActTrail | undefined,
+  origin: string | undefined,
+  redact: Redactor,
 ) {
   /**
    * Acts run ONE AT A TIME, however many the driver emits in a step.
@@ -464,33 +455,32 @@ export function createActTool(
    * it) and keyboard input is dispatched at the PAGE, not at an element: two acts
    * in flight interleave their keystrokes into whichever field last took focus.
    *
-   * Observed end-to-end: a registration typed
-   * `tTeessttuPsaesrs1TestPass123!…` into the password field and the app happily
-   * created the account. Nothing errored — the run just silently tested something
-   * other than what it typed, which is the worst failure mode a debugger can have.
+   * Observed end-to-end: a registration typed `tTeessttuPsaesrs1TestPass123!…` into
+   * the password field and the app happily created the account. Nothing errored —
+   * the run just silently tested something other than what it typed.
    *
    * Chaining here rather than locking the adapter: the atomic unit is the whole
    * act, not any single contract call it makes.
    */
   let queue: Promise<unknown> = Promise.resolve();
 
-  return tool({
+  const act = tool({
     description:
       'Drive the target with one action, chosen by action: click | type | key | scroll | navigate | wait | switch_tab. Resolves target via find, then routes to the adapter (click/type/open/waitFor) and records a step to agent.log plus a post-action screenshot. Returns tabs when more than one is open — a click may have opened one. Returns navigated when the action reloaded the document without being asked to (a form that submits without preventDefault, a plain link, an expired session): the page was replaced and every bit of in-page state is gone, so re-read before concluding anything — and treat a submit that only reloads as a bug, not a success. Use observe to read state before and after.',
     inputSchema: ActInputSchema,
-    execute: (input) => {
-      // Enter the trail's gate NOW, not when this act's turn on the queue comes up.
-      // `runAct` releases the gate in its `finally`, which is scheduled BEFORE the
-      // queue continuation that starts the next act — so a `report` racing in the
-      // same step saw an idle gate between two queued acts and wrote a verdict
-      // missing every act but the first (and the loop then stops, so that act
-      // reaches no persisted file at all).
+    execute: (input, { abortSignal: signal }) => {
+      // Enter the trail's gate NOW, not when this act's turn on the queue comes up:
+      // `runAct` releases it BEFORE the queue continuation starts the next act, so
+      // a `report` racing in the same step saw an idle gate between two queued acts
+      // and wrote a verdict missing every act but the first.
       const entered = trail?.begin();
-      const next = queue.then(() => runAct(adapter, recorder, input, trail, entered, origin));
-      // The chain must survive a failed act: swallow the rejection on the QUEUE
-      // copy only, so a thrown act still reaches the driver via `next`.
-      queue = next.catch(() => undefined);
-      return next;
+      const run = queue.then(() =>
+        runAct(adapter, recorder, input, trail, entered, origin, signal),
+      );
+      // The QUEUE copy swallows a rejection; the driver still gets it via `run`.
+      queue = run.catch(() => undefined);
+      return run;
     },
   });
+  return withRedactedOutput(act, redact);
 }

@@ -32,9 +32,15 @@
 
 import { capWait } from '../adapters/budget.js';
 import type { Adapter, Node } from '../adapters/contract.js';
-import type { AuthPersona, Target } from '../config/schema.js';
-import { AuthError, ConfigError } from '../errors.js';
+import { AuthError } from '../errors.js';
 import type { Step } from '../findings/schema.js';
+import type { ResolvedAuth } from './auth-persona.js';
+import { FIELD_KEY_HINT, fieldCandidates, submitCandidates } from './login-selectors.js';
+import { assertAlreadySignedIn } from './login-session.js';
+
+// Persona resolution and selector expansion live beside this file; importers keep this path.
+export { type ResolvedAuth, resolveAuth } from './auth-persona.js';
+export { fieldCandidates, submitCandidates } from './login-selectors.js';
 
 /** Whole-login default budget; the run's remaining cap may only shorten it. */
 const LOGIN_TIMEOUT_MS = 30_000;
@@ -96,99 +102,15 @@ const SETTLE_CONFIRM_MS = 2_000;
 /** Gap between two URL observations while the proof waits for a redirect to land. */
 const OBSERVATION_INTERVAL_MS = 250;
 
+/** How long a field may take to RENDER after `load` (an SPA mounts its form late; `find` does not wait). */
+const FORM_RENDER_MS = 3_000;
+
 /** Local sleep — the repo has no shared timer helper. */
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** The ms left before `deadline`, never negative — `capWait` rejects a negative budget. */
 function remainingMs(deadline: number): number {
   return Math.max(0, deadline - Date.now());
-}
-
-/** What `start_debug({as})` resolved to — the persona plus the key that named it. */
-export interface ResolvedAuth {
-  /** The `as` key, as the caller typed it — every failure names it. */
-  name: string;
-  persona: AuthPersona;
-}
-
-/**
- * Resolve `start_debug({as})` against the target's configured personas.
- *
- * Fails loud ({@link ConfigError}) on an unknown key, listing the valid ones — an
- * `as` typo must NEVER fall through to a signed-out run, because every screen
- * behind the login then reads as a broken UI.
- */
-export function resolveAuth(
-  target: Target,
-  targetName: string,
-  as: string | undefined,
-): ResolvedAuth | undefined {
-  if (as === undefined) return undefined;
-  if (target.adapter !== 'browser') {
-    throw new ConfigError(
-      `'as' (auth persona) only applies to web targets, but '${targetName}' is '${target.adapter}'`,
-    );
-  }
-  const auth = target.auth;
-  // `hasOwn`, never a plain index read — `auth['constructor']` walks the prototype
-  // chain and answers truthy, and the run would die deeper with a persona of `{}`.
-  const persona = auth && Object.hasOwn(auth, as) ? auth[as] : undefined;
-  if (persona) return { name: as, persona };
-
-  const configured = Object.keys(auth ?? {});
-  const known =
-    configured.length > 0
-      ? `configured personas: ${configured.map((k) => `'${k}'`).join(', ')}`
-      : `target '${targetName}' has no 'auth' block`;
-  throw new ConfigError(
-    `unknown auth persona '${as}' for target '${targetName}' — ${known}. ` +
-      `Add it under targets.${targetName}.auth in .ui-debugger-mcp.json, or omit 'as' to run signed out.`,
-  );
-}
-
-/**
- * A field key / submit label that is already a selector — used verbatim, never
- * expanded. Deliberately narrow (a leading `.`/`#`/`[`, a `tag#id`/`tag[attr]`, an
- * explicit engine prefix, or XPath) so an ordinary label like `Email address` or
- * `Sign in` is never mistaken for one.
- */
-const SELECTORISH = /^[.#[]|^[a-zA-Z][\w-]*[#[]|^(css|role|text|id|data-testid|xpath)=|^\/\//;
-
-/** A key safe to interpolate into an `#id` / `[type=…]` selector without quoting. */
-const IDENTIFIER = /^[a-zA-Z][\w-]*$/;
-
-/**
- * Selectors to try for a field, most specific first — `name`, then `id`/`type`,
- * then `data-testid`, then the two label-ish attributes.
- *
- * Ordered candidates rather than one comma-joined list on purpose: a CSS list
- * resolves in DOCUMENT order, so `{"password": …}` on a page with a "Forgot
- * password?" link above the input would type the password into the link.
- */
-export function fieldCandidates(key: string): string[] {
-  if (SELECTORISH.test(key)) return [key];
-  const v = JSON.stringify(key); // quoted + escaped for an attribute value
-  const candidates: string[] = [`css=input[name=${v} i], textarea[name=${v} i]`];
-  if (IDENTIFIER.test(key)) {
-    candidates.push(
-      `css=input#${key}, textarea#${key}`,
-      `css=input[type="${key.toLowerCase()}" i]`,
-    );
-  }
-  candidates.push(
-    `css=input[data-testid=${v} i], textarea[data-testid=${v} i]`,
-    `css=input[aria-label*=${v} i], textarea[aria-label*=${v} i]`,
-    `css=input[placeholder*=${v} i], textarea[placeholder*=${v} i]`,
-    `role=textbox[name=${v} i]`,
-  );
-  return candidates;
-}
-
-/** Selectors to try for the submit control — the named button, then link, then plain text. */
-export function submitCandidates(submit: string): string[] {
-  if (SELECTORISH.test(submit)) return [submit];
-  const v = JSON.stringify(submit);
-  return [`role=button[name=${v} i]`, `role=link[name=${v} i]`, `text=${submit}`];
 }
 
 /** First candidate that resolves to a node, or `null` when none of them do. */
@@ -200,12 +122,51 @@ async function findFirst(adapter: Adapter, candidates: readonly string[]): Promi
   return null;
 }
 
+/**
+ * The input for field `key`, waiting out a form that is still rendering. Only
+ * once the WHOLE render window has passed with no such input is the URL read: a
+ * page that is no longer the login page comes back as that URL (for
+ * {@link assertAlreadySignedIn} to prove or refuse), and one that still is throws
+ * the missing-field error. Never decided on the first miss — an app that serves
+ * `/login` as `/en/login` renders its form late like any other.
+ *
+ * The one early exit is PROOF, not a miss: the sole persona's `expect` marker
+ * showing on a redirected page is an existing session, so there is nothing left
+ * to wait for — every run on a signed-in profile takes this path.
+ */
+async function findField(
+  adapter: Adapter,
+  key: string,
+  { name, loginUrl, persona, solePersona }: LoginOptions,
+  deadline: number,
+): Promise<Node | string> {
+  const marker = solePersona === true ? persona.expect : undefined;
+  const until = Math.min(deadline, Date.now() + FORM_RENDER_MS);
+  for (;;) {
+    const node = await findFirst(adapter, fieldCandidates(key));
+    if (node) return node;
+    if (Date.now() >= until) break;
+    if (marker !== undefined && (await adapter.find({ query: marker })) !== null) {
+      const url = await currentUrl(adapter);
+      if (url !== null && !samePage(url, loginUrl)) return url;
+    }
+    await delay(Math.min(OBSERVATION_INTERVAL_MS, Math.max(1, until - Date.now())));
+  }
+  const url = await currentUrl(adapter);
+  if (url !== null && !samePage(url, loginUrl)) return url;
+  throw new AuthError(
+    `auth persona '${name}': no input matching field '${key}' on ${loginUrl}. ${FIELD_KEY_HINT}`,
+  );
+}
+
 /** Everything {@link performLogin} needs beyond the adapter itself. */
 export interface LoginOptions extends ResolvedAuth {
   /** Absolute login URL — `persona.path` already resolved against the target url. */
   loginUrl: string;
   /** The run's remaining wall-clock budget (ms); only ever shortens the login's waits. */
   timeoutMs?: number;
+  /** This persona is the target's ONLY one — an already-signed-in profile can only be it. */
+  solePersona?: boolean;
   /**
    * Breadcrumb sink (`logs/agent.log`). The caller's sink is already secret-redacting.
    * MAY return a promise (an awaited flush): both breadcrumbs are `await`ed, so when
@@ -248,13 +209,20 @@ export async function performLogin(adapter: Adapter, options: LoginOptions): Pro
   steps.push({ step: `open ${loginUrl}`, ok: true, note });
 
   for (const [key, value] of Object.entries(persona.fields)) {
-    const node = await findFirst(adapter, fieldCandidates(key));
-    if (!node) {
-      throw new AuthError(
-        `auth persona '${name}': no input matching field '${key}' on ${loginUrl}. ` +
-          "Rename the key to the field's name/id/type/data-testid/aria-label/placeholder, " +
-          'or use a selector as the key (e.g. "#user", "[data-testid=\'email\']").',
-      );
+    const node = await findField(adapter, key, options, deadline);
+    if (typeof node === 'string') {
+      if (steps.length > 1) {
+        // Mid-fill: fields were already typed, so "no form submitted" would be a lie.
+        throw new AuthError(
+          `auth persona '${name}': the page left ${loginUrl} for ${node} while the form was ` +
+            `being filled, before field '${key}' — the login cannot be completed.`,
+        );
+      }
+      const wait = capWait(NAVIGATION_SETTLE_MS, remainingMs(deadline));
+      await assertAlreadySignedIn(adapter, options, key, node, wait);
+      const step = `profile already signed in as "${name}" ('expect' marker shown; pre-run, no form submitted) → ${node}`;
+      await log(`auth: ${step}`);
+      return [...steps, { step, ok: true, note }];
     }
     // `type` APPENDS (it focuses and types, it does not `fill`), so a browser that
     // restored a saved value would produce a spliced credential and a failed login
@@ -274,10 +242,13 @@ export async function performLogin(adapter: Adapter, options: LoginOptions): Pro
         'Use the control\'s visible label, or a selector (e.g. "button[type=submit]").',
     );
   }
+  // The page the form is REALLY on (`/login` may be served as `/en/login`): that is
+  // the one submitting has to leave, or a rejected login there reads as "it moved".
+  const formUrl = (await currentUrl(adapter)) ?? loginUrl;
   await adapter.click(submit);
   steps.push({ step: `click submit "${persona.submit}"`, ok: true, note });
 
-  await assertSignedIn(adapter, options, budget, deadline);
+  await assertSignedIn(adapter, { ...options, loginUrl: formUrl }, budget, deadline);
   // Where the login LANDED, not where the run was configured to start: submitting
   // usually redirects, so this is the page the driver's first step actually reads.
   const landed = await currentUrl(adapter);
@@ -347,10 +318,7 @@ async function assertSignedIn(
   // A target with no tab concept cannot answer "did the page move?", and there
   // is no `expect` to fall back on. Say so before spending a wait on it.
   if (!adapter.tabs) {
-    throw new AuthError(
-      `auth persona '${name}': this target cannot report its current location, so the login ` +
-        "cannot be verified — set 'expect' on the persona to a selector that only exists once signed in.",
-    );
+    throw unverifiable(name);
   }
 
   /** The URL the last observation saw — the one a failure names. */
@@ -393,10 +361,7 @@ async function assertSignedIn(
     // or not. That is the whole fix: a redirect that lands late is still seen.
     const after = await currentUrl(adapter);
     if (after === null) {
-      throw new AuthError(
-        `auth persona '${name}': this target cannot report its current location, so the login ` +
-          "cannot be verified — set 'expect' on the persona to a selector that only exists once signed in.",
-      );
+      throw unverifiable(name);
     }
     lastUrl = after;
     // The URL left the login page: the login took.
@@ -426,11 +391,7 @@ async function assertSignedIn(
       // whole quiet window is a rejected login — and a redirect that lands
       // inside that window is the login taking.
       if (Date.now() - quietSince >= quietWindow) {
-        throw new AuthError(
-          `auth persona '${name}': still on ${after} after submitting '${persona.submit}' — the login ` +
-            'did not take. Check the credentials and the field keys; if this app signs in WITHOUT ' +
-            "navigating away, set 'expect' on the persona to a selector that only exists once signed in.",
-        );
+        throw rejected(name, persona.submit, after);
       }
     }
 
@@ -454,11 +415,7 @@ async function assertSignedIn(
   // again and was still working when the budget ran out — proves nothing about
   // the credentials, so it gets the unresolved diagnostic instead.
   if (quiet && Date.now() - quietSince >= quietWindow) {
-    throw new AuthError(
-      `auth persona '${name}': still on ${lastUrl} after submitting '${persona.submit}' — the login ` +
-        'did not take. Check the credentials and the field keys; if this app signs in WITHOUT ' +
-        "navigating away, set 'expect' on the persona to a selector that only exists once signed in.",
-    );
+    throw rejected(name, persona.submit, lastUrl);
   }
   throw new AuthError(
     `auth persona '${name}': still on ${lastUrl} after ${budget}ms — the login budget was exhausted ` +
@@ -469,12 +426,33 @@ async function assertSignedIn(
   );
 }
 
-/** Same origin + same path — the query/hash a login flow adds (`?error=1`) does not make it a new page. */
+/** No `expect`, and no URL to watch: the login cannot be proven either way. */
+function unverifiable(name: string): AuthError {
+  return new AuthError(
+    `auth persona '${name}': this target cannot report its current location, so the login ` +
+      "cannot be verified — set 'expect' on the persona to a selector that only exists once signed in.",
+  );
+}
+
+/** The settled rejection: the page went idle and stayed on the login page. */
+function rejected(name: string, submit: string, url: string): AuthError {
+  return new AuthError(
+    `auth persona '${name}': still on ${url} after submitting '${submit}' — the login ` +
+      'did not take. Check the credentials and the field keys; if this app signs in WITHOUT ' +
+      "navigating away, set 'expect' on the persona to a selector that only exists once signed in.",
+  );
+}
+
+/**
+ * Same origin + same path — the query/hash a login flow adds (`?error=1`) does not
+ * make it a new page, and neither does the trailing slash a server appends.
+ */
 export function samePage(a: string, b: string): boolean {
+  const path = (url: URL): string => url.pathname.replace(/\/+$/, '');
   try {
     const left = new URL(a);
     const right = new URL(b);
-    return left.origin === right.origin && left.pathname === right.pathname;
+    return left.origin === right.origin && path(left) === path(right);
   } catch {
     return a === b;
   }
