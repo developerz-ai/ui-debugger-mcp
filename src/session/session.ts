@@ -213,8 +213,19 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
    */
   async close(): Promise<void> {
     this.#abort.abort();
-    if (this.#run !== null) await this.#run;
-    await this.#adapter.close();
+    if (this.#run !== null) {
+      // The loop crashed or was aborted: still release the target and free the
+      // profile lock. await without catching — the error propagates so the
+      // caller (end_session / SIGTERM) sees the teardown did not succeed, but
+      // close() NEVER skips adapter.close() leaving a browser stranded.
+      try {
+        await this.#run;
+      } finally {
+        await this.#adapter.close();
+      }
+    } else {
+      await this.#adapter.close();
+    }
   }
 
   /** Run the loop to settlement, then fold its outcome into `status` (+ findings on failure). */

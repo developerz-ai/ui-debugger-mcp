@@ -1,26 +1,18 @@
 /**
- * The debug agent loop — the fast guy's run, as a conversation.
+ * The debug agent loop — the fast guy's run, as a conversation over the inner
+ * belt (`observe`/`act`/`look`/`report`) driven by the `driver` model until
+ * `report` (terminal verdict) or a step cap trips.
  *
- * A {@link ToolLoopAgent} drives the inner belt (`observe`/`act`/`look`/`report`)
- * with the `driver` model until the goal is met (`report`, the terminal verdict)
- * or a safety step cap trips. Two things make it a *conversation*, not a job:
+ * - **inbox** — mid-run messages (`send_message`) folded into a standing instruction
+ *   block re-appended to every turn, so the driver adapts without restarting.
+ * - **incremental findings** — `onStepFinish` flushes the running step trail so
+ *   `get_findings` streams findings before the verdict lands, and a run that
+ *   crashes, aborts or hits the step cap keeps everything surfaced so far.
  *
- *   - **inbox** — `prepareStep` drains the session inbox between steps and folds
- *     any mid-run messages (the smart agent's `send_message`) into a standing
- *     instruction block re-appended to EVERY turn (the SDK rebuilds each step's
- *     prompt from scratch), so the driver adapts without restarting or forgetting.
- *   - **incremental findings** — `onStepFinish` snapshots the shared evidence
- *     trail (the belt's tools record each step, console error and look issue as
- *     it happens) and flushes it as `status: 'running'` findings, so
- *     `get_findings` streams findings before the verdict lands, and a run that
- *     crashes, aborts or hits the step cap keeps everything surfaced so far.
- *
- * Adapter-blind and model-blind like the belt: the loop never touches a protocol
- * or a provider. It is pure over two seams — {@link LoopInbox} (drain) and
- * {@link ProgressWriter} (flush) — so its logic unit-tests with no network. The
- * `report` step owns the terminal write, so the running flush steps aside for it
- * (never clobbers the verdict with a `running` snapshot). Abort propagates: an
- * aborted run rejects loud (wired to `end_session`), never a silent half-finish.
+ * Adapter-blind and model-blind: pure over two seams — {@link LoopInbox} (drain)
+ * and {@link ProgressWriter} (flush). The `report` step owns the terminal write,
+ * so running flushes never clobber the verdict. Abort propagates: an aborted run
+ * rejects loud (wired to `end_session`), never a silent half-finish.
  */
 
 import { type LanguageModel, type ModelMessage, stepCountIs, type Tool, ToolLoopAgent } from 'ai';
@@ -32,12 +24,10 @@ import type { ActTrail, TrailEvidence } from './belt/trail.js';
  * Safety cap on driver steps before the loop force-stops (paired with the
  * report-RESULT stop condition in {@link createDebugAgent}).
  *
- * Raised from 30 on measurement, not taste: the tool's own headline scenario —
- * register an account, log in, add two todos, toggle one, then exercise three
- * filters — spent all 30 steps and died one action short of reporting, which
- * costs the entire run (no verdict, no findings, full token spend). The observed
- * pace is ~3s/step, so 60 still finishes well inside the default 300s wall-clock
- * cap, which remains the real bound on what a run costs.
+ * Raised from 30 on measurement: the headline scenario — register, log in, add
+ * two todos, toggle one, exercise three filters — spent all 30 steps and died
+ * one action short of reporting (full token spend, no verdict). 60 still finishes
+ * inside the default 300s wall-clock cap, which remains the real cost bound.
  */
 export const DEFAULT_MAX_STEPS = 60;
 
@@ -263,7 +253,6 @@ export function pruneStaleFrames(messages: ModelMessage[]): ModelMessage[] {
   });
 }
 
-/** Steps left at or below which the driver is nudged to wrap up and `report`. */
 export const BUDGET_WARN = 6;
 
 /**

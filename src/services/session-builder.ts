@@ -22,7 +22,7 @@ import type { Adapter } from '../adapters/contract.js';
 import { createAdapter } from '../adapters/factory.js';
 import { createActTool } from '../agent/belt/act.js';
 import { createLookTool, createSelfLookTool } from '../agent/belt/look.js';
-import { createObserveTool } from '../agent/belt/observe.js';
+import { createObserveTool } from '../agent/belt/observe-tool.js';
 import { createReportTool } from '../agent/belt/report.js';
 import { createActTrail } from '../agent/belt/trail.js';
 import { createDebugAgent, runDebugLoop } from '../agent/loop.js';
@@ -398,7 +398,7 @@ export async function buildSession(
           'look',
           selfLook
             ? createSelfLookTool(adapter, store)
-            : createLookTool(adapter, models.vision, store, trail, notes),
+            : createLookTool(adapter, models.vision, store, trail, notes, redact),
           logAgent,
         ),
         report: withToolLog(

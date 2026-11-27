@@ -26,6 +26,7 @@ import type { Adapter } from '../../adapters/contract.js';
 import { AgentError, VisionUnavailableError } from '../../errors.js';
 import { VISUAL_SEVERITIES } from '../../findings/schema.js';
 import type { ActTrail } from './trail.js';
+import type { Redactor } from '../../redact.js';
 
 /** `look` input — both optional: ask a `question`, and/or state the `expect`ed look. */
 export const LookInputSchema = z.object({
@@ -305,15 +306,19 @@ export async function runLook(
   input: LookInput,
   abortSignal?: AbortSignal,
   notes?: readonly string[],
+  redact: Redactor = (line) => line,
 ): Promise<LookResult> {
   const frame = await captureForVision(adapter);
+  // The vision guy's prompt carries the smart agent's question/expect — a
+  // persona's typed value echoed there must never reach the provider.
+  const safeText = redact(buildPrompt(input));
   const { text } = await generate({
     system: composeVisionSystem(notes),
     messages: [
       {
         role: 'user',
         content: [
-          { type: 'text', text: buildPrompt(input) },
+          { type: 'text', text: safeText },
           { type: 'image', image: frame.bytes, mediaType: frame.mediaType },
         ],
       },
@@ -338,12 +343,13 @@ export function createLookExecute(
   generate: VisionGenerate,
   recorder: EvidenceRecorder,
   notes?: readonly string[],
+  redact: Redactor = (line) => line,
 ) {
   let unavailable: VisionUnavailableError | undefined;
   return async (input: LookInput, abortSignal?: AbortSignal): Promise<LookResult> => {
     if (unavailable) throw unavailable;
     try {
-      return await runLook(adapter, generate, recorder, input, abortSignal, notes);
+      return await runLook(adapter, generate, recorder, input, abortSignal, notes, redact);
     } catch (e) {
       if (e instanceof VisionUnavailableError) unavailable = e;
       throw e;
@@ -429,6 +435,7 @@ export function createLookTool(
   recorder: EvidenceRecorder,
   trail?: ActTrail,
   notes?: readonly string[],
+  redact: Redactor = (line) => line,
 ) {
   const modelId = typeof vision === 'string' ? vision : vision.modelId;
   // Forward the abort signal into the vision call: on end_session / wall-clock
@@ -446,7 +453,7 @@ export function createLookTool(
       throw e;
     }
   };
-  const execute = createLookExecute(adapter, generate, recorder, notes);
+  const execute = createLookExecute(adapter, generate, recorder, notes, redact);
   return tool({
     description:
       'Ask the vision model to look at the current screen. Captures a screenshot and sends it with your question/expect to the multimodal "eyes", which judges how it looks (layout, alignment, colour, overlap, cut-off text). Returns { description, matches?, issues[] } with the screenshot saved as evidence. Use only when structure (observe) cannot answer — vision is slow and costly.',

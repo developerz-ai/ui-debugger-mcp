@@ -1,30 +1,3 @@
-/**
- * `observe` — the driver's read tool (inner belt).
- *
- * One SQL-like reader, with "tables" picked by `kind`, each routed to one method
- * on the shared {@link Adapter} contract:
- *   - `tree`       → `readState`   (normalized UI nodes; DOM · a11y · view-hierarchy)
- *   - `screenshot` → `screenshot`  (an evidence frame, SAVED to `screenshots/` — the
- *     driver is a blind text model and the SDK re-sends tool results every step, so
- *     the result carries the saved path, never the PNG bytes)
- *   - `console`    → `console`     (captured console/error log, newest first)
- *   - `network`    → `network`     (captured network exchanges, newest first)
- *   - `tabs`       → `tabs`        (open browser tabs)
- *
- * Adapter-blind: routes through the contract only — it never learns the protocol
- * underneath. Composition lives in params (`query`/`fields`/`filters`/`limit`/
- * `within`), like a `SELECT` — see `idea/mcp-tools.md`.
- *
- * Whitelisting is split, and neither side is an injection surface:
- *   - **fields** (the `SELECT` projection) are whitelisted HERE to the contract's
- *     {@link NodeField}s via the Zod enum, then projected after the read.
- *   - **filters** (`WHERE field_op`) pass through and are whitelisted by the
- *     ADAPTER, which throws on an unknown key (per-adapter key sets differ).
- *
- * Fails loud: a bad filter/limit surfaces the adapter's `AdapterError`; we never
- * swallow it or silently fall back.
- */
-
 import { tool } from 'ai';
 import { z } from 'zod';
 import type {
@@ -49,10 +22,7 @@ import type { ActTrail } from './trail.js';
  */
 export const OBSERVE_KINDS = ['tree', 'screenshot', 'console', 'network', 'tabs'] as const;
 
-/**
- * Selectable {@link Node} columns — the `fields` projection whitelist (contract-level).
- * Exported for the same drift guard as {@link OBSERVE_KINDS}.
- */
+/** Selectable {@link Node} columns — the `fields` projection whitelist (contract-level). */
 export const NODE_FIELDS = [
   'role',
   'name',
@@ -65,11 +35,7 @@ export const NODE_FIELDS = [
   'checked',
 ] as const satisfies readonly NodeField[];
 
-/**
- * Columns a no-`fields` read returns. `style` (colour + contrast per text node)
- * is opt-in only — on a 200-node default read it would triple the payload the
- * text driver re-reads every step for data it rarely needs.
- */
+/** Columns a no-`fields` read returns. `style` is opt-in only — on a 200-node default read it triples the payload the text driver re-reads every step. */
 const DEFAULT_PROJECTION = [
   'role',
   'name',
@@ -81,34 +47,10 @@ const DEFAULT_PROJECTION = [
   'checked',
 ] as const satisfies readonly NodeField[];
 
-/**
- * Rows a no-`limit` `console`/`network` read returns (newest first, so the cap keeps
- * what just happened). The ring buffers hold 1000 entries each (`browser/cdp.ts`), the
- * driver is told to check both channels after acting, and the SDK re-sends every tool
- * result on every later step — so one unbounded read on a chatty page costs
- * entries × remaining steps of context. An explicit `limit` (including `0`) still wins.
- */
 const DEFAULT_LOG_LIMIT = 50;
 
-/**
- * Resource types a default `network` read keeps: the app talking to its backend,
- * plus the navigation itself.
- *
- * A page's traffic is overwhelmingly static assets — measured on a Vite dev
- * server, one real API call for every fifteen `script` loads (HMR re-requests
- * every module). Reading the newest 50 rows there returns fifty module fetches
- * and not one API call, which makes the channel useless exactly where it matters
- * most. Assets stay one explicit `resource_in` away (see {@link keepByDefault}).
- */
 const API_RESOURCE_TYPES = new Set(['fetch', 'xhr', 'websocket', 'eventsource', 'document']);
 
-/**
- * Whether a default (unfiltered) `network` read shows this entry.
- *
- * Anything that FAILED is kept whatever its type — a 404 stylesheet or a broken
- * image is a real bug, and hiding it to cut noise would defeat the point. An
- * entry with no resource type is kept too: unknown is not the same as static.
- */
 function keepByDefault(entry: NetworkEntry): boolean {
   if (!entry.ok) return true;
   return entry.resourceType === undefined || API_RESOURCE_TYPES.has(entry.resourceType);
@@ -316,22 +258,18 @@ function baseSelector(
 
 /**
  * Attach a copy-paste `target` to each tree node, disambiguating duplicates with
- * `>> nth=` in document order — so the agent never has to invent a selector (the
- * #1 cause of wasted steps: a blind model guessing CSS that does not resolve).
+ * `>> nth=` in document order — so the agent never invents a selector (#1 cause of
+ * wasted steps: a blind model guessing CSS that does not resolve).
  *
- * A `scoped` read (`query`/`within`/`filters`) returns a *subset*, so the `nth=`
- * index — and even a bare role/text selector — can resolve a different element when
- * `act` replays it with an unscoped, document-wide `find` (e.g. header "Settings"
- * instead of the sidebar "Settings" the narrowed read returned). In that case we
- * emit no `target` — EXCEPT a testid one, which is document-unique and survives
- * any scoping. Otherwise, better the agent falls back (visible text /
- * `role "name"`) than act on the wrong node.
+ * A `scoped` read returns a *subset*, so the `nth=` index — and even a bare
+ * role/text selector — can resolve a *different* element when `act` replays it with
+ * an unscoped document-wide `find`. In that case we emit no `target` — EXCEPT a
+ * testid one, which is document-unique and survives any scoping. Better the agent
+ * falls back (visible text / `role "name"`) than act on the wrong node.
  *
- * `>> nth=` is Playwright chaining and exists on WEB only; the native parsers read
- * it as part of a name substring and match nothing. So on a native target a
- * repeated selector yields a `target` for the FIRST node only — the others are
- * genuinely unaddressable there, and saying so beats handing out a string that
- * silently acts on the first one.
+ * `>> nth=` is Playwright chaining (WEB only); native parsers read it as a name
+ * substring and match nothing. So on native a repeated selector yields a `target`
+ * for the FIRST node only — the others are genuinely unaddressable there.
  */
 function withTargets(
   nodes: Node[],
@@ -369,14 +307,13 @@ function pick<T, K extends keyof T>(obj: T, keys: readonly K[]): Pick<T, K> {
 }
 
 /**
- * A `within` node as a contract {@link NodeRef}: its on-screen region when it has one,
- * else the selector its testid/role/name resolve to — the same string `observe` would
- * have attached to that node as `target`.
+ * A `within` node as a contract {@link NodeRef}: its region when it has one,
+ * else the selector its testid/role/name resolve to — the same string `observe`
+ * attaches to that node as `target`.
  *
- * Adapters scope a {@link Node} `within` by `bounds` ALONE, so a region-less node has
- * to become a selector or it would silently read nothing. `enabled` is never read when
- * scoping; the contract just requires the field, so a projection that dropped it
- * defaults to `true` rather than throwing away an exact region.
+ * Adapters scope `within` by `bounds` ALONE, so a region-less node has to become
+ * a selector or it would silently read nothing. `enabled` defaults to `true` when
+ * a projection dropped it — never thrown away.
  */
 function scopeOf(node: WithinNode, dialect: SelectorDialect): NodeRef {
   const { bounds } = node;
@@ -422,14 +359,6 @@ export function coerceWithin(
   return scopeOf(parsed.data, dialect);
 }
 
-/**
- * The `truncated` + `hint` pair for log rows the `limit` cut off; `{}` when the cap
- * dropped nothing.
- *
- * Silent truncation is the failure this exists to prevent: a submit flow that
- * produced 120 failing requests, read back capped at 50, tells a blind driver
- * "there were 50 failures" — and it reports that truncated picture as the finding.
- */
 function truncation(dropped: number, cap: number): { truncated?: number; hint?: string } {
   if (dropped <= 0) return {};
   return {
@@ -443,11 +372,9 @@ function truncation(dropped: number, cap: number): { truncated?: number; hint?: 
  * {@link Adapter} + {@link EvidenceRecorder} seams (no `tool()` wrapper), so it
  * unit-tests against fakes.
  *
- * `redact` is the run's secret redactor (`createSecretRedactor`, bound per run to
- * the auth persona's values); it defaults to identity, so an un-wired call is
- * unchanged. It is applied ONLY to console-derived free text — an adapter error
- * or a logged-in app can echo a typed credential back through a console row —
- * never to the network channel, whose entries are whole exchanges.
+ * `redact` is the run's secret redactor, defaulting to identity so an un-wired
+ * call is unchanged. Applied to console text/location and network URL/headers/
+ * body — never to tree/screenshot/tabs.
  */
 export async function runObserve(
   adapter: Adapter,
@@ -474,11 +401,11 @@ export async function runObserve(
       const path = await recorder.saveScreenshot('observe', png);
       return { kind, path, bytes: png.byteLength };
     }
-    // Both log channels default to a bounded tail (see DEFAULT_LOG_LIMIT); an explicit
-    // `limit` — including `0` — wins, invalid ones still die in the adapter. Both read
-    // the adapter UNCAPPED and cap HERE, so the rows the cap drops can be counted and
-    // reported: the buffers behind them are already bounded (a 1000-entry in-memory
-    // ring on web, a 500-line logcat tail on android), so the extra rows cost nothing.
+    // Both log channels default to a bounded tail (DEFAULT_LOG_LIMIT); an explicit
+    // `limit` — including `0` — wins, invalid ones die in the adapter. Both read the
+    // adapter UNCAPPED and cap HERE, so dropped rows can be counted/reported; the
+    // buffers behind them are already bounded (1000-entry ring on web, 500-line logcat
+    // tail on android), so the extra rows cost nothing.
     case 'console': {
       const cap = limit ?? DEFAULT_LOG_LIMIT;
       const matched = await adapter.console({ filters });
@@ -486,11 +413,7 @@ export async function runObserve(
       // is echoed back in console text and source locations (`url?token=…`),
       // and these rows are what the driver reads AND what the trail records as
       // bugs — both must carry the redactor's marker, never the raw value.
-      const entries = matched.slice(0, cap).map((entry) => ({
-        ...entry,
-        text: redact(entry.text),
-        ...(entry.location !== undefined && { location: redact(entry.location) }),
-      }));
+      const entries = matched.slice(0, cap).map((entry) => redactConsoleEntry(entry, redact));
       return { kind, count: entries.length, entries, ...truncation(matched.length - cap, cap) };
     }
     case 'network': {
@@ -504,7 +427,7 @@ export async function runObserve(
       // never second-guess it.
       const explicitTypes = filters !== undefined && 'resource_in' in filters;
       const kept = explicitTypes ? matched : matched.filter(keepByDefault);
-      const entries = kept.slice(0, cap);
+      const entries = kept.slice(0, cap).map((entry) => redactNetworkEntry(entry, redact));
       const hidden = matched.length - kept.length;
       const cut = truncation(kept.length - cap, cap);
       // Never truncate silently: say what was held back and how to see it.
@@ -539,51 +462,33 @@ export async function runObserve(
 }
 
 /**
- * Build the `observe` tool bound to one adapter + recorder, for the debug agent's belt.
- * `trail` (when wired by the loop) is the run's evidence trail: every error-level
- * console row a read returns is recorded there BEFORE the gate releases — dedupe
- * is the trail's job, so re-reads of the ring buffer add nothing — and a `report`
- * racing in the SAME step carries them even when the driver's `bugs` array omits
- * them. Other kinds record nothing; a failed read records nothing.
- *
- * `redact` threads through to {@link runObserve}'s console channel (identity when
- * omitted), so both the entries the driver reads and the error rows recorded on
- * the trail below arrive persona-redacted.
+ * Redact one `console` entry: text and source location (`url?token=…`) carry a
+ * typed credential echoed back by the app under test.
  */
-export function createObserveTool(
-  adapter: Adapter,
-  recorder: EvidenceRecorder,
-  trail?: ActTrail,
-  redact: Redactor = (line) => line,
-) {
-  return tool({
-    description:
-      'Read the target without mutating it. Pick a channel with kind (tree=UI nodes incl. iframe content, screenshot=PNG evidence saved to screenshots/ — returns its path, console=logs, network=requests with status/timing/payloads, tabs=open tabs); compose with query/fields/filters/limit/within. Use it to inspect state before and after acting.',
-    inputSchema: ObserveInputSchema,
-    execute: async (input) => {
-      // Enter the trail's gate BEFORE the first await (same discipline as `act`),
-      // so a same-step terminal read sees this read in flight rather than an idle
-      // gate.
-      const settle = trail?.begin();
-      try {
-        const result = await runObserve(adapter, recorder, input, redact);
-        // Record AFTER the result exists, BEFORE releasing: the read succeeded, so
-        // its error rows are real surfaced findings.
-        if (result.kind === 'console') {
-          for (const entry of result.entries) {
-            // Error rows only — warn/log/info are working noise, not findings.
-            if (entry.level !== 'error') continue;
-            trail?.recordBug({
-              kind: 'console',
-              detail: entry.text,
-              ...(entry.location !== undefined && { evidence: entry.location }),
-            });
-          }
-        }
-        return result;
-      } finally {
-        settle?.();
-      }
-    },
-  });
+export function redactConsoleEntry(entry: ConsoleEntry, redact: Redactor): ConsoleEntry {
+  return {
+    ...entry,
+    text: redact(entry.text),
+    ...(entry.location !== undefined && { location: redact(entry.location) }),
+  };
+}
+
+/**
+ * Redact one `network` entry — request URL, headers and body — so typed auth
+ * values never reach the driver via observe. JSON-serialized headers/bodies are
+ * redacted too, catching percent-encoded and JSON-escaped spellings of a secret.
+ */
+export function redactNetworkEntry(entry: NetworkEntry, redact: Redactor): NetworkEntry {
+  return {
+    ...entry,
+    url: redact(entry.url),
+    ...(entry.requestHeaders !== undefined && {
+      requestHeaders: redact(JSON.stringify(entry.requestHeaders)),
+    }),
+    ...(entry.responseHeaders !== undefined && {
+      responseHeaders: redact(JSON.stringify(entry.responseHeaders)),
+    }),
+    ...(entry.requestBody !== undefined && { requestBody: redact(entry.requestBody) }),
+    ...(entry.responseBody !== undefined && { responseBody: redact(entry.responseBody) }),
+  };
 }
