@@ -25,7 +25,13 @@ import { AdapterError } from '../../errors.js';
 import { capWait } from '../budget.js';
 import type { CaptureSink } from './cdp.js';
 import { CdpCapture } from './cdp.js';
-import { closeOnFailure, createFailure, LAUNCH_TIMEOUT_MS, resolveLaunchBinary } from './launch.js';
+import {
+  closeOnFailure,
+  createFailure,
+  LAUNCH_TIMEOUT_MS,
+  RESTORE_TIMEOUT_MS,
+  resolveLaunchBinary,
+} from './launch.js';
 import { TabContext } from './tab-context.js';
 
 export interface AdapterHandles {
@@ -37,6 +43,12 @@ export interface AdapterHandles {
   capture: CdpCapture;
   /** The run's tab registry — one naming scheme for the capture and the adapter. */
   tabs: TabContext;
+  /**
+   * `true` when attach found no tab to adopt and OPENED `page` itself — a tab in
+   * a browser we do not own, so teardown closes it rather than leave it behind.
+   * Always `false` for managed (the whole context is ours and closes anyway).
+   */
+  createdPage: boolean;
 }
 
 /** The slice of `chromium` this adapter actually calls — the test seam below overrides it. */
@@ -117,7 +129,16 @@ async function launchHandles(
   return closeOnFailure(context, async () => {
     const page = context.pages()[0] ?? (await context.newPage());
     const capture = startCapture(page, onLog, tabs);
-    return { config, context, page, browser: null, mode: 'managed', capture, tabs };
+    return {
+      config,
+      context,
+      page,
+      browser: null,
+      mode: 'managed',
+      capture,
+      tabs,
+      createdPage: false,
+    };
   });
 }
 
@@ -136,9 +157,11 @@ async function attachHandles(
   // relies on, so a failed attach never stops a browser we did not start.
   return closeOnFailure(browser, async () => {
     const context = browser.contexts()[0] ?? (await browser.newContext());
-    const page = context.pages()[0] ?? (await context.newPage());
+    const adopted = context.pages()[0];
+    const page = adopted ?? (await context.newPage());
     const capture = startCapture(page, onLog, tabs);
-    return { config, context, page, browser, mode: 'attach', capture, tabs };
+    const createdPage = adopted === undefined;
+    return { config, context, page, browser, mode: 'attach', capture, tabs, createdPage };
   });
 }
 
@@ -147,4 +170,37 @@ function startCapture(page: Page, onLog: CaptureSink | undefined, tabs: TabConte
   const capture = new CdpCapture({ page, sink: onLog, tabs });
   capture.start();
   return capture;
+}
+
+/**
+ * What attach teardown owes the tab it drove: the ADOPTED tab goes back to the
+ * URL it carried at attach; a tab attach OPENED itself (the browser had none to
+ * adopt) is closed — "restoring" it to `about:blank` would leave a stray tab in
+ * a browser that is not ours.
+ */
+export type TabHandBack = { page: Page; url: string } | { page: Page; close: true };
+
+/**
+ * Hand the attached tab back (see {@link TabHandBack}); `null` does nothing.
+ *
+ * A tab the run never moved already sits on the snapshot, so it is not reloaded
+ * — navigating it again would only flash the owner's screen. Every failure is
+ * swallowed on purpose: the browser was never ours, the run is already over,
+ * and neither a wedged `goto` nor a tab the owner closed mid-run — reading a dead
+ * handle's address throws — may fail the teardown or skip the disconnect that
+ * follows (same best-effort posture as `closeOnFailure` in `launch.ts`).
+ * `RESTORE_TIMEOUT_MS` caps the wait — teardown has no run budget to shorten.
+ */
+export async function handBackTab(handBack: TabHandBack | null): Promise<void> {
+  if (!handBack) return;
+  try {
+    if ('close' in handBack) {
+      await handBack.page.close();
+      return;
+    }
+    if (handBack.page.url() === handBack.url) return;
+    await handBack.page.goto(handBack.url, { timeout: RESTORE_TIMEOUT_MS });
+  } catch {
+    // Best-effort only — the caller's disconnect must still happen.
+  }
 }

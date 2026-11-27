@@ -30,15 +30,16 @@
  * {@link AdapterError}, never a silent ignore.
  */
 
-import type { ConsoleMessage, Page, Request, Response } from 'playwright-core';
+import type { ConsoleMessage, Frame, Page, Request, Response } from 'playwright-core';
 import type { CaptureSink, ConsoleEntry, LogQuery, NetworkEntry } from '../contract.js';
 import { capToLimit } from '../limit.js';
+import { BODY_WAIT_MS, readBodyWithin, readHeaders, withTimeout } from './exchange-read.js';
 import { filterConsole, filterNetwork } from './log-filters.js';
 import {
   formatConsoleLine,
   formatNetworkLine,
   normalizeConsoleLevel,
-  redactHeaders,
+  redactBody,
   redactUrl,
   truncateBody,
 } from './log-format.js';
@@ -50,6 +51,7 @@ import type { TabContext } from './tab-context.js';
 // Filtering lives in `log-filters.ts` and rendering/redaction in `log-format.ts`
 // (500-LOC cap); both are re-exported here for the same reason.
 export type { CaptureSink } from '../contract.js';
+export { BODY_READ_MAX_BYTES, BODY_UNFINISHED, BODY_WAIT_MS } from './exchange-read.js';
 export {
   CONSOLE_FILTER_KEYS,
   filterConsole,
@@ -78,81 +80,12 @@ const DEFAULT_BUFFER_CAP = 1000;
 export const BODY_RESOURCE_TYPES = new Set(['fetch', 'xhr']);
 
 /**
- * How long a response body/header read may take before the exchange is recorded
- * without it. A streaming response (SSE, long-poll, a chunked download) only
- * "finishes" when the page tears it down, so an uncapped read would keep the
- * durable log line hostage for the whole run.
- */
-export const BODY_WAIT_MS = 2_000;
-
-/** Stand-in body for a response that was still streaming when the cap expired. */
-export const BODY_UNFINISHED = '<body not finished>';
-
-/**
  * `{ key: value }` when the value exists, `{}` when it does not — spread into an
  * entry so an absent optional never serializes as an explicit `undefined` (and
  * `exactOptionalPropertyTypes` stays satisfied).
  */
 function optional<K extends string, V>(key: K, value: V | undefined): Record<K, V> | object {
   return value === undefined ? {} : ({ [key]: value } as Record<K, V>);
-}
-
-/**
- * The response payload, capped — or `undefined` when the body cannot be read.
- *
- * Playwright throws for bodies that no longer exist (redirects, a response whose
- * page navigated away, a cancelled request). That is an ordinary outcome of
- * watching a live page, not a capture failure: the exchange is still recorded,
- * just without its body.
- */
-async function readBody(response: Response): Promise<string | undefined> {
-  try {
-    return truncateBody(await response.text());
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * `promise`'s value, or `undefined` when it takes longer than `ms`.
- *
- * Never leaves a timer behind: the loser is cleared as soon as the race settles,
- * so a capped read cannot hold the process open past the run.
- */
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const capped = new Promise<undefined>((resolve) => {
-    timer = setTimeout(() => resolve(undefined), ms);
-  });
-  try {
-    return await Promise.race([promise, capped]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * The response payload, capped in SIZE and in TIME — {@link BODY_UNFINISHED} when
- * the stream had not finished within `waitMs`. The `{ body }` wrapper keeps the
- * two `undefined`s apart: "no body to read" (a redirect) vs "still streaming".
- */
-async function readBodyWithin(response: Response, waitMs: number): Promise<string | undefined> {
-  const settled = await withTimeout(
-    readBody(response).then((body) => ({ body })),
-    waitMs,
-  );
-  return settled === undefined ? BODY_UNFINISHED : settled.body;
-}
-
-/** Redacted headers off a request or response; `undefined` if they cannot be read. */
-async function readHeaders(
-  source: Pick<Response, 'allHeaders'> | Pick<Request, 'allHeaders'>,
-): Promise<Record<string, string> | undefined> {
-  try {
-    return redactHeaders(await source.allHeaders());
-  } catch {
-    return undefined;
-  }
 }
 
 export interface CdpCaptureInit {
@@ -219,6 +152,14 @@ export class CdpCapture {
   /** Request → epoch ms it left the page, for {@link NetworkEntry.durationMs}. */
   readonly #requestStarted = new WeakMap<Request, number>();
   /**
+   * Requests sent on the bound page with neither a response nor a failure yet —
+   * read back as `pending` rows ({@link CdpCapture.network}). Insertion-ordered
+   * and capped at the ring size (oldest dropped), and cleared by {@link stop}: a
+   * request whose page we stopped watching can never settle here, so keeping it
+   * would report it in flight forever.
+   */
+  readonly #inFlight = new Map<Request, { started: number; tab: string }>();
+  /**
    * Requests that already produced a response, so a later `requestfailed` for the
    * same one is recognized as teardown rather than logged as a second exchange.
    */
@@ -249,18 +190,23 @@ export class CdpCapture {
     this.#page.on('request', this.#onRequest);
     this.#page.on('requestfailed', this.#onRequestFailed);
     this.#page.on('response', this.#onResponse);
+    this.#page.on('framedetached', this.#onFrameDetached);
+    this.#page.on('close', this.#onPageClose);
     this.#detachers.push(
       () => this.#page.off('console', this.#onConsole),
       () => this.#page.off('pageerror', this.#onPageError),
       () => this.#page.off('request', this.#onRequest),
       () => this.#page.off('requestfailed', this.#onRequestFailed),
       () => this.#page.off('response', this.#onResponse),
+      () => this.#page.off('framedetached', this.#onFrameDetached),
+      () => this.#page.off('close', this.#onPageClose),
     );
   }
 
   /** Detach every listener. Idempotent; safe to call after the page is gone. */
   stop(): void {
     for (const detach of this.#detachers.splice(0)) detach();
+    this.#inFlight.clear();
     this.#started = false;
   }
 
@@ -299,9 +245,32 @@ export class CdpCapture {
     return newestFirst(filterConsole(this.#console, opts.filters), opts.limit);
   }
 
-  /** Captured network exchanges, newest first, narrowed by {@link LogQuery}. */
+  /**
+   * Captured network exchanges, newest first, narrowed by {@link LogQuery} — plus
+   * every request still in flight right now, as a `pending` row timed so far. A
+   * hung call is the diagnosis behind a spinner that never stops, and without its
+   * row the read shows nothing at all.
+   */
   network(opts: LogQuery = {}): NetworkEntry[] {
-    return newestFirstByTime(filterNetwork(this.#network, opts.filters), opts.limit);
+    const all = [...this.#network, ...this.#pendingRows()];
+    return newestFirstByTime(filterNetwork(all, opts.filters), opts.limit);
+  }
+
+  /** One {@link NetworkEntry} per in-flight request, as of now. */
+  #pendingRows(): NetworkEntry[] {
+    const now = this.#now();
+    return [...this.#inFlight].map(([request, { started, tab }]) => ({
+      method: request.method(),
+      url: redactUrl(request.url()),
+      status: 0,
+      ok: false,
+      pending: true,
+      resourceType: request.resourceType(),
+      timestamp: started,
+      tab,
+      durationMs: now - started,
+      ...optional('requestBody', this.#requestBodyOf(request)),
+    }));
   }
 
   // --- Event handlers (arrow fields: bound `this`, stable refs for `off`) ----
@@ -333,10 +302,37 @@ export class CdpCapture {
    * Stamp when a request left the page, so the response handler can report a
    * duration. Keyed by the Playwright `Request` object in a {@link WeakMap}: it is
    * the identity the response hands back, and entries evaporate with the request
-   * rather than growing a map for the life of the run.
+   * rather than growing a map for the life of the run. It also joins the
+   * in-flight set until it settles.
    */
   readonly #onRequest = (request: Request): void => {
-    this.#requestStarted.set(request, this.#now());
+    const started = this.#now();
+    this.#requestStarted.set(request, started);
+    this.#inFlight.set(request, { started, tab: this.#tabLabel() });
+    if (this.#inFlight.size > this.#cap) {
+      const oldest = this.#inFlight.keys().next().value;
+      if (oldest !== undefined) this.#inFlight.delete(oldest);
+    }
+  };
+
+  /**
+   * A detached iframe (or a closed tab) takes its in-flight requests with it,
+   * and Chrome does not always report them as failed — left in the set they
+   * would read `pending` for the rest of the run. A request with no frame
+   * (a service worker's) cannot be attributed, so it waits for its own event.
+   */
+  readonly #onFrameDetached = (frame: Frame): void => {
+    for (const request of this.#inFlight.keys()) {
+      try {
+        if (request.frame() === frame) this.#inFlight.delete(request);
+      } catch {
+        // No frame to compare — not this frame's request.
+      }
+    }
+  };
+
+  readonly #onPageClose = (): void => {
+    this.#inFlight.clear();
   };
 
   /** Elapsed ms since this request started, or `undefined` if we never saw its start. */
@@ -356,12 +352,14 @@ export class CdpCapture {
     } catch {
       return undefined;
     }
-    return data ? truncateBody(data) : undefined;
+    // Redact BEFORE truncating: a cut JSON body no longer parses, so its secret would survive.
+    return data ? truncateBody(redactBody(data)) : undefined;
   }
 
   readonly #onRequestFailed = (request: Request): void => {
     const at = this.#now();
     const error = request.failure()?.errorText ?? 'request failed';
+    this.#inFlight.delete(request);
     const answered = this.#entryOf.get(request);
     if (this.#responded.has(request)) {
       // An abort AFTER the response is teardown, not a failed request: Chrome fires
@@ -409,6 +407,7 @@ export class CdpCapture {
   readonly #onResponse = (response: Response): void => {
     const at = this.#now();
     const request = response.request();
+    this.#inFlight.delete(request);
     // Marked SYNCHRONOUSLY, before the body await: an abort that lands while the
     // body is still resolving must already see this request as answered.
     this.#responded.add(request);

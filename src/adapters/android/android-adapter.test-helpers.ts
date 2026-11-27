@@ -93,7 +93,7 @@ export class FakeAdb implements Adb {
     await this.#linger(key);
     const v = this.responses.get(key);
     if (v instanceof Uint8Array) return v;
-    return new Uint8Array([1, 2, 3]);
+    return new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
   }
 
   async adb(args: string[], deadline?: number): Promise<string> {

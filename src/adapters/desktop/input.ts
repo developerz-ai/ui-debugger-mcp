@@ -45,6 +45,10 @@ const KEY_ALIASES: Record<string, string> = {
   delete: 'Delete',
   del: 'Delete',
   space: 'space',
+  plus: 'plus',
+  minus: 'minus',
+  '-': 'minus',
+  insert: 'Insert',
   up: 'Up',
   down: 'Down',
   left: 'Left',
@@ -70,10 +74,16 @@ function mapKeyToken(token: string): string {
  * xdotool keysym chord (`'Return'`, `'ctrl+a'`, `'Escape'`). Throws on an empty key.
  */
 export function mapKeyChord(key: string): string {
-  const parts = key
+  // `+` joins a chord, so the literal plus key is the one a split cannot see: a
+  // trailing `+` (`Control++`, or `+` alone) names it. Dropping it would press the
+  // bare modifier and report success.
+  const trimmed = key.trim();
+  const literalPlus = trimmed === '+' || trimmed.endsWith('++');
+  const parts = (literalPlus ? trimmed.slice(0, -1) : trimmed)
     .split('+')
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
+  if (literalPlus) parts.push('plus');
   if (parts.length === 0) {
     throw new AdapterError('pressKey requires a non-empty key');
   }
@@ -148,9 +158,9 @@ export function typeArgs(text: string): string[] {
   return ['type', '--clearmodifiers', '--', text];
 }
 
-/** `key --clearmodifiers <chord>` — press a mapped key/chord on the focused element. */
+/** `key --clearmodifiers -- <chord>` — `--` ends option parsing, so a `-`-led key is a keysym, never a flag. */
 export function keyArgs(chord: string): string[] {
-  return ['key', '--clearmodifiers', mapKeyChord(chord)];
+  return ['key', '--clearmodifiers', '--', mapKeyChord(chord)];
 }
 
 /** `click --repeat <n> <wheel-button>` — N wheel steps in one direction. */

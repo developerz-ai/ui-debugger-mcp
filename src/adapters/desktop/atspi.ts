@@ -152,6 +152,12 @@ export interface AtspiReadOptions {
    * loud instead of degrading to the whole desktop.
    */
   scope?: AtspiScope;
+  /**
+   * Return only nodes the toolkit reports as showing. Applied before `maxNodes`
+   * counts a match, so a hidden twin (a background tab's "Save") neither wins a
+   * `find`/`waitFor` nor uses up the walk's budget.
+   */
+  visibleOnly?: boolean;
 }
 
 /** The read seam the adapter depends on — implemented by {@link BusctlAtspi}, faked in tests. */

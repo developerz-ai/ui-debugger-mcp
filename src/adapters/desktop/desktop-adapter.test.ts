@@ -50,7 +50,8 @@ class WalkingAtspi implements AtspiSource {
   async readTree(opts: AtspiReadOptions = {}): Promise<AtspiNode[]> {
     this.lastOpts = opts;
     const query = opts.query;
-    const matched = query ? this.nodes.filter((n) => matchesQuery(n, query)) : this.nodes;
+    const seen = opts.visibleOnly ? this.nodes.filter((n) => n.visible) : this.nodes;
+    const matched = query ? seen.filter((n) => matchesQuery(n, query)) : seen;
     return matched.slice(0, opts.maxNodes ?? matched.length);
   }
 }
@@ -253,7 +254,15 @@ test('pressKey forwards the chord; rejects an empty key', async () => {
 test('scroll maps amount to wheel repeats', async () => {
   const { adapter, input } = build();
   await adapter.scroll({ direction: 'down' });
-  expect(input.calls).toEqual(['scroll:down:3']); // default 360px / 120 = 3
+  // default 360px / 120 = 3; the pointer is parked over the scoped window first, so
+  // the wheel cannot land in whatever app the cursor happened to rest on.
+  expect(input.calls).toEqual(['move:60,40', 'scroll:down:3']);
+});
+
+test('scroll skips the park when the scoped window has no measurable bounds', async () => {
+  const { adapter, input } = build([unmeasured('App')]);
+  await adapter.scroll({ direction: 'down' });
+  expect(input.calls).toEqual(['scroll:down:3']);
 });
 
 test('scroll within a region parks the cursor first', async () => {
@@ -286,6 +295,62 @@ test('screenshot returns the capture bytes', async () => {
 test('waitFor resolves once the query is present', async () => {
   const { adapter } = build([atspiNode({ name: 'OK' })]);
   await expect(adapter.waitFor({ query: 'OK', timeout: 1000 })).resolves.toBeUndefined();
+});
+
+test('waitFor does not count a hidden match as present', async () => {
+  const input = new FakePointer();
+  const adapter = DesktopAdapter.create({
+    config,
+    atspi: new WalkingAtspi([atspiNode({ name: 'Save', visible: false })]),
+    input,
+    capture: new FakeCapture(),
+  });
+  await expect(adapter.waitFor({ query: 'Save', timeout: 20 })).rejects.toThrow(/timed out/);
+});
+
+test('waitFor rejects a non-finite timeout instead of polling forever', async () => {
+  const { adapter } = build();
+  await expect(adapter.waitFor({ query: 'OK', timeout: Number.NaN })).rejects.toThrow(
+    /finite number/,
+  );
+});
+
+test('click resolves a selector to the visible match, never a hidden twin', async () => {
+  const input = new FakePointer();
+  const adapter = DesktopAdapter.create({
+    config,
+    atspi: new WalkingAtspi([
+      atspiNode({ name: 'Save', visible: false, bounds: { x: 0, y: 0, width: 10, height: 10 } }),
+      atspiNode({ name: 'Save', visible: true, bounds: { x: 100, y: 100, width: 20, height: 20 } }),
+    ]),
+    input,
+    capture: new FakeCapture(),
+  });
+  await adapter.click('Save');
+  expect(input.calls).toEqual(['click:110,110']);
+});
+
+test('open names the native-Wayland cause when the window is never found', async () => {
+  const prior = process.env.WAYLAND_DISPLAY;
+  process.env.WAYLAND_DISPLAY = 'wayland-test';
+  try {
+    class NotFound extends FakePointer {
+      override async activateWindow(): Promise<void> {
+        throw new AdapterError('desktop: window not found within 10ms');
+      }
+    }
+    const adapter = DesktopAdapter.create({
+      config,
+      atspi: new FakeAtspi([]),
+      input: new NotFound(),
+      capture: new FakeCapture(),
+    });
+    await expect(adapter.open('App')).rejects.toThrow(/native Wayland windows are invisible/);
+    await adapter.close();
+  } finally {
+    if (prior === undefined) delete process.env.WAYLAND_DISPLAY;
+    else process.env.WAYLAND_DISPLAY = prior;
+  }
 });
 
 test('waitFor times out loud when the query never appears', async () => {
@@ -500,6 +565,46 @@ test('close SIGTERMs the whole process group, not just the shell', async () => {
   }
 });
 
+test('close reaps an app its launch wrapper left behind after exiting', async () => {
+  // The leader backgrounds the app and exits at once (daemonize shape). The exit
+  // handler clears `#child`, so before the fix close() had no pid left to signal
+  // and the app outlived the run, holding its X/profile locks.
+  const dir = await mkdtemp(join(tmpdir(), 'uidbg-adapter-'));
+  const pidFile = join(dir, 'child.pid');
+  const adapter = DesktopAdapter.create({
+    config: {
+      adapter: 'desktop',
+      launch: `sleep 30 & echo $! > ${JSON.stringify(pidFile)}`,
+      window: { title: 'App' },
+    },
+    atspi: new FakeAtspi([]),
+    input: new FakePointer(),
+    capture: new FakeCapture(),
+  });
+  try {
+    await adapter.open('App');
+    const start = Date.now();
+    let childPid = 0;
+    while (!childPid) {
+      childPid = Number((await readFile(pidFile, 'utf8').catch(() => '')).trim()) || 0;
+      if (!childPid) {
+        expect(Date.now() - start).toBeLessThan(5000);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200)); // let the leader's exit land
+    expect(isAlive(childPid)).toBe(true);
+    await adapter.close();
+    const closeStart = Date.now();
+    while (isAlive(childPid)) {
+      expect(Date.now() - closeStart).toBeLessThan(3000); // the orphan survived close()
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('open respawns the managed app after it exits', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'uidbg-adapter-'));
   const file = join(dir, 'runs');
@@ -687,4 +792,155 @@ test('the scope in force is the last opened window, else the configured one', as
   await unscoped.readState({ query: 'OK' });
   expect(other.lastOpts?.scope).toEqual({ title: 'Other Window' });
   await unscoped.close();
+});
+
+// --- find: exact name beats substring; readState walk cap ---------------------
+
+function withNodes(
+  nodes: AtspiNode[],
+  extra: { readWalkMs?: number } = {},
+): { adapter: DesktopAdapter; input: FakePointer } {
+  const input = new FakePointer();
+  const adapter = DesktopAdapter.create({
+    config,
+    atspi: new WalkingAtspi(nodes),
+    input,
+    capture: new FakeCapture(),
+    ...extra,
+  });
+  return { adapter, input };
+}
+
+test('find prefers an exact name over an earlier substring match', async () => {
+  const { adapter } = withNodes([
+    atspiNode({ name: 'Save As' }),
+    atspiNode({ name: 'save' }),
+    atspiNode({ name: 'Save' }),
+  ]);
+  expect((await adapter.find({ query: 'Save' }))?.name).toBe('Save');
+});
+
+test('find falls back to a case-insensitive exact name, then to the first substring hit', async () => {
+  const ci = withNodes([atspiNode({ name: 'Save As' }), atspiNode({ name: 'save' })]);
+  expect((await ci.adapter.find({ query: 'Save' }))?.name).toBe('save');
+  const sub = withNodes([atspiNode({ name: 'Save As' }), atspiNode({ name: 'Save All' })]);
+  expect((await sub.adapter.find({ query: 'Save' }))?.name).toBe('Save As');
+});
+
+test('click lands on the exact-name button, not the "Save As" before it', async () => {
+  const { adapter, input } = withNodes([
+    atspiNode({ name: 'Save As', bounds: { x: 0, y: 0, width: 10, height: 10 } }),
+    atspiNode({ name: 'Save', bounds: { x: 100, y: 100, width: 20, height: 20 } }),
+  ]);
+  await adapter.click('Save');
+  expect(input.calls).toEqual(['click:110,110']);
+});
+
+test('readState fails loud when its walk hits the wall-clock cap with a partial tree', async () => {
+  class SlowAtspi implements AtspiSource {
+    async readTree(): Promise<AtspiNode[]> {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return [atspiNode({})];
+    }
+  }
+  const adapter = DesktopAdapter.create({
+    config,
+    atspi: new SlowAtspi(),
+    input: new FakePointer(),
+    capture: new FakeCapture(),
+    readWalkMs: 10,
+  });
+  await expect(adapter.readState()).rejects.toThrow(/walk hit its 10ms cap/);
+});
+
+// --- waitFor abort -------------------------------------------------------------
+
+test('waitFor rejects at once, AbortError-named, when the signal is already aborted', async () => {
+  const { adapter } = build();
+  const err = await adapter
+    .waitFor({ query: 'Ghost', timeout: 5000, signal: AbortSignal.abort() })
+    .catch((e: unknown) => e);
+  expect((err as Error).name).toBe('AbortError');
+});
+
+test('waitFor stops polling when aborted mid-wait, well before its timeout', async () => {
+  const { adapter } = withNodes([]);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 50);
+  const start = Date.now();
+  const err = await adapter
+    .waitFor({ query: 'Ghost', timeout: 5000, signal: controller.signal })
+    .catch((e: unknown) => e);
+  expect((err as Error).name).toBe('AbortError');
+  expect(Date.now() - start).toBeLessThan(1000);
+});
+
+test('waitFor abort cuts short an in-flight walk that never answers', async () => {
+  class HangingAtspi implements AtspiSource {
+    async readTree(): Promise<AtspiNode[]> {
+      return new Promise<AtspiNode[]>(() => {});
+    }
+  }
+  const adapter = DesktopAdapter.create({
+    config,
+    atspi: new HangingAtspi(),
+    input: new FakePointer(),
+    capture: new FakeCapture(),
+  });
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 30);
+  const err = await adapter
+    .waitFor({ query: 'Ghost', timeout: 60_000, signal: controller.signal })
+    .catch((e: unknown) => e);
+  expect((err as Error).name).toBe('AbortError');
+});
+
+test('waitFor removes its abort listener on success, timeout and abort', async () => {
+  const controller = new AbortController();
+  let added = 0;
+  let removed = 0;
+  const add = controller.signal.addEventListener.bind(controller.signal);
+  const remove = controller.signal.removeEventListener.bind(controller.signal);
+  controller.signal.addEventListener = ((...args: Parameters<typeof add>) => {
+    added += 1;
+    add(...args);
+  }) as typeof add;
+  controller.signal.removeEventListener = ((...args: Parameters<typeof remove>) => {
+    removed += 1;
+    remove(...args);
+  }) as typeof remove;
+  const { adapter } = build();
+  await adapter.waitFor({ query: 'OK', timeout: 1000, signal: controller.signal });
+  await adapter
+    .waitFor({ query: 'Ghost', timeout: 0, signal: controller.signal })
+    .catch(() => undefined);
+  setTimeout(() => controller.abort(), 20);
+  await adapter
+    .waitFor({ query: 'Ghost', timeout: 5000, signal: controller.signal })
+    .catch(() => undefined);
+  expect(added).toBe(3);
+  expect(removed).toBe(3);
+});
+
+test('find keeps its first hit when the exact-name ranking walk runs out of time', async () => {
+  // Call 1 (the `limit: 1` lookup) answers at once; call 2 (the ranking walk) outlives
+  // its cap and returns a partial tree. That must not turn a usable hit into an error.
+  let calls = 0;
+  class RankSlowAtspi implements AtspiSource {
+    async readTree(): Promise<AtspiNode[]> {
+      calls += 1;
+      if (calls === 1) return [atspiNode({ name: 'Save As' })];
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return [];
+    }
+  }
+  const adapter = DesktopAdapter.create({
+    config,
+    atspi: new RankSlowAtspi(),
+    input: new FakePointer(),
+    capture: new FakeCapture(),
+    readWalkMs: 15,
+  });
+  expect((await adapter.find({ query: 'Save' }))?.name).toBe('Save As');
+  expect(calls).toBe(2);
 });

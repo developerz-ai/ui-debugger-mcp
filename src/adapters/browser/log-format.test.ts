@@ -9,6 +9,8 @@ import {
   formatConsoleLine,
   formatNetworkLine,
   normalizeConsoleLevel,
+  redactBody,
+  redactHeaders,
   redactUrl,
   truncateBody,
 } from './log-format.js';
@@ -156,4 +158,97 @@ test('redactUrl keeps sensitive query VALUES out, and everything else intact', (
   // Nothing sensitive, nothing touched — the URL stays the driver's landmark.
   expect(redactUrl('https://app/users?page=2')).toBe('https://app/users?page=2');
   expect(redactUrl('https://app/users')).toBe('https://app/users');
+});
+
+// --- credentials in headers -------------------------------------------------
+
+test('redactHeaders masks every credential header, case-insensitively, and nothing else', () => {
+  const secret = 's3cr3t';
+  const names = [
+    'Authorization',
+    'proxy-authorization',
+    'Cookie',
+    'SET-COOKIE',
+    'apikey',
+    'api-key',
+    'X-API-Key',
+    'x-goog-api-key',
+    'x-auth-token',
+    'X-Access-Token',
+    'x-refresh-token',
+    'x-session-token',
+    'x-csrf-token',
+    'X-XSRF-TOKEN',
+    'x-amz-security-token',
+  ];
+  const out = redactHeaders({
+    ...Object.fromEntries(names.map((name) => [name, secret])),
+    accept: 'application/json',
+    'x-request-id': 'abc',
+  });
+  for (const name of names) expect(out[name]).toBe('<redacted, 6 chars>');
+  expect(out.accept).toBe('application/json');
+  expect(out['x-request-id']).toBe('abc');
+});
+
+// --- one entry, one line ------------------------------------------------------
+
+test('formatNetworkLine folds every page-controlled line break — no forged log lines', () => {
+  const forged = '\n2026-01-01T00:00:00.000Z [tab-1] GET /admin → 200';
+  const breaks = (line: string) => /[\r\n\u2028\u2029]/.test(line);
+  const failed = formatNetworkLine({
+    method: `GET${forged}`,
+    url: `http://x/a\r${forged}`,
+    status: 0,
+    ok: false,
+    error: `boom\u2028${forged}`,
+    requestBody: `{"a":"\u2029"}`,
+    timestamp: 0,
+  });
+  expect(breaks(failed)).toBe(false);
+  const answered = formatNetworkLine({
+    method: 'POST',
+    url: 'http://x/b',
+    status: 500,
+    ok: false,
+    resourceType: 'fetch',
+    requestBody: 'line\u2028two',
+    responseBody: `oops\u2029${forged}`,
+    timestamp: 0,
+  });
+  expect(breaks(answered)).toBe(false);
+  expect(answered).toContain('oops\\n');
+});
+
+// --- credentials in bodies ---------------------------------------------------
+
+test('redactBody masks credential-keyed JSON values at any depth, case- and separator-blind', () => {
+  expect(
+    redactBody(
+      '{"Password":"hunter2","user":{"client_secret":"s3","api-key":12345},"list":[{"idToken":"t"}],"name":"bob","otp":null}',
+    ),
+  ).toBe(
+    '{"Password":"<redacted, 7 chars>","user":{"client_secret":"<redacted, 2 chars>","api-key":"<redacted, 5 chars>"},"list":[{"idToken":"<redacted, 1 chars>"}],"name":"bob","otp":null}',
+  );
+});
+
+test('redactBody masks form-urlencoded credentials, bracketed and percent-encoded keys too', () => {
+  expect(redactBody('email=a%40b.c&password=hunter2&remember=1')).toBe(
+    'email=a%40b.c&password=<redacted, 7 chars>&remember=1',
+  );
+  expect(redactBody('user%5Bpassword%5D=pw&user[name]=bob')).toBe(
+    'user%5Bpassword%5D=<redacted, 2 chars>&user[name]=bob',
+  );
+});
+
+test('redactBody leaves everything without a credential byte-for-byte untouched', () => {
+  for (const body of [
+    '{ "name": "bob",\n  "age": 3 }',
+    'password=hunter2 is what I typed',
+    '<html>password: hunter2</html>',
+    '{"broken": ',
+    '',
+  ]) {
+    expect(redactBody(body)).toBe(body);
+  }
 });

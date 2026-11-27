@@ -84,6 +84,7 @@ const fakeResponse = (url: string) => {
     url: () => url,
     text: async () => '{}',
     allHeaders: async () => ({}),
+    headers: () => ({}),
     request: () => request,
   };
 };

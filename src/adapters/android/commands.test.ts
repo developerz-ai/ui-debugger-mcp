@@ -321,3 +321,11 @@ describe('parseScreenSize', () => {
     expect(() => parseScreenSize('no size here')).toThrow(AdapterError);
   });
 });
+
+describe('escapeInputText non-ASCII', () => {
+  test('rejects chars `input text` cannot type instead of silently dropping them', () => {
+    expect(() => escapeInputText('café')).toThrow(AdapterError);
+    expect(() => escapeInputText('☕')).toThrow(AdapterError);
+    expect(() => escapeInputText('a\x7fb')).toThrow(AdapterError);
+  });
+});

@@ -260,8 +260,16 @@ export const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
     // to the label/placeholder long before it would reach a value — so before this
     // there was NO structural way to see what a field contained. Drivers fell back to
     // `look` and burned whole runs asking vision "did my text land?".
+    //
+    // A password field reports only its LENGTH (`<redacted, N chars>`, the marker
+    // credential headers carry): enough to prove the text landed, while the value —
+    // a persona's password typed out-of-band — never reaches the driver's context,
+    // which is resent to the provider every step.
     if (isFormControl(el)) {
-      if (typeof el.value === 'string') node.value = el.value;
+      if (typeof el.value === 'string') {
+        const secret = (el.getAttribute('type') ?? '').toLowerCase() === 'password';
+        node.value = secret ? `<redacted, ${el.value.length} chars>` : el.value;
+      }
       if (typeof el.checked === 'boolean') node.checked = el.checked;
     }
     if (text) {

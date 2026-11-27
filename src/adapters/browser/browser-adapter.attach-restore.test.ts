@@ -16,6 +16,7 @@
 
 import { expect, test } from 'bun:test';
 import type { WebTarget } from '../../config/schema.js';
+import { AdapterError } from '../../errors.js';
 import { BrowserAdapter } from './browser-adapter.js';
 import { NAV_TIMEOUT_MS } from './launch.js';
 
@@ -278,4 +279,105 @@ test('a tab the run never navigated is not reloaded — close() skips the goto w
   expect(state.gotos).toEqual([]); // no pointless reload
   expect(events).toEqual(['browser.close']); // only the disconnect happened
   expect(closes()).toBe(1);
+});
+
+// --- nothing left subscribed on a page we do not own -----------------------------
+
+test('close() unsubscribes every page listener — even when the disconnect itself throws', async () => {
+  const events: string[] = [];
+  const { page } = fakePage(PRE_RUN_URL, events);
+  const listeners = new Map<string, Set<unknown>>();
+  const tracked = {
+    ...page,
+    on: (event: string, fn: unknown) => {
+      listeners.set(event, (listeners.get(event) ?? new Set()).add(fn));
+    },
+    off: (event: string, fn: unknown) => {
+      listeners.get(event)?.delete(fn);
+    },
+  };
+  const context = { pages: () => [tracked] };
+  const browser = {
+    contexts: () => [context],
+    close: async () => {
+      throw new Error('connection already gone');
+    },
+  };
+  const adapter = await BrowserAdapter.create({
+    config: webTarget({ cdpUrl: 'http://127.0.0.1:9222' }),
+    profileDir: '/tmp/unused-profile',
+    chromium: { connectOverCDP: async () => browser } as unknown as Launcher,
+  });
+  expect(listeners.get('load')?.size).toBe(1);
+
+  await expect(adapter.close()).rejects.toBeInstanceOf(AdapterError);
+  // The adopted page outlives the run in the owner's browser: no handler of ours
+  // (capture or the unrequested-load watch) may stay hooked onto it.
+  const live = [...listeners].filter(([, fns]) => fns.size > 0).map(([event]) => event);
+  expect(live).toEqual([]);
+});
+
+// --- a tab attach opened itself is closed, never left behind ----------------------
+
+test('a tab attach had to OPEN is closed at teardown (once), before the disconnect — never "restored"', async () => {
+  const events: string[] = [];
+  const { page, state } = fakePage('about:blank', events);
+  const created = {
+    ...page,
+    close: async () => {
+      events.push('page.close');
+    },
+  };
+  const context = {
+    pages: () => [],
+    newPage: async () => created,
+  };
+  const browser = {
+    contexts: () => [context],
+    close: async () => {
+      events.push('browser.close');
+    },
+  };
+  const adapter = await BrowserAdapter.create({
+    config: webTarget({ cdpUrl: 'http://127.0.0.1:9222' }),
+    profileDir: '/tmp/unused-profile',
+    chromium: { connectOverCDP: async () => browser } as unknown as Launcher,
+  });
+
+  await adapter.open('/inbox');
+  await adapter.close();
+  await adapter.close();
+  expect(events).toEqual([
+    'goto:http://localhost:5173/inbox',
+    'page.close',
+    'browser.close',
+    'browser.close',
+  ]);
+  expect(state.gotos.map((goto) => goto.url)).toEqual(['http://localhost:5173/inbox']);
+});
+
+test('closing the opened tab is best-effort — a tab the owner already closed never fails teardown', async () => {
+  const events: string[] = [];
+  const { page } = fakePage('about:blank', events);
+  const created = {
+    ...page,
+    close: async () => {
+      throw new Error('Target page, context or browser has been closed');
+    },
+  };
+  const context = { pages: () => [], newPage: async () => created };
+  const browser = {
+    contexts: () => [context],
+    close: async () => {
+      events.push('browser.close');
+    },
+  };
+  const adapter = await BrowserAdapter.create({
+    config: webTarget({ cdpUrl: 'http://127.0.0.1:9222' }),
+    profileDir: '/tmp/unused-profile',
+    chromium: { connectOverCDP: async () => browser } as unknown as Launcher,
+  });
+
+  await expect(adapter.close()).resolves.toBeUndefined();
+  expect(events).toEqual(['browser.close']);
 });

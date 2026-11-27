@@ -38,6 +38,15 @@ export function tabMarker(tab: string | undefined): string {
  * from a target without tabs renders exactly as it did before markers existed.
  */
 export function formatConsoleLine(entry: ConsoleEntry): string {
-  const where = entry.location ? ` @ ${entry.location}` : '';
-  return `${stamp(entry.timestamp)}${tabMarker(entry.tab)} ${entry.level.toUpperCase()} ${entry.text}${where}`;
+  const where = entry.location ? ` @ ${oneLine(entry.location)}` : '';
+  return `${stamp(entry.timestamp)}${tabMarker(entry.tab)} ${entry.level.toUpperCase()} ${oneLine(entry.text)}${where}`;
+}
+
+/**
+ * Collapse line breaks to a literal `\n` so one entry is ONE log line. Console text is
+ * page-controlled: a multi-line message (a stack trace) would otherwise span lines, and
+ * a crafted `"x\n2026-… [tab-1] ERROR forged"` would plant a line the trail reads as real.
+ */
+export function oneLine(text: string): string {
+  return text.replace(/\r\n|[\r\n\u2028\u2029]/g, '\\n');
 }

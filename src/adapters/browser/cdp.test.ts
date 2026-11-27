@@ -6,7 +6,7 @@
 
 import { expect, test } from 'bun:test';
 import type { Page } from 'playwright-core';
-import { BODY_UNFINISHED, type CaptureSink, CdpCapture } from './cdp.js';
+import { BODY_READ_MAX_BYTES, BODY_UNFINISHED, type CaptureSink, CdpCapture } from './cdp.js';
 import { TabContext } from './tab-context.js';
 
 // --- Fakes ------------------------------------------------------------------
@@ -79,6 +79,8 @@ const fakeResponse = (o: {
       return o.body;
     },
     allHeaders: async () => o.responseHeaders ?? {},
+    // Playwright's sync `headers()` is lower-cased names; the fakes pass them so.
+    headers: () => o.responseHeaders ?? {},
     request: () => request,
   };
 };
@@ -356,7 +358,7 @@ test('streams formatted lines to the sink as entries arrive', async () => {
 
 test('stop detaches every listener', () => {
   const { page, cap } = setup();
-  expect(page.count()).toBe(5);
+  expect(page.count()).toBe(7);
   cap.stop();
   expect(page.count()).toBe(0);
   page.emit('console', fakeConsole('log', 'late'));
@@ -366,7 +368,7 @@ test('stop detaches every listener', () => {
 test('start is idempotent (no double subscription)', () => {
   const { page, cap } = setup();
   cap.start();
-  expect(page.count()).toBe(5);
+  expect(page.count()).toBe(7);
 });
 
 // --- rebind (tab switch) ----------------------------------------------------
@@ -380,7 +382,7 @@ test('rebind moves listeners to the new page and keeps what was captured', async
 
   // Old page is fully detached; the new one is live.
   expect(page.count()).toBe(0);
-  expect(next.count()).toBe(5);
+  expect(next.count()).toBe(7);
 
   next.emit('console', fakeConsole('error', 'from tab 1'));
   page.emit('console', fakeConsole('error', 'ignored'));
@@ -610,4 +612,163 @@ test('a credential-bearing URL never reaches the buffer or the log verbatim', as
   expect(urls.some((u) => u.includes('SECRET2'))).toBe(false);
   expect(urls).toContain('https://app/oauth?access_token=<redacted, 11 chars>');
   expect(lines.some((l) => l.includes('SECRET'))).toBe(false);
+});
+
+test('a binary or oversized API body is never read — a marker says why, text stays captured', async () => {
+  const { page, cap } = setup();
+  const bodyOf = async (responseHeaders: Record<string, string>) => {
+    let reads = 0;
+    const response = fakeResponse({
+      url: 'http://x/api/file',
+      status: 200,
+      ok: true,
+      body: '\u0000PNG garbage',
+      responseHeaders,
+    });
+    page.emit('response', {
+      ...response,
+      text: async () => {
+        reads += 1;
+        return response.text();
+      },
+    });
+    await flush();
+    return { body: cap.network({ limit: 1 })[0]?.responseBody, reads };
+  };
+  expect(await bodyOf({ 'content-type': 'image/png' })).toEqual({
+    body: '<binary body, image/png>',
+    reads: 0,
+  });
+  expect(await bodyOf({ 'content-type': 'application/octet-stream' })).toEqual({
+    body: '<binary body, application/octet-stream>',
+    reads: 0,
+  });
+  expect(
+    await bodyOf({
+      'content-type': 'application/json',
+      'content-length': String(BODY_READ_MAX_BYTES + 1),
+    }),
+  ).toEqual({ body: `<body not read, ${BODY_READ_MAX_BYTES + 1} bytes>`, reads: 0 });
+  // JSON-API vendor types are text — still read.
+  expect(await bodyOf({ 'content-type': 'application/vnd.api+json' })).toEqual({
+    body: '\u0000PNG garbage',
+    reads: 1,
+  });
+});
+
+// --- in-flight requests ---------------------------------------------------------
+
+test('a request still in flight reads back as a pending row, timed so far — until it settles', async () => {
+  let clock = 1000;
+  const { page, cap } = setup({ now: () => clock });
+  const hung = fakeResponse({
+    method: 'POST',
+    url: 'http://x/api/save?token=abc',
+    status: 200,
+    ok: true,
+    postData: '{"name":"a"}',
+    body: '{}',
+  });
+  page.emit('request', hung.request());
+  clock = 4000;
+
+  const [row] = cap.network();
+  expect(row).toEqual({
+    method: 'POST',
+    url: 'http://x/api/save?token=<redacted, 3 chars>',
+    status: 0,
+    ok: false,
+    pending: true,
+    resourceType: 'fetch',
+    timestamp: 1000,
+    tab: 'tab-1',
+    durationMs: 3000,
+    requestBody: '{"name":"a"}',
+  });
+  // Pending is not failed, and it is filterable on its own.
+  expect(cap.network({ filters: { failed_eq: true } })).toEqual([]);
+  expect(cap.network({ filters: { pending_eq: true } })).toHaveLength(1);
+
+  page.emit('response', hung);
+  await flush();
+  const settled = cap.network();
+  expect(settled).toHaveLength(1);
+  expect(settled[0]?.pending).toBeUndefined();
+  expect(settled[0]?.status).toBe(200);
+  expect(cap.network({ filters: { pending_eq: true } })).toEqual([]);
+});
+
+test('a failed request leaves the in-flight set; stop() releases it, and the set is capped', () => {
+  const { page, cap } = setup({ cap: 2 });
+  const requestOf = (url: string) => fakeResponse({ url, status: 200, ok: true }).request();
+  const failed = {
+    ...requestOf('http://x/api/f'),
+    failure: () => ({ errorText: 'net::ERR_FAILED' }),
+  };
+  page.emit('request', failed);
+  page.emit('requestfailed', failed);
+  expect(cap.network({ filters: { pending_eq: true } })).toEqual([]);
+
+  for (const n of [1, 2, 3]) page.emit('request', requestOf(`http://x/api/${n}`));
+  // Ring-capped like every buffer: the oldest in-flight request is dropped.
+  expect(cap.network({ filters: { pending_eq: true } }).map((e) => e.url)).toEqual([
+    'http://x/api/3',
+    'http://x/api/2',
+  ]);
+  // A page we no longer watch can never settle a request — never report it forever.
+  cap.stop();
+  expect(cap.network({ filters: { pending_eq: true } })).toEqual([]);
+});
+
+// --- credential-keyed body values --------------------------------------------------
+
+test('a login body and its token response never reach the buffer with their secrets', async () => {
+  const { page, cap } = setup();
+  page.emit(
+    'response',
+    fakeResponse({
+      method: 'POST',
+      url: 'http://x/api/login',
+      status: 200,
+      ok: true,
+      postData: '{"email":"a@b.c","password":"hunter2"}',
+      body: '{"user":{"id":1},"accessToken":"eyJabc","refresh_token":"r1"}',
+    }),
+  );
+  await flush();
+  const [entry] = cap.network();
+  expect(entry?.requestBody).toBe('{"email":"a@b.c","password":"<redacted, 7 chars>"}');
+  expect(entry?.responseBody).toBe(
+    '{"user":{"id":1},"accessToken":"<redacted, 6 chars>","refresh_token":"<redacted, 2 chars>"}',
+  );
+});
+
+test('a detached frame or a closed tab takes its in-flight requests with it', () => {
+  const { page, cap } = setup();
+  const frameA = { name: 'a' };
+  const frameB = { name: 'b' };
+  const requestIn = (url: string, frame: () => unknown) => ({
+    ...fakeResponse({ url, status: 200, ok: true }).request(),
+    frame,
+  });
+  const pendingUrls = () => cap.network({ filters: { pending_eq: true } }).map((e) => e.url);
+  page.emit(
+    'request',
+    requestIn('http://x/api/in-a', () => frameA),
+  );
+  page.emit(
+    'request',
+    requestIn('http://x/api/in-b', () => frameB),
+  );
+  page.emit(
+    'request',
+    requestIn('http://x/api/worker', () => {
+      throw new Error('Service Worker requests do not have an associated frame.');
+    }),
+  );
+
+  page.emit('framedetached', frameA);
+  expect(pendingUrls()).toEqual(['http://x/api/worker', 'http://x/api/in-b']);
+  page.emit('close', undefined);
+  expect(pendingUrls()).toEqual([]);
 });

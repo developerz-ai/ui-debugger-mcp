@@ -56,14 +56,21 @@ export async function locateAcrossFrames(page: Page, selector: string): Promise<
  * frame in parallel. A Playwright wait cannot be cancelled, so the parallel form
  * leaves a poller hammering the page for every frame that never matches — long
  * after the wait it belonged to returned. Re-reading `frames()` each pass also
- * picks up frames that appear mid-wait.
+ * picks up frames that appear mid-wait. The slices are also what make `signal`
+ * work: an abort is checked before every slice, so the poll stops within one.
  */
-export async function waitAcrossFrames(page: Page, query: string, timeout?: number): Promise<void> {
+export async function waitAcrossFrames(
+  page: Page,
+  query: string,
+  timeout?: number,
+  signal?: AbortSignal,
+): Promise<void> {
   const selector = normalizeQuery(query);
   const budget = timeout ?? WAIT_TIMEOUT_MS;
   const deadline = Date.now() + budget;
   do {
     for (const frame of page.frames()) {
+      if (signal?.aborted) throw abortError(signal);
       const slice = Math.min(WAIT_SLICE_MS, Math.max(1, deadline - Date.now()));
       try {
         await frame.locator(selector).first().waitFor({ state: 'visible', timeout: slice });
@@ -75,6 +82,7 @@ export async function waitAcrossFrames(page: Page, query: string, timeout?: numb
       }
     }
   } while (Date.now() < deadline);
+  if (signal?.aborted) throw abortError(signal);
   throw new AdapterError(
     `waitFor: ${JSON.stringify(query)} never became visible in any frame within ${budget}ms`,
   );
@@ -94,4 +102,38 @@ export async function regionAcrossFrames(page: Page, within: NodeRef): Promise<B
     throw new AdapterError(`\`within\` target not found or not visible: ${within}`);
   }
   return box;
+}
+
+/**
+ * The rejection an aborted wait settles with: the signal's own reason when it is
+ * already `AbortError`-named (what `AbortController.abort()` gives), else a fresh
+ * `AbortError` — the contract promises that NAME, which is what the belt and the
+ * loop key off, and a custom reason (or `AbortSignal.timeout`'s `TimeoutError`)
+ * would otherwise read as an ordinary adapter failure.
+ */
+export function abortError(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason;
+  if (reason instanceof Error && reason.name === 'AbortError') return reason;
+  return new DOMException('waitFor aborted — the run ended', 'AbortError');
+}
+
+/**
+ * `work`, or an {@link abortError} the moment `signal` aborts — whichever comes
+ * first. The abort listener is removed on EVERY path, and the losing `work` gets
+ * a handler, so an abandoned wait that rejects later is never an unhandled
+ * rejection.
+ */
+export async function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  let onAbort = (): void => undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(abortError(signal));
+  });
+  signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    if (signal.aborted) onAbort();
+    return await Promise.race([work, aborted]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+    work.catch(() => undefined);
+  }
 }

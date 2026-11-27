@@ -3,7 +3,7 @@
  *
  * Attach adopts the FIRST tab of the FIRST browser context — `lifecycle.ts`'
  * `browser.contexts()[0] ?? (await browser.newContext())`, then
- * `context.pages()[0] ?? (await context.newPage())` — and never by active tab
+ * `context.pages()[0]` (a new tab only when that is empty) — and never by active tab
  * or URL. That policy is a promise to the reader of `docs/idea/adapters.md`
  * (an attach run takes over a tab you did not choose, in a browser you did not
  * start), so the paragraph names the exact lines it documents and this guard
@@ -147,16 +147,16 @@ test('the guard rejects a doc that states the anchor twice', () => {
 
 test('the guard rejects an anchor that drifted off the adoption lines', () => {
   const docText = readDoc();
-  const mutated = docText.replace('lifecycle.ts:138-139', 'lifecycle.ts:150-151');
+  const mutated = docText.replace(ANCHOR_ONE, '`src/adapters/browser/lifecycle.ts:1-2`');
   expect(mutated).not.toBe(docText);
-  // +12 lands in range, so this exercises the CONTENT check: lines 150-151 hold
-  // neither first-element expression.
+  // In range, so this exercises the CONTENT check: lines 1-2 (the header
+  // comment) hold neither first-element expression.
   expect(() => assertAdoptionDoc(mutated, codeLines())).toThrow(/no longer holds the adoption/);
 });
 
 test('the guard rejects an anchor pointing outside lifecycle.ts', () => {
   const docText = readDoc();
-  const mutated = docText.replace('lifecycle.ts:138-139', 'lifecycle.ts:999-1000');
+  const mutated = docText.replace(ANCHOR_ONE, '`src/adapters/browser/lifecycle.ts:999-1000`');
   expect(mutated).not.toBe(docText);
   expect(() => assertAdoptionDoc(mutated, codeLines())).toThrow(/outside the file/);
 });

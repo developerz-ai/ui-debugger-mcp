@@ -27,7 +27,6 @@
  * as an {@link AdapterError}; our own loud errors pass through un-rewrapped.
  */
 
-import { type ChildProcess, spawn } from 'node:child_process';
 import type { DesktopTarget } from '../../config/schema.js';
 import { AdapterError, UiDebuggerError } from '../../errors.js';
 import { capWait } from '../budget.js';
@@ -59,32 +58,35 @@ import {
   type WindowMatch,
   Xdotool,
 } from './input.js';
-import { desktopEnv, terminateGroup } from './proc.js';
+import { ManagedApp, withWaylandHint } from './managed-app.js';
+import { desktopEnv } from './proc.js';
+import { abortError, pollUntilPresent } from './wait-poll.js';
 
 /** Default cap on `readState` so the tree stays small (overridable via `limit`). */
 const DEFAULT_LIMIT = 200;
 
+/**
+ * Wall-clock cap on one `readState` walk. Every visited node costs ~4 busctl spawns, so a
+ * big tree (Electron with accessibility on) can run for minutes. The contract has no
+ * "truncated" marker on a node list, so a walk cut off by this cap fails loud rather than
+ * hand the driver a tree that silently stops partway.
+ */
+const READ_WALK_MS = 30_000;
+
+/** How many matches `find` inspects to prefer an exact name over a substring one. */
+const FIND_CANDIDATES = 20;
+/** Wall-clock cap on that ranking walk; on expiry `find` keeps its first (substring) hit. */
+const FIND_RANK_MS = 3000;
+
 /** `waitFor` defaults — poll the a11y tree for a query until it appears or times out. */
 const DEFAULT_WAIT_MS = 5000;
-const POLL_MS = 500;
 
 /** How long `open` waits for the launched window to appear before failing loud. */
 const WINDOW_WAIT_MS = 10_000;
 
-/**
- * Appended to the early-exit diagnosis when the launch command itself exits (code
- * or signal) before any window appears. A possibility, never a proof: the exit
- * code alone cannot show the command daemonized, so the hint names the likely
- * shape and the fix, not a cause.
- */
-const EARLY_EXIT_HINT =
-  '. The command may have backgrounded or daemonized itself (e.g. a trailing &, nohup, or a wrapper that forks) — that exits before any window can appear. Use a foreground launch command that stays alive holding the window';
-
 /** Wheel-step calibration: pixels-per-click, and the default page-ish distance. */
 const SCROLL_STEP_PX = 120;
 const DEFAULT_SCROLL_AMOUNT = 360;
-
-const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Map a pixel scroll `amount` onto a positive integer count of wheel clicks. */
 export function scrollRepeat(amount?: number): number {
@@ -97,13 +99,7 @@ interface DesktopAdapterHandles {
   atspi: AtspiSource;
   input: PointerInput;
   capture: ScreenCapture;
-}
-
-/** The managed child, paired with the death latch `open` races the window wait against. */
-interface Launched {
-  proc: ChildProcess;
-  /** Rejects (loud, naming the exit code/signal) the moment the child dies. Never resolves. */
-  died: Promise<never>;
+  readWalkMs: number;
 }
 
 export interface DesktopAdapterInit {
@@ -115,6 +111,8 @@ export interface DesktopAdapterInit {
   input?: PointerInput;
   /** Override the capture backend (defaults to {@link Screenshot}); a seam for tests. */
   capture?: ScreenCapture;
+  /** Wall-clock cap of one `readState` walk (defaults to {@link READ_WALK_MS}); a seam for tests. */
+  readWalkMs?: number;
 }
 
 /**
@@ -134,7 +132,8 @@ export class DesktopAdapter implements Adapter {
   readonly #atspi: AtspiSource;
   readonly #input: PointerInput;
   readonly #capture: ScreenCapture;
-  #child: Launched | null = null;
+  readonly #readWalkMs: number;
+  readonly #app: ManagedApp;
   /**
    * The window identity the reads are scoped to — the app/window the AT-SPI
    * walk is restricted to.
@@ -159,6 +158,8 @@ export class DesktopAdapter implements Adapter {
     this.#atspi = handles.atspi;
     this.#input = handles.input;
     this.#capture = handles.capture;
+    this.#readWalkMs = handles.readWalkMs;
+    this.#app = new ManagedApp(handles.config.launch, handles.env);
   }
 
   /** Wire the adapter from config, binding each backend to the chosen X11 display. */
@@ -170,6 +171,7 @@ export class DesktopAdapter implements Adapter {
       atspi: init.atspi ?? new BusctlAtspi({ display }),
       input: init.input ?? new Xdotool({ display }),
       capture: init.capture ?? new Screenshot({ display }),
+      readWalkMs: init.readWalkMs ?? READ_WALK_MS,
     });
   }
 
@@ -190,7 +192,8 @@ export class DesktopAdapter implements Adapter {
             'target, or pass a window title as the open target',
         );
       }
-      const { died } = this.#launch();
+      await this.#app.reapLingering();
+      const { died } = this.#app.launch();
       // The window wait fits inside the run's remaining cap when that is the shorter one.
       const waitMs = capWait(WINDOW_WAIT_MS, timeoutMs);
       // The wait gets an ABSOLUTE deadline, not just a duration: the xdotool calls it
@@ -201,7 +204,9 @@ export class DesktopAdapter implements Adapter {
       // Pre-handle the loser: when the child dies first, the window wait keeps polling
       // (bounded by the cap above) and its later rejection must not go unhandled.
       activated.catch(() => {});
-      await Promise.race([activated, died]);
+      await Promise.race([activated, died]).catch((error: unknown) => {
+        throw this.#env.WAYLAND_DISPLAY ? withWaylandHint(error) : error;
+      });
       // The window that is now up is the one every later read is scoped to — the
       // a11y tree holds every application on the desktop, so the scope is what
       // keeps a lookup inside this one.
@@ -209,75 +214,71 @@ export class DesktopAdapter implements Adapter {
     });
   }
 
-  /**
-   * Spawn the managed app (a live child is reused) and latch its death.
-   *
-   * `stdio: 'ignore'` keeps the app detached from our stdio MCP channel, so the exit
-   * code is the only signal we get — hence the latch: {@link Launched.died} carries it
-   * to whoever is waiting in `open`.
-   */
-  #launch(): Launched {
-    const running = this.#child;
-    if (running) return running;
-    const command = this.#config.launch;
-    const proc = spawn('/bin/sh', ['-c', command], {
-      env: this.#env,
-      detached: true,
-      stdio: 'ignore',
-    });
-    const died = new Promise<never>((_resolve, reject) => {
-      const down = (reason: string, hint = ''): void => {
-        // A dead app must not pin `#child`: clear it so a later `open` relaunches
-        // and `close` never kills a recycled process group.
-        if (this.#child?.proc === proc) this.#child = null;
-        reject(
-          new AdapterError(
-            `desktop: launch command exited (${reason}) before the window appeared: ${command}${hint}`,
-          ),
-        );
-      };
-      // The daemonization hint rides the exit event only — on 'error' (spawn
-      // failed) the command never ran, so the hint would mislead there.
-      proc.once('exit', (code, signal) =>
-        down(signal ? `killed by ${signal}` : `exit code ${code ?? 'unknown'}`, EARLY_EXIT_HINT),
-      );
-      // 'error' fires async: unlistened, a missing `/bin/sh` would crash the server.
-      proc.once('error', (error) => down(`spawn failed: ${error.message}`));
-    });
-    // The app normally outlives `open`, so its eventual exit rejects with nobody racing
-    // it — pre-handle so a clean quit is never an unhandled rejection.
-    died.catch(() => {});
-    const launched: Launched = { proc, died };
-    this.#child = launched;
-    return launched;
-  }
-
   async find(opts: Query): Promise<Node | null> {
     return this.#run('find', async () => {
-      const nodes = await this.readState({ ...opts, limit: 1 });
-      return nodes[0] ?? null;
+      const first = (await this.readState({ ...opts, limit: 1 }))[0];
+      if (!first || !opts.query) return first ?? null;
+      const wanted = parseRoleNameQuery(opts.query).name;
+      if (wanted === undefined || first.name === wanted) return first;
+      // The first hit is only a substring match ("Save As" for "Save"): look at a bounded
+      // set of further matches and prefer an exact name, then a case-insensitive one.
+      // The ranking is a refinement, not the lookup: it gets its own short cap, and when
+      // that expires the substring hit already in hand is the answer (a deliberate
+      // fallback — failing here would break every selector act on a large tree).
+      const rankMs = Math.min(FIND_RANK_MS, this.#readWalkMs);
+      const rankDeadline = Date.now() + rankMs;
+      let candidates: Node[];
+      try {
+        candidates = await this.#readNodes({ ...opts, limit: FIND_CANDIDATES }, rankMs);
+      } catch (error) {
+        if (error instanceof AdapterError && Date.now() >= rankDeadline) return first;
+        throw error;
+      }
+      return (
+        candidates.find((n) => n.name === wanted) ??
+        candidates.find((n) => n.name.toLowerCase() === wanted.toLowerCase()) ??
+        first
+      );
     });
   }
 
   async readState(opts: Query = {}): Promise<Node[]> {
-    return this.#run('readState', async () => {
-      const scope = this.#readScope();
-      const region = opts.within !== undefined ? await this.#regionBounds(opts.within) : undefined;
-      // A bounded query (role/name) + maxNodes let the AT-SPI walk skip describing
-      // (and stop once it has found) more than the caller could ever use — `find`
-      // (and thus `waitFor`'s poll loop) asks for `limit: 1`, so a match on the first
-      // matching node ends the walk instead of describing the whole tree. Region
-      // scoping (`within`) and `filters` are applied downstream in `shapeNodes`, not
-      // visible to the walk itself, so an early match-count stop could wrongly skip a
-      // same-query match that would have survived them (the first `Save` found is
-      // disabled, the enabled one sits deeper) — only tighten `maxNodes` when there is
-      // no post-walk narrowing to reconcile against.
-      const query = opts.query ? parseRoleNameQuery(opts.query) : undefined;
-      const narrowed = region !== undefined || opts.filters !== undefined;
-      const maxNodes = narrowed ? DEFAULT_LIMIT : (opts.limit ?? DEFAULT_LIMIT);
-      const nodes = await this.#atspi.readTree({ query, maxNodes, scope });
-      return shapeNodes(nodes, opts, DEFAULT_LIMIT, region);
-    });
+    return this.#run('readState', () => this.#readNodes(opts, this.#readWalkMs));
+  }
+
+  /** One AT-SPI read shaped onto contract nodes, its walk capped at `walkMs` (loud on a partial tree). */
+  async #readNodes(opts: Query, walkMs: number): Promise<Node[]> {
+    const scope = this.#readScope();
+    const region = opts.within !== undefined ? await this.#regionBounds(opts.within) : undefined;
+    // A bounded query (role/name) + maxNodes let the AT-SPI walk skip describing
+    // (and stop once it has found) more than the caller could ever use — `find`
+    // (and thus `waitFor`'s poll loop) asks for `limit: 1`, so a match on the first
+    // matching node ends the walk instead of describing the whole tree. Region
+    // scoping (`within`) and `filters` are applied downstream in `shapeNodes`, not
+    // visible to the walk itself, so an early match-count stop could wrongly skip a
+    // same-query match that would have survived them (the first `Save` found is
+    // disabled, the enabled one sits deeper) — only tighten `maxNodes` when there is
+    // no post-walk narrowing to reconcile against.
+    const query = opts.query ? parseRoleNameQuery(opts.query) : undefined;
+    // `visible_eq: true` is pushed into the walk (it then counts only showing nodes
+    // toward `maxNodes`, keeping the early stop); any other filter still narrows after.
+    const { visible_eq: visibleEq, ...otherFilters } = opts.filters ?? {};
+    const visibleOnly = visibleEq === true;
+    const narrowed =
+      region !== undefined ||
+      Object.keys(otherFilters).length > 0 ||
+      (visibleEq !== undefined && !visibleOnly);
+    const maxNodes = narrowed ? DEFAULT_LIMIT : (opts.limit ?? DEFAULT_LIMIT);
+    const deadline = Date.now() + walkMs;
+    const nodes = await this.#atspi.readTree({ query, maxNodes, scope, visibleOnly, deadline });
+    // A walk that stopped on the clock (not on `maxNodes`) returned a partial tree.
+    if (Date.now() >= deadline && nodes.length < maxNodes) {
+      throw new AdapterError(
+        `desktop: readState walk hit its ${walkMs}ms cap after ${nodes.length} nodes — ` +
+          'the tree is too large to read whole; narrow it with `query`, `filters` or `within`',
+      );
+    }
+    return shapeNodes(nodes, opts, DEFAULT_LIMIT, region);
   }
 
   async click(target: NodeRef): Promise<void> {
@@ -306,8 +307,14 @@ export class DesktopAdapter implements Adapter {
   async scroll(opts: ScrollOptions): Promise<void> {
     await this.#run('scroll', async () => {
       // Scope: park the cursor over the region first so the wheel targets it.
-      if (opts.within !== undefined) {
-        const { x, y } = centerOf(await this.#regionBounds(opts.within));
+      // Unscoped, the wheel goes wherever the pointer last was — possibly another app.
+      // Park it over the target window (or the `within` region) first.
+      const anchor =
+        opts.within !== undefined
+          ? await this.#regionBounds(opts.within)
+          : await this.#rootBounds();
+      if (anchor) {
+        const { x, y } = centerOf(anchor);
         await this.#input.move(x, y);
       }
       await this.#input.scroll(opts.direction, scrollRepeat(opts.amount));
@@ -327,23 +334,34 @@ export class DesktopAdapter implements Adapter {
       throw new AdapterError('waitFor requires `query` (desktop has no networkIdle)');
     }
     const timeout = opts.timeout ?? DEFAULT_WAIT_MS;
+    // NaN would make `Date.now() >= deadline` false forever — an unbounded poll.
+    if (!Number.isFinite(timeout) || timeout < 0) {
+      throw new AdapterError(
+        `desktop: waitFor \`timeout\` must be a non-negative, finite number of ms (got ${timeout})`,
+      );
+    }
+    const signal = opts.signal;
+    if (signal?.aborted) throw abortError();
     await this.#run('waitFor', async () => {
       const deadline = Date.now() + timeout;
-      for (;;) {
-        if (await this.#present(query, deadline)) {
-          // A match that only landed after the deadline is not a success: the wait is
-          // over, so resolving now would report a node the caller waited too long for.
-          if (Date.now() > deadline) {
-            throw new AdapterError(
-              `desktop: waitFor timed out after ${timeout}ms (${query}) — the query matched only after the deadline`,
-            );
-          }
-          return;
-        }
-        if (Date.now() >= deadline) {
-          throw new AdapterError(`desktop: waitFor timed out after ${timeout}ms (${query})`);
-        }
-        await delay(POLL_MS);
+      // One abort latch for the whole wait: it cuts short both an in-flight walk and
+      // the poll nap, and its listener is removed on every exit path below.
+      let onAbort: (() => void) | undefined;
+      const aborted = new Promise<never>((_resolve, reject) => {
+        if (!signal) return;
+        onAbort = () => reject(abortError());
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
+      aborted.catch(() => {});
+      try {
+        await pollUntilPresent({
+          present: () => this.#present(query, deadline),
+          label: `waitFor timed out after ${timeout}ms (${query})`,
+          deadline,
+          aborted,
+        });
+      } finally {
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
       }
     });
   }
@@ -361,6 +379,8 @@ export class DesktopAdapter implements Adapter {
       maxNodes: 1,
       deadline,
       scope,
+      // "exists/becomes visible": a hidden twin (another tab's "Save") is not the thing awaited.
+      visibleOnly: true,
     });
     return shapeNodes(nodes, { query, limit: 1 }, DEFAULT_LIMIT).length > 0;
   }
@@ -384,23 +404,16 @@ export class DesktopAdapter implements Adapter {
    * left to kill it and its X/profile locks held until the user does it by hand.
    */
   async close(): Promise<void> {
-    const pid = this.#child?.proc.pid;
-    if (pid === undefined) {
-      this.#child = null;
-      return;
-    }
-    await this.#run('close', async () => {
-      await terminateGroup(pid);
-      this.#child = null;
-    });
+    await this.#run('close', () => this.#app.stop());
   }
 
   /** Resolve a {@link NodeRef} to a concrete {@link Node}, re-querying a selector. */
   async #resolve(target: NodeRef): Promise<Node> {
     if (typeof target !== 'string') return target;
-    const node = await this.find({ query: target });
+    // Visible only: a click on a hidden match lands on stale extents — whatever is there.
+    const node = await this.find({ query: target, filters: { visible_eq: true } });
     if (!node) {
-      throw new AdapterError(`desktop: no element matched query ${JSON.stringify(target)}`);
+      throw new AdapterError(`desktop: no visible element matched query ${JSON.stringify(target)}`);
     }
     return node;
   }
@@ -429,6 +442,12 @@ export class DesktopAdapter implements Adapter {
     return scope;
   }
 
+  /** On-screen bounds of the scoped window itself, or null when AT-SPI cannot measure it. */
+  async #rootBounds(): Promise<Bounds | null> {
+    const [root] = await this.#atspi.readTree({ maxNodes: 1, scope: this.#readScope() });
+    return root?.measured && root.bounds.width > 0 && root.bounds.height > 0 ? root.bounds : null;
+  }
+
   /** Resolve a scope `within` (a {@link Node} or a selector) to an on-screen rectangle.
    *
    * A zero-size region is rejected, not scoped to: it would park the scroll cursor at
@@ -454,7 +473,13 @@ export class DesktopAdapter implements Adapter {
     try {
       return await fn();
     } catch (error) {
-      if (error instanceof UiDebuggerError) throw error;
+      // Aborts keep their `AbortError` name — the caller recognises them by it.
+      if (
+        error instanceof UiDebuggerError ||
+        (error instanceof Error && error.name === 'AbortError')
+      ) {
+        throw error;
+      }
       throw new AdapterError(
         `desktop.${op} failed: ${error instanceof Error ? error.message : String(error)}`,
       );

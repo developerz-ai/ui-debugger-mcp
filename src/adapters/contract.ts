@@ -146,6 +146,8 @@ export interface WaitOptions {
   networkIdle?: boolean;
   /** Hard cap in ms; on expiry the adapter throws (never resolves silently). */
   timeout?: number;
+  /** Abort the wait early (run ended/timed out); the adapter rejects with an AbortError-named error. */
+  signal?: AbortSignal;
 }
 
 /** Cardinal direction for {@link Adapter.scroll}; each adapter maps it to wheel/gesture deltas. */
@@ -233,6 +235,14 @@ export interface NetworkEntry {
    * have switched tabs. Same rationale as {@link ConsoleEntry.tab}.
    */
   tab?: string;
+  /**
+   * `true` when the request was SENT but had neither a response nor a failure
+   * at read time — the hung call behind a spinner that never stops. Such a row
+   * carries `status: 0`, `ok: false` (not ok YET) and no `error` (not failed),
+   * `timestamp` is when it was sent, and `durationMs` the time in flight so far.
+   * Absent on every settled exchange.
+   */
+  pending?: boolean;
 }
 
 /**

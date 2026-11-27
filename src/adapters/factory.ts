@@ -45,7 +45,7 @@ export function isAdapterWired(kind: string): kind is Target['adapter'] {
  * Create an adapter for a named target from the resolved config.
  *
  * @param targetName — the key in config.targets (e.g., "web")
- * @param config — the resolved `.ui-debugger-mcp.json` config
+ * @param config — the resolved project config
  * @param profileDir — absolute path to persistent profile dir (for managed browser adapter)
  * @param onLog — optional sink for streaming console/network logs to findings store
  * @param timeoutMs — the run's remaining wall-clock budget for getting the target up;

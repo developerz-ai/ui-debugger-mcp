@@ -19,7 +19,7 @@
  */
 
 import type { ConsoleEntry, NetworkEntry } from '../contract.js';
-import { stamp, tabMarker } from '../log-format.js';
+import { oneLine, stamp, tabMarker } from '../log-format.js';
 
 export { formatConsoleLine } from '../log-format.js';
 
@@ -29,9 +29,15 @@ export { formatConsoleLine } from '../log-format.js';
  */
 export const BODY_CAP = 4096;
 
-/** Header names whose VALUE is a credential — kept as a length marker, never verbatim. */
+/**
+ * Header names whose VALUE is a credential — kept as a length marker, never verbatim.
+ * Beyond the standard auth/cookie pair: the API-key spellings hosted backends send
+ * from the browser (Supabase `apikey`, Google `x-goog-api-key`), the CSRF/XSRF pair
+ * (Angular/Laravel send `x-xsrf-token`), bearer-ish custom headers, and the AWS
+ * session token a presigned/SigV4 request carries.
+ */
 const SENSITIVE_HEADER =
-  /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token)$/i;
+  /^(authorization|proxy-authorization|cookie|set-cookie|apikey|api-key|x-api-key|x-goog-api-key|x-auth-token|x-access-token|x-refresh-token|x-session-token|x-csrf-token|x-xsrf-token|x-amz-security-token)$/i;
 
 /** Truncate a captured body, marking what was dropped (never silently shortened). */
 export function truncateBody(body: string, cap = BODY_CAP): string {
@@ -90,6 +96,83 @@ export function redactUrl(url: string): string {
   return `${url.slice(0, start + 1)}${query}${url.slice(end)}`;
 }
 
+/**
+ * A body key whose VALUE is a credential, matched on the key with case and
+ * `_`/`-` folded away and any `user[password]` bracket path reduced to its last
+ * segment — so `password`, `new_password`, `accessToken`, `client-secret`,
+ * `x_api_key` all match. A suffix rule, not a list: a login body names its
+ * secret a dozen ways, and over-masking a pagination `nextPageToken` is the
+ * cheap side of that trade.
+ */
+const SENSITIVE_KEY = /(password|passwd|pwd|secret|token|apikey|authorization|otp|passcode)$/;
+
+function isSensitiveKey(key: string): boolean {
+  const last = /\[([^\]]*)\]$/.exec(key)?.[1] ?? key;
+  return SENSITIVE_KEY.test(last.toLowerCase().replace(/[-_]/g, ''));
+}
+
+const marker = (length: number): string => `<redacted, ${length} chars>`;
+
+/** Mask credential-keyed values anywhere in a parsed JSON value; `true` if any was masked. */
+function maskJson(value: unknown): boolean {
+  if (value === null || typeof value !== 'object') return false;
+  let masked = false;
+  for (const [key, child] of Object.entries(value)) {
+    if (isSensitiveKey(key) && child !== null && typeof child !== 'boolean') {
+      const text = typeof child === 'object' ? JSON.stringify(child) : String(child);
+      (value as Record<string, unknown>)[key] = marker(text.length);
+      masked = true;
+    } else if (maskJson(child)) {
+      masked = true;
+    }
+  }
+  return masked;
+}
+
+/** `a=1&b=2` — a form-urlencoded body, not prose that happens to hold an `=`. */
+const FORM_BODY = /^[^=&\s]+=[^&\s]*(&[^=&\s]+=[^&\s]*)*$/;
+
+/** A form key as the server reads it (`user%5Bpassword%5D` → `user[password]`). */
+function formKey(raw: string): string {
+  try {
+    return decodeURIComponent(raw.replace(/\+/g, ' '));
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * Copy a captured request/response body with credential-keyed values replaced by
+ * `<redacted, N chars>` — JSON (at any depth) and `application/x-www-form-urlencoded`.
+ *
+ * A login POST and the token response it gets back carry the secret in the BODY,
+ * which reaches the driver on every network read and `network.log` on failure;
+ * the header and URL redactors above never see it. Anything else (plain text, HTML,
+ * a body with nothing sensitive in it) comes back byte-for-byte untouched.
+ */
+export function redactBody(body: string): string {
+  const trimmed = body.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return body;
+    }
+    return maskJson(parsed) ? JSON.stringify(parsed) : body;
+  }
+  if (!FORM_BODY.test(trimmed)) return body;
+  return trimmed
+    .split('&')
+    .map((pair) => {
+      const eq = pair.indexOf('=');
+      return isSensitiveKey(formKey(pair.slice(0, eq)))
+        ? `${pair.slice(0, eq)}=${marker(pair.length - eq - 1)}`
+        : pair;
+    })
+    .join('&');
+}
+
 // --- Normalizers ------------------------------------------------------------
 
 /** Map a CDP console `type()` onto the normalized {@link ConsoleEntry} level. */
@@ -117,7 +200,8 @@ export function normalizeConsoleLevel(type: string): ConsoleEntry['level'] {
 /** One log line's worth of a captured body — single-line, hard-capped, never secret-bearing. */
 function bodySnippet(label: string, body: string | undefined): string {
   if (body === undefined || body.length === 0) return '';
-  return ` ${label}=${JSON.stringify(truncateBody(body, 500))}`;
+  // `JSON.stringify` escapes CR/LF but leaves U+2028/U+2029 raw — fold those too.
+  return ` ${label}=${oneLine(JSON.stringify(truncateBody(body, 500)))}`;
 }
 
 /**
@@ -128,10 +212,12 @@ function bodySnippet(label: string, body: string | undefined): string {
  * the exact dead end this log exists to prevent.
  */
 export function formatNetworkLine(entry: NetworkEntry): string {
-  const head = `${stamp(entry.timestamp)}${tabMarker(entry.tab)} ${entry.method} ${entry.url}`;
+  // Every page-controlled field is folded to one line (`oneLine`): a URL, method or
+  // error carrying a line break would otherwise plant a forged row in the trail.
+  const head = `${stamp(entry.timestamp)}${tabMarker(entry.tab)} ${oneLine(entry.method)} ${oneLine(entry.url)}`;
   const sent = bodySnippet('req', entry.requestBody);
-  if (entry.error !== undefined) return `${head} → FAILED ${entry.error}${sent}`;
-  const type = entry.resourceType ? ` [${entry.resourceType}]` : '';
+  if (entry.error !== undefined) return `${head} → FAILED ${oneLine(entry.error)}${sent}`;
+  const type = entry.resourceType ? ` [${oneLine(entry.resourceType)}]` : '';
   const took = entry.durationMs !== undefined ? ` ${entry.durationMs}ms` : '';
   const got = entry.ok ? '' : bodySnippet('res', entry.responseBody);
   return `${head} → ${entry.status}${type}${took}${sent}${got}`;

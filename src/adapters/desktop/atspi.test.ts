@@ -269,6 +269,17 @@ test('BusctlAtspi.readTree respects maxNodes', async () => {
   expect(nodes[0]?.name).toBe('My App');
 });
 
+test('BusctlAtspi.readTree visibleOnly drops hidden nodes before maxNodes counts them', async () => {
+  const bus = fakeBus();
+  const exec = async (args: string[]): Promise<string> =>
+    // The frame reports a state word with no SHOWING/VISIBLE bits.
+    args.includes('GetState') && args[4] === '/app'
+      ? JSON.stringify({ type: 'x', data: [[(1 << 8) | (1 << 24), 0]] })
+      : bus.exec(args);
+  const nodes = await new BusctlAtspi({ exec }).readTree({ maxNodes: 1, visibleOnly: true });
+  expect(nodes.map((n) => n.name)).toEqual(['OK']);
+});
+
 test('BusctlAtspi.readTree fails loud on a malformed reply', async () => {
   const exec = async (): Promise<string> => 'garbage';
   await expect(new BusctlAtspi({ exec }).readTree()).rejects.toThrow(AdapterError);

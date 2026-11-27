@@ -104,6 +104,10 @@ const SHELL_SPECIAL = '()<>|;&*\\~"\'`$#{}?[]!^=';
  * Escape text for `input text` on the device shell: spaces → `%s` (the tool's own
  * space token), {@link SHELL_SPECIAL} chars backslash-escaped.
  *
+ * Non-ASCII (> 0x7e) is **rejected** too: `input text` maps chars through the virtual
+ * keyboard layout, so anything unmapped is silently dropped or crashes the tool while
+ * `adb` reports success — a field left empty behind a "typed" step.
+ *
  * Control chars (< 0x20) are **rejected**, not escaped: adb joins argv into one
  * device-shell string, where a raw `\n` ends the `input text` command and runs the
  * rest as a shell command. They can't be typed anyway — the adapter turns line
@@ -116,6 +120,12 @@ export function escapeInputText(text: string): string {
     if (code < 0x20) {
       throw new AdapterError(
         `android type: control character ${JSON.stringify(ch)} cannot be typed — use pressKey (e.g. 'enter', 'tab')`,
+      );
+    }
+    if (code > 0x7e) {
+      throw new AdapterError(
+        `android type: ${JSON.stringify(ch)} is not ASCII — \`input text\` cannot type it ` +
+          '(it drops or crashes on unmapped characters); type ASCII only',
       );
     }
     if (ch === ' ') out += '%s';
@@ -293,4 +303,22 @@ export function parseScreenSize(output: string): Bounds {
     throw new AdapterError(`android: cannot parse screen size from ${JSON.stringify(output)}`);
   }
   return { x: 0, y: 0, width, height };
+}
+
+/** The 8-byte PNG file signature — what a healthy `screencap -p` starts with. */
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/**
+ * Return `bytes` when they are a PNG, else fail loud. `exec-out` merges stderr into
+ * stdout and drops the exit status, so a failed screencap arrives as text — never hand
+ * that to the vision model as a frame.
+ */
+export function assertPng(bytes: Uint8Array): Uint8Array {
+  if (!PNG_SIGNATURE.every((byte, i) => bytes[i] === byte)) {
+    const said = new TextDecoder().decode(bytes.slice(0, 200)).trim();
+    throw new AdapterError(
+      `android: screencap did not return a PNG (${said === '' ? 'no output' : JSON.stringify(said)})`,
+    );
+  }
+  return bytes;
 }

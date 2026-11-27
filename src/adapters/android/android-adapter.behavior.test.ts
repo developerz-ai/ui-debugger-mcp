@@ -254,13 +254,21 @@ describe('AndroidAdapter.readState within', () => {
 
 describe('AndroidAdapter.screenshot', () => {
   test('calls execOut screencap', async () => {
-    const pngBytes = new Uint8Array([137, 80, 78, 71]);
+    const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0]);
     const { adapter, adb } = makeAdapter();
     adb.setResponse('screencap -p', pngBytes);
     const result = await adapter.screenshot();
     expect(result).toBeInstanceOf(Uint8Array);
     const call = adb.calls.find((c) => c.method === 'execOut');
     expect(call?.args).toContain('screencap');
+  });
+
+  test('non-PNG output (exec-out merges stderr) fails loud, not as a bogus frame', async () => {
+    const { adapter, adb } = makeAdapter();
+    adb.setResponse('screencap -p', new TextEncoder().encode('Failed to take screenshot\n'));
+    const err = await adapter.screenshot().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as AdapterError).message).toContain('Failed to take screenshot');
   });
 });
 
@@ -777,5 +785,46 @@ describe('AndroidAdapter error wrapping', () => {
     const err = await adapter.readState().catch((e: unknown) => e);
     expect(err instanceof AdapterError).toBe(true);
     expect((err as AdapterError).message).toBe('original');
+  });
+});
+
+describe('AndroidAdapter.waitFor abort', () => {
+  test('an already-aborted signal rejects AbortError without dumping', async () => {
+    const { adapter, ui } = makeAdapter();
+    const err = await adapter
+      .waitFor({ query: 'Save', signal: AbortSignal.abort() })
+      .catch((e: unknown) => e);
+    expect((err as Error).name).toBe('AbortError');
+    expect(ui.calls).toBe(0);
+  });
+
+  test('a mid-wait abort rejects AbortError promptly, stops polling and drops its listener', async () => {
+    const { adapter, ui } = makeAdapter();
+    const controller = new AbortController();
+    const removed: string[] = [];
+    const real = controller.signal.removeEventListener.bind(controller.signal);
+    controller.signal.removeEventListener = ((type: string, ...rest: never[]) => {
+      removed.push(type);
+      return (real as (t: string, ...r: never[]) => void)(type, ...rest);
+    }) as typeof controller.signal.removeEventListener;
+    ui.setSlow(100);
+    const started = Date.now();
+    const wait = adapter.waitFor({ query: 'Nope', timeout: 30_000, signal: controller.signal });
+    setTimeout(() => controller.abort(), 30);
+    const err = await wait.catch((e: unknown) => e);
+    expect((err as Error).name).toBe('AbortError');
+    expect(Date.now() - started).toBeLessThan(90);
+    expect(removed).toContain('abort');
+    // The loop stops after the in-flight dump: no further polls.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(ui.calls).toBe(1);
+  });
+
+  test('a wait that succeeds removes its abort listener', async () => {
+    const { adapter } = makeAdapter({ nodes: [makeNode()] });
+    const controller = new AbortController();
+    await adapter.waitFor({ query: 'Save', signal: controller.signal });
+    // Aborting afterwards must be inert (no unhandled rejection, no throw).
+    controller.abort();
   });
 });
