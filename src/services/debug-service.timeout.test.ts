@@ -238,3 +238,53 @@ test("a run's timeout ends that run only — it never aborts a replace start in 
   expect(manager.get(CWD).id).toBe(second.session_id);
   await service.end(second);
 });
+
+// --- shutdown while a teardown is already in flight ---------------------------
+// The manager frees the slot BEFORE the close, so "no active run" is also what a
+// run being torn down looks like. `endActive` is the shutdown barrier: answering
+// at once there lets the process exit before the browser is closed, the verdict
+// persisted and the breadcrumb cleared.
+
+/** Make the run's adapter take `ms` to close; reports when it has. */
+function slowClose(adapter: { close: () => Promise<void> } | undefined, ms: number) {
+  const state = { closed: false };
+  if (!adapter) return state;
+  adapter.close = async () => {
+    await tick(ms);
+    state.closed = true;
+  };
+  return state;
+}
+
+test('endActive waits for a timeout teardown that is already in flight', async () => {
+  const { build, log } = fakeBuilder();
+  const spy = spyState();
+  const service = makeService(build, { state: spy.state });
+  await service.start({ target: 'web', goal: 'g', timeoutMs: 10 });
+  const closing = slowClose(log.adapters[0], 120);
+  await tick(40); // the cap fired: the slot is free, the close is still running
+  expect(manager.has(CWD)).toBe(false);
+  expect(closing.closed).toBe(false);
+
+  await service.endActive(); // SIGTERM lands now
+
+  expect(closing.closed).toBe(true);
+  expect(spy.clears()).toBe(1);
+});
+
+test('endActive waits for an end_session teardown that is already in flight', async () => {
+  const { build, log } = fakeBuilder();
+  const spy = spyState();
+  const service = makeService(build, { state: spy.state });
+  const run = await service.start({ target: 'web', goal: 'g' });
+  const closing = slowClose(log.adapters[0], 120);
+  const ending = service.end(run);
+  await tick(20);
+  expect(closing.closed).toBe(false);
+
+  await service.endActive();
+
+  expect(closing.closed).toBe(true);
+  expect(spy.clears()).toBe(1);
+  await ending;
+});

@@ -111,6 +111,8 @@ export class DebugService implements DebugApi {
    * of that call a no-op that still waits for (and fails with) the first one.
    */
   #ended: { session: Session; done: Promise<void> } | undefined;
+  /** The teardown in flight (or the last one, settled) — a barrier, so it never rejects. */
+  #tearing: Promise<void> = Promise.resolve();
 
   constructor(deps: DebugServiceDeps) {
     this.#manager = deps.manager;
@@ -400,9 +402,8 @@ export class DebugService implements DebugApi {
       this.#ended = { session: retained, done: Promise.resolve() };
       return { ok: true, session_id };
     }
-    // Idempotent: repeating the call for the run it just ended is a success that
-    // says so — once that teardown has SETTLED, so the status is the final one and
-    // a close error reaches the repeat too. Any other unknown id still fails loud.
+    // Idempotent: a repeat for the run it just ended succeeds and says so — once that
+    // teardown SETTLED (final status; its close error too). Other unknown ids fail loud.
     const ended = this.#ended;
     if (ended?.session.id === session_id) {
       await ended.done;
@@ -416,17 +417,23 @@ export class DebugService implements DebugApi {
     return { ok: true, session_id };
   }
 
-  /** Close the active run, then drop its breadcrumb — even when the close throws. */
-  async #teardown(session_id: string): Promise<void> {
-    try {
-      await this.#manager.end(this.#cwd);
-    } finally {
-      // The manager frees the slot before closing, so a stale `running` state.json
-      // would make a later CLI `stop` SIGTERM a healthy server. The close error
-      // still propagates. Scoped to `session_id`, so a successor that records
-      // itself while this teardown is in flight is untouched.
-      await this.#state.clear(session_id);
-    }
+  /**
+   * Close the active run, then drop its breadcrumb — even when the close throws.
+   * The ONE teardown, for every way a run ends, so {@link endActive} can wait on it.
+   */
+  #teardown(session_id: string): Promise<void> {
+    const done = (async () => {
+      try {
+        await this.#manager.end(this.#cwd);
+      } finally {
+        // The manager frees the slot before closing, so a stale `running` state.json
+        // would make a later CLI `stop` SIGTERM a healthy server. Scoped to
+        // `session_id`: a successor recording itself mid-teardown is untouched.
+        await this.#state.clear(session_id);
+      }
+    })();
+    this.#tearing = done.catch(() => undefined);
+    return done;
   }
 
   /**
@@ -443,6 +450,9 @@ export class DebugService implements DebugApi {
       starting.controller.abort();
       await starting.settled;
     }
+    // Slot-free is not torn-down: a timeout or `end_session` teardown in flight has
+    // emptied the manager, and shutdown must not exit before that close has settled.
+    await this.#tearing;
     await this.#endRetaining();
   }
 
@@ -454,13 +464,7 @@ export class DebugService implements DebugApi {
     // before the close, so a failing teardown leaves them reachable anyway.
     const ending = this.#manager.get(this.#cwd);
     this.#retained.retain(ending);
-    // Same contract as `end()`: the breadcrumb clears even when the close throws —
-    // scoped to the run being ENDED, never a successor's.
-    try {
-      await this.#manager.end(this.#cwd);
-    } finally {
-      await this.#state.clear(ending.id);
-    }
+    await this.#teardown(ending.id);
   }
 
   /**

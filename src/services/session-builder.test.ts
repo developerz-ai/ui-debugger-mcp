@@ -611,7 +611,16 @@ test("the builder tells the login when the persona is the target's only one", as
         { index: 0, url: 'http://localhost:3000/dashboard', title: '', active: true },
       ],
     });
-  const sole = { ...authDeps(), createAdapter: async () => bounced() };
+  const admin = AUTH_TARGET.adapter === 'browser' ? AUTH_TARGET.auth?.admin : undefined;
+  if (!admin) throw new AdapterError('fixture lost its admin persona');
+  // `expect` is what proves a reused session; the fake's `waitFor` shows it.
+  const provable = { ...admin, expect: '#account-menu' };
+  const one: Target = { ...AUTH_TARGET, auth: { admin: provable } };
+  const sole = {
+    ...authDeps(),
+    config: { ...CONFIG, targets: { ...CONFIG.targets, web: one } },
+    createAdapter: async () => bounced(),
+  };
   const built = await buildSession(sole, {
     id: 'auth-sole',
     target: 'web',
@@ -620,9 +629,7 @@ test("the builder tells the login when the persona is the target's only one", as
   });
   await expect(built.open(300)).resolves.toBeUndefined();
 
-  const admin = AUTH_TARGET.adapter === 'browser' ? AUTH_TARGET.auth?.admin : undefined;
-  if (!admin) throw new AdapterError('fixture lost its admin persona');
-  const two: Target = { ...AUTH_TARGET, auth: { admin, viewer: admin } };
+  const two: Target = { ...AUTH_TARGET, auth: { admin: provable, viewer: provable } };
   const shared = {
     ...authDeps(),
     config: { ...CONFIG, targets: { ...CONFIG.targets, web: two } },

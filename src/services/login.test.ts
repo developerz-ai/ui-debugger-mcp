@@ -356,13 +356,41 @@ test('a login form that renders AFTER load is waited for, not reported as a miss
 const bounced = (shown: (query: string) => boolean = () => false) =>
   fakeAdapter({ matches: shown, opensOn: 'http://localhost:5173/dashboard' });
 
+/** The sole persona, WITH the marker that proves a session: the only reusable shape. */
+const PROVABLE: LoginOptions = {
+  ...OPTS,
+  solePersona: true,
+  persona: { ...PERSONA, expect: '#account-menu' },
+};
+
 test('the sole persona on an already-signed-in profile is accepted, with no form submitted', async () => {
-  const { adapter, calls } = bounced();
-  const steps = await performLogin(adapter, { ...OPTS, solePersona: true, timeoutMs: 400 });
+  const { adapter, calls } = bounced((q) => q === '#account-menu');
+  const steps = await performLogin(adapter, PROVABLE);
   expect(steps.at(-1)?.step).toBe(
     'profile already signed in as "admin" (pre-run, no form submitted) → http://localhost:5173/dashboard',
   );
   expect(calls.some((c) => c.fn === 'type' || c.fn === 'click')).toBe(false);
+});
+
+test('a session whose `expect` marker is already showing is accepted without sitting out the render window', async () => {
+  // Every run on a signed-in profile takes this path: the marker is the proof, so
+  // there is nothing left to wait for once it shows on the redirected page.
+  const { adapter } = bounced((q) => q === '#account-menu');
+  const started = Date.now();
+  await performLogin(adapter, PROVABLE);
+  expect(Date.now() - started).toBeLessThan(1_000);
+});
+
+test('a redirect off the login page is NOT a session without an `expect` to prove it', async () => {
+  // `/login` → a public error or maintenance page: no password field there either.
+  // Absence of a login form proves nothing — the run would go on signed out.
+  const { adapter } = bounced();
+  const error = await performLogin(adapter, { ...OPTS, solePersona: true, timeoutMs: 400 }).catch(
+    (e: unknown) => e,
+  );
+  expect(error).toBeInstanceOf(AuthError);
+  expect((error as AuthError).message).toMatch(/no 'expect'/);
+  expect((error as AuthError).message).toContain('http://localhost:5173/dashboard');
 });
 
 test('a login page the app CANONICALISED is still a login page — never "already signed in"', async () => {
@@ -424,7 +452,7 @@ test("the sole persona's `expect` must show on the landing page for the session 
     persona: { ...PERSONA, expect: '#account-menu' },
   };
 
-  const shown = bounced();
+  const shown = bounced((q) => q === '#account-menu');
   const steps = await performLogin(shown.adapter, expecting);
   expect(steps.at(-1)?.step).toContain('profile already signed in as "admin"');
   expect(shown.calls.some((c) => c.fn === 'waitFor' && c.arg === '#account-menu')).toBe(true);

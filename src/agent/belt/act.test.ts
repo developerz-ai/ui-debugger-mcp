@@ -18,6 +18,7 @@ import {
   type StepRecorder,
 } from './act.js';
 import { createReportTool } from './report.js';
+import { targetRefFor } from './target-refs.js';
 import { createActTrail } from './trail.js';
 
 /** Calls the fake adapter recorded, to assert routing + ordering. */
@@ -876,4 +877,30 @@ test('an aborted run cancels an in-flight act wait — the wait gets the run sig
   const evidence = await trail.settled();
   expect(evidence.steps).toHaveLength(1);
   expect(evidence.steps[0]?.ok).toBe(false);
+});
+
+test('an opaque ref target resolves to the real selector at the adapter — the secret never crosses the tool boundary', async () => {
+  const redact = (text: string) => text.replaceAll('hunter2', '<redacted, 7 chars>');
+  const account: Node = { ...button, name: 'Account hunter2' };
+  const { adapter, calls } = fakeAdapter(account);
+  // What `observe` issues for a node whose selector carries a persona value.
+  const ref = targetRefFor(adapter, 'role=button[name="Account hunter2" i]');
+  const trail = createActTrail();
+  const tool = createActTool(adapter, fakeRecorder().recorder, trail, undefined, redact);
+  const execute = (input: ActInput) =>
+    (
+      tool as unknown as { execute: (input: ActInput, options: object) => Promise<ActResult> }
+    ).execute(input, {});
+
+  const res = await execute({ action: 'click', target: ref });
+
+  expect(calls.find[0]?.query).toBe('role=button[name="Account hunter2" i]');
+  expect(JSON.stringify(res)).not.toContain('hunter2');
+  expect(res.label).toBe('click button "Account <redacted, 7 chars>"');
+  // A reference nobody issued fails loud, naming only the reference.
+  await expect(execute({ action: 'click', target: 'ref=99' })).rejects.toThrow(
+    /unknown target reference "ref=99"/,
+  );
+  // `switch_tab` targets are tab indexes, never references.
+  await expect(execute({ action: 'switch_tab', target: 'ref=1' })).rejects.toThrow(/switch_tab/);
 });

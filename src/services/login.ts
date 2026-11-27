@@ -35,7 +35,8 @@ import type { Adapter, Node } from '../adapters/contract.js';
 import { AuthError } from '../errors.js';
 import type { Step } from '../findings/schema.js';
 import type { ResolvedAuth } from './auth-persona.js';
-import { fieldCandidates, submitCandidates } from './login-selectors.js';
+import { FIELD_KEY_HINT, fieldCandidates, submitCandidates } from './login-selectors.js';
+import { assertAlreadySignedIn } from './login-session.js';
 
 // Persona resolution and selector expansion live beside this file; importers keep this path.
 export { type ResolvedAuth, resolveAuth } from './auth-persona.js';
@@ -121,14 +122,6 @@ async function findFirst(adapter: Adapter, candidates: readonly string[]): Promi
   return null;
 }
 
-/** How to fix a field key that matched nothing. */
-const FIELD_KEY_HINT =
-  "Rename the key to the field's name/id/type/data-testid/aria-label/placeholder, " +
-  'or use a selector as the key (e.g. "#user", "[data-testid=\'email\']").';
-
-/** Any password input — its presence means the page is still ASKING for a login. */
-const PASSWORD_INPUT = 'css=input[type="password" i]';
-
 /**
  * The input for field `key`, waiting out a form that is still rendering. Only
  * once the WHOLE render window has passed with no such input is the URL read: a
@@ -136,66 +129,33 @@ const PASSWORD_INPUT = 'css=input[type="password" i]';
  * {@link assertAlreadySignedIn} to prove or refuse), and one that still is throws
  * the missing-field error. Never decided on the first miss — an app that serves
  * `/login` as `/en/login` renders its form late like any other.
+ *
+ * The one early exit is PROOF, not a miss: the sole persona's `expect` marker
+ * showing on a redirected page is an existing session, so there is nothing left
+ * to wait for — every run on a signed-in profile takes this path.
  */
 async function findField(
   adapter: Adapter,
   key: string,
-  { name, loginUrl }: LoginOptions,
+  { name, loginUrl, persona, solePersona }: LoginOptions,
   deadline: number,
 ): Promise<Node | string> {
+  const marker = solePersona === true ? persona.expect : undefined;
   const until = Math.min(deadline, Date.now() + FORM_RENDER_MS);
   for (;;) {
     const node = await findFirst(adapter, fieldCandidates(key));
     if (node) return node;
     if (Date.now() >= until) break;
+    if (marker !== undefined && (await adapter.find({ query: marker })) !== null) {
+      const url = await currentUrl(adapter);
+      if (url !== null && !samePage(url, loginUrl)) return url;
+    }
     await delay(Math.min(OBSERVATION_INTERVAL_MS, Math.max(1, until - Date.now())));
   }
   const url = await currentUrl(adapter);
   if (url !== null && !samePage(url, loginUrl)) return url;
   throw new AuthError(
     `auth persona '${name}': no input matching field '${key}' on ${loginUrl}. ${FIELD_KEY_HINT}`,
-  );
-}
-
-/**
- * The login page ended up on `url` with no `key` input. That is an existing
- * session ONLY with positive proof — never by default, or a moved login page plus
- * a mistyped key would run the whole goal signed out:
- *  - this persona is the target's ONLY one (who is signed in cannot be read off a
- *    redirect), AND
- *  - its `expect` shows there — or, with no `expect`, the page asks for no password.
- * Everything else fails loud, saying which of the two it was.
- */
-async function assertAlreadySignedIn(
-  adapter: Adapter,
-  { name, persona, loginUrl, solePersona }: LoginOptions,
-  key: string,
-  url: string,
-  deadline: number,
-): Promise<void> {
-  const landed = `auth persona '${name}': opening ${loginUrl} landed on ${url}`;
-  let why = "this target has other personas, so the session may be someone else's";
-  if (solePersona === true && persona.expect !== undefined) {
-    const timeout = capWait(NAVIGATION_SETTLE_MS, remainingMs(deadline));
-    try {
-      await adapter.waitFor({ query: persona.expect, timeout });
-      return;
-    } catch {
-      why = `'${persona.expect}' ('expect') never appeared there`;
-    }
-  } else if ((await adapter.find({ query: PASSWORD_INPUT })) !== null) {
-    throw new AuthError(
-      `${landed}, which still shows a password field — a login page, not a signed-in profile — ` +
-        `but no input matching field '${key}'. ${FIELD_KEY_HINT} If the login page moved, point ` +
-        "the persona's 'path' at it.",
-    );
-  } else if (solePersona === true) {
-    return;
-  }
-  throw new AuthError(
-    `${landed} — the app redirected away from its login page, so this browser profile is ` +
-      `probably ALREADY signed in, but ${why}. Sign that session out, or delete the target's ` +
-      'profile dir (chrome-user-data), then start again.',
   );
 }
 
@@ -258,7 +218,8 @@ export async function performLogin(adapter: Adapter, options: LoginOptions): Pro
             `being filled, before field '${key}' — the login cannot be completed.`,
         );
       }
-      await assertAlreadySignedIn(adapter, options, key, node, deadline);
+      const wait = capWait(NAVIGATION_SETTLE_MS, remainingMs(deadline));
+      await assertAlreadySignedIn(adapter, options, key, node, wait);
       const step = `profile already signed in as "${name}" (pre-run, no form submitted) → ${node}`;
       await log(`auth: ${step}`);
       return [...steps, { step, ok: true, note }];

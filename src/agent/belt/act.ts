@@ -35,6 +35,7 @@ import type { Redactor } from '../../redact.js';
 import type { LogChannel } from '../../session/findings-store.js';
 import { withRedactedOutput } from './redact-output.js';
 import { assertSameOrigin } from './same-origin.js';
+import { resolveTargetRef } from './target-refs.js';
 import type { ActTrail } from './trail.js';
 
 /** The action verbs `act` routes to the shared contract. */
@@ -230,10 +231,18 @@ function failureNote(error: unknown): string {
 /** Perform one action against the contract and return its target-derived step label. */
 async function performAct(
   adapter: Adapter,
-  input: ActInput,
+  raw: ActInput,
   origin?: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  // An opaque `ref=N` target (issued by `observe` for a selector that would carry
+  // a run secret) resolves to the real selector HERE, never in the driver's
+  // context. `switch_tab`'s target is a tab index, `navigate`'s a URL — not selectors.
+  const selector = raw.action === 'switch_tab' || raw.action === 'navigate';
+  const input =
+    selector || raw.target === undefined
+      ? raw
+      : { ...raw, target: resolveTargetRef(adapter, raw.target) };
   switch (input.action) {
     case 'click': {
       const node = await resolve(adapter, required(input.target, 'target', 'click'));

@@ -37,6 +37,7 @@ import type {
 import { AgentError } from '../../errors.js';
 import type { Redactor } from '../../redact.js';
 import type { EvidenceRecorder } from './look.js';
+import { resolveTargetRef, targetRefFor } from './target-refs.js';
 import type { ActTrail } from './trail.js';
 import { coerceWithin, dialectOf, NodeSchema, type TreeNode, withTargets } from './tree-targets.js';
 
@@ -205,6 +206,23 @@ function redactExchange(entry: NetworkEntry, redact: Redactor): NetworkEntry {
 }
 
 /**
+ * A projected tree node with the run's secrets masked in every text column. A
+ * `target` that would carry one becomes an opaque reference (`target-refs.ts`):
+ * masking a selector breaks it, and the node must stay addressable.
+ */
+function redactNode(node: TreeNode, adapter: Adapter, redact: Redactor): TreeNode {
+  const out: TreeNode = { ...node };
+  for (const column of ['name', 'value', 'testid', 'frame'] as const) {
+    const text = out[column];
+    if (text !== undefined) out[column] = redact(text);
+  }
+  if (node.target !== undefined && redact(node.target) !== node.target) {
+    out.target = targetRefFor(adapter, node.target);
+  }
+  return out;
+}
+
+/**
  * Route one `observe` call to the adapter and shape the result. Pure over the
  * {@link Adapter} + {@link EvidenceRecorder} seams (no `tool()` wrapper), so it
  * unit-tests against fakes.
@@ -213,10 +231,8 @@ function redactExchange(entry: NetworkEntry, redact: Redactor): NetworkEntry {
  * the auth persona's values); it defaults to identity, so an un-wired call is
  * unchanged. It is applied to every free-text field the driver reads back —
  * console text/location, each network exchange ({@link redactExchange}), tab
- * urls/titles and tree `value`s — because any of them can echo a typed
- * credential. The one exception is a tree node's `name`: `target` selectors are
- * built on it, and a masked name would hand the driver a selector that resolves
- * nothing.
+ * urls/titles and every text column of a tree node ({@link redactNode}) —
+ * because any of them can echo a typed credential.
  */
 export async function runObserve(
   adapter: Adapter,
@@ -229,11 +245,19 @@ export async function runObserve(
   switch (kind) {
     case 'tree': {
       const dialect = dialectOf(adapter);
-      const scope = coerceWithin(within, dialect);
-      const nodes = await adapter.readState({ query, filters, limit, within: scope });
+      const scope = coerceWithin(
+        typeof within === 'string' ? resolveTargetRef(adapter, within) : within,
+        dialect,
+      );
+      const nodes = await adapter.readState({
+        query: query === undefined ? undefined : resolveTargetRef(adapter, query),
+        filters,
+        limit,
+        within: scope,
+      });
       const scoped = query !== undefined || scope !== undefined || filters !== undefined;
       const projected = withTargets(nodes, dialect, fields, scoped).map((node) =>
-        node.value === undefined ? node : { ...node, value: redact(node.value) },
+        redactNode(node, adapter, redact),
       );
       return { kind, count: projected.length, nodes: projected };
     }

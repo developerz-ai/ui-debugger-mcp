@@ -409,6 +409,8 @@ export interface RunDebugLoopOptions {
  * A step with no tool call ends the SDK's loop, so while step budget remains the
  * run re-enters with the transcript so far plus {@link NO_TOOL_CALL_NUDGE}. Each
  * re-entry spends a step of the SAME run-long budget, so it can never spin.
+ * Only a NORMAL prose completion (`stop`) re-enters: a content-filtered, errored
+ * or truncated turn would just be re-asked the same way until the budget is gone.
  */
 export async function runDebugLoop(options: RunDebugLoopOptions) {
   const { agent, abortSignal, prompt = KICKOFF_PROMPT } = options;
@@ -416,7 +418,9 @@ export async function runDebugLoop(options: RunDebugLoopOptions) {
   const remaining = stepsLeft.get(agent) ?? (() => 0);
   const messages: ModelMessage[] = [{ role: 'user', content: prompt }];
   let result = await agent.generate({ messages, ...signal });
-  while (result.steps.at(-1)?.toolCalls.length === 0 && remaining() > 0) {
+  const talkedInsteadOfActing = () =>
+    result.finishReason === 'stop' && result.steps.at(-1)?.toolCalls.length === 0;
+  while (talkedInsteadOfActing() && remaining() > 0) {
     messages.push(...result.responseMessages, { role: 'user', content: NO_TOOL_CALL_NUDGE });
     result = await agent.generate({ messages, ...signal });
   }

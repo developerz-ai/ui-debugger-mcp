@@ -733,11 +733,21 @@ test('a stalled vision provider is cut off at the per-call deadline with a steer
 
 test('a run abort during look stays an abort — never relabelled as a vision timeout', async () => {
   const controller = new AbortController();
-  const look = createLookTool(fakeAdapter(PNG), stalledVision([]), fakeRecorder().recorder);
-  const attempt = look.execute?.({ question: 'q' }, lookOptions(controller.signal));
-  controller.abort();
-  const error = await (attempt as Promise<unknown>).catch((e: unknown) => e);
-  expect(error).not.toBeInstanceOf(AgentError);
+  const seen: AbortSignal[] = [];
+  const look = createLookTool(fakeAdapter(PNG), stalledVision(seen), fakeRecorder().recorder);
+  const attempt = Promise.resolve(
+    look.execute?.({ question: 'q' }, lookOptions(controller.signal)),
+  ).catch((e: unknown) => e);
+  // Abort only once the provider request is genuinely IN FLIGHT — past the
+  // screenshot capture, with the model holding its signal.
+  while (seen.length === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+  expect(seen[0]?.aborted).toBe(false);
+  const reason = new DOMException('run ended', 'AbortError');
+  controller.abort(reason);
+  const error = await attempt;
+  // The in-flight request was cancelled, and the rejection IS the run's abort.
+  expect(seen[0]?.aborted).toBe(true);
+  expect(error).toBe(reason);
 });
 
 test('the per-call deadline timer is cleared once the vision call settles', async () => {

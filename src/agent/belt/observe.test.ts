@@ -14,6 +14,7 @@ import { createSecretRedactor } from '../../redact.js';
 import type { EvidenceRecorder } from './look.js';
 import { createObserveTool, ObserveInputSchema, runObserve } from './observe.js';
 import { type FindingsWriter, runReport } from './report.js';
+import { resolveTargetRef } from './target-refs.js';
 import { type ActTrail, createActTrail } from './trail.js';
 import { coerceWithin } from './tree-targets.js';
 
@@ -874,7 +875,7 @@ test('a redacted network read scrubs persona values from url, bodies, error and 
   expect(plain.entries[0]).toEqual(login);
 });
 
-test('a redacted tree read scrubs persona values from node values — never from the names selectors are built on', async () => {
+test('a redacted tree read scrubs persona values from value, name, frame AND the generated target', async () => {
   const field: Node = {
     role: 'textbox',
     name: 'Password',
@@ -882,9 +883,52 @@ test('a redacted tree read scrubs persona values from node values — never from
     enabled: true,
     value: 'hunter2',
   };
-  const { adapter } = fakeAdapter({ nodes: [field] });
+  // A page that echoes the persona value in visible text, inside an iframe whose
+  // URL carries it too — the name feeds the generated selector.
+  const menu: Node = {
+    role: 'button',
+    name: 'Account hunter2',
+    bounds: { x: 0, y: 20, width: 10, height: 10 },
+    enabled: true,
+    frame: 'http://x/embed?user=hunter2',
+  };
+  const { adapter } = fakeAdapter({ nodes: [field, menu] });
   const res = await runObserve(adapter, recorder(), { kind: 'tree' }, REDACT);
   if (res.kind !== 'tree') throw new Error('expected tree result');
+  expect(JSON.stringify(res)).not.toContain('hunter2');
   expect(res.nodes[0]?.value).toBe('<redacted, 7 chars>');
+  // A secret-free selector is untouched — the driver copies it verbatim.
   expect(res.nodes[0]?.target).toBe('role=textbox[name="Password" i]');
+  expect(res.nodes[1]?.name).toBe('Account <redacted, 7 chars>');
+  expect(res.nodes[1]?.frame).toBe('http://x/embed?user=<redacted, 7 chars>');
+  // The node stays addressable through an opaque reference that resolves, for
+  // THIS adapter only, back to the real selector.
+  const ref = res.nodes[1]?.target ?? '';
+  expect(ref).toMatch(/^ref=\d+$/);
+  expect(resolveTargetRef(adapter, ref)).toBe('role=button[name="Account hunter2" i]');
+  // Re-reading hands out the SAME reference — the registry does not grow per read.
+  const again = await runObserve(adapter, recorder(), { kind: 'tree' }, REDACT);
+  if (again.kind !== 'tree') throw new Error('expected tree result');
+  expect(again.nodes[1]?.target).toBe(ref);
+  // A reference from another run's adapter, or one never issued, fails loud.
+  expect(() => resolveTargetRef(fakeAdapter({}).adapter, ref)).toThrow(AgentError);
+  expect(resolveTargetRef(adapter, 'role=button[name="Save" i]')).toBe(
+    'role=button[name="Save" i]',
+  );
+});
+
+test('observe resolves an opaque reference passed back as query or within', async () => {
+  const menu: Node = {
+    role: 'button',
+    name: 'Account hunter2',
+    bounds: { x: 0, y: 20, width: 10, height: 10 },
+    enabled: true,
+  };
+  const { adapter, rec } = fakeAdapter({ nodes: [menu] });
+  const first = await runObserve(adapter, recorder(), { kind: 'tree' }, REDACT);
+  if (first.kind !== 'tree') throw new Error('expected tree result');
+  const ref = first.nodes[0]?.target ?? '';
+  await runObserve(adapter, recorder(), { kind: 'tree', query: ref, within: ref }, REDACT);
+  expect(rec.readState?.query).toBe('role=button[name="Account hunter2" i]');
+  expect(rec.readState?.within).toBe('role=button[name="Account hunter2" i]');
 });

@@ -48,3 +48,8 @@ export function submitCandidates(submit: string): string[] {
   const v = JSON.stringify(submit);
   return [`role=button[name=${v} i]`, `role=link[name=${v} i]`, `text=${submit}`];
 }
+
+/** How to fix a field key that matched nothing. */
+export const FIELD_KEY_HINT =
+  "Rename the key to the field's name/id/type/data-testid/aria-label/placeholder, " +
+  'or use a selector as the key (e.g. "#user", "[data-testid=\'email\']").';

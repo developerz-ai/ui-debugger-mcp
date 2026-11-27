@@ -601,3 +601,32 @@ test('a driver that only ever talks is bounded by the run-long step cap, never a
   // The budget nudge counts across re-entries: the last turn is told it is the final step.
   expect(prompts[3]).toContain('This is your final step');
 });
+
+test('a content-filtered turn is terminal — a provider that keeps blocking is not re-asked until the budget is spent', async () => {
+  const { written, writer } = findingsTracker();
+  let callCount = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      callCount++;
+      return {
+        ...textResponse(''),
+        content: [],
+        finishReason: { unified: 'content-filter' as const, raw: 'content_filter' },
+      };
+    },
+  });
+  const agent = createDebugAgent({
+    model,
+    tools: realBelt(writer),
+    instructions: 'debug this app',
+    inbox: fakeInbox(),
+    progress: writer,
+    maxSteps: 10,
+  });
+
+  const result = await runDebugLoop({ agent });
+
+  expect(callCount).toBe(1);
+  expect(result.finishReason).toBe('content-filter');
+  expect(written).toEqual([]);
+});
