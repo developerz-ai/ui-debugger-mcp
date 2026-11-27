@@ -154,3 +154,85 @@ test('createSecretRedactor redacts the U+FFFD form a browser sends for a lone su
   expect(redact('res={"p":"pw�synthetic"}')).toBe('res={"p":"<redacted, 12 chars>"}');
   expect(redact('res={"p":"pw\\uFFFDsynthetic"}')).toBe('res={"p":"<redacted, 17 chars>"}');
 });
+
+/** --- credential spellings never reach any durable trail ------------------- */
+
+test('redaction binds per-run: each runner sees only its own secret masked', () => {
+  const aRedact = createSecretRedactor(['runner-alpha-secret']);
+  const bRedact = createSecretRedactor(['runner-beta-secret']);
+
+  // Each run redacts ONLY its own credential; the other run's value passes through untouched.
+  expect(aRedact('act type {"text":"runner-alpha-secret"}')).toBe(
+    'act type {"text":"<redacted, 19 chars>"}',
+  );
+  expect(bRedact('act type {"text":"runner-alpha-secret"}')).toBe(
+    'act type {"text":"runner-alpha-secret"}',
+  );
+  expect(bRedact('act type {"text":"runner-beta-secret"}')).toBe(
+    'act type {"text":"<redacted, 18 chars>"}',
+  );
+  expect(aRedact('act type {"text":"runner-beta-secret"}')).toBe(
+    'act type {"text":"runner-beta-secret"}',
+  );
+});
+
+test('a raw credential never reaches session logs, findings, or diagnostic output', () => {
+  const redact = createSecretRedactor(['hunter2']);
+
+  const sessionLog = 'POST /login → 200 set-cookie=session=abc hunter2';
+  const persistedFinding = 'bug: user can type "hunter2" into the password field';
+  const diagnosticOutput = 'act type {"text":"hunter2","field":"password"}';
+
+  for (const trail of [sessionLog, persistedFinding, diagnosticOutput]) {
+    expect(redact(trail)).not.toContain('hunter2');
+    expect(redact(trail)).toContain('<redacted, 7 chars>');
+  }
+});
+
+test('a percent-encoded credential is redacted from every trail', () => {
+  const redact = createSecretRedactor(['p@ss']);
+
+  const sessionLog = 'POST /login req=email%3Duser%40example.com%26pass%3Dp%40ss';
+  const persistedFinding = 'network: p%40ss seen in the request body';
+  const diagnosticOutput = 'form: password=p%40ss&next=/dashboard';
+
+  for (const trail of [sessionLog, persistedFinding, diagnosticOutput]) {
+    const out = redact(trail);
+    expect(out).not.toContain('p@ss');
+    expect(out).not.toContain('p%40ss');
+    expect(out).not.toContain('p%40');
+    expect(out).toContain('<redacted, 6 chars>');
+  }
+});
+
+test('a +-for-space credential spelling is redacted from every trail', () => {
+  const redact = createSecretRedactor(['pass word']);
+
+  const sessionLog = 'POST /login req=password:pass+word&next=/';
+  const persistedFinding = 'console: typed pass+word into the field';
+  const diagnosticOutput = 'act type {"text":"pass+word"}';
+
+  for (const trail of [sessionLog, persistedFinding, diagnosticOutput]) {
+    const out = redact(trail);
+    expect(out).not.toContain('pass word');
+    expect(out).not.toContain('pass+word');
+    expect(out).not.toContain('pass%20word');
+    expect(out).toContain('<redacted, 9 chars>');
+  }
+});
+
+test('a JSON-escaped credential spelling is redacted from every trail', () => {
+  const redact = createSecretRedactor(['a"b\\c']);
+
+  const sessionLog = 'POST {"password":"a\\"b\\\\c"}';
+  const persistedFinding = 'error: could not parse {"password":"a\\"b\\\\c"}';
+  const diagnosticOutput = 'act type {"text":"a\\"b\\\\c","field":"password"}';
+
+  for (const trail of [sessionLog, persistedFinding, diagnosticOutput]) {
+    const out = redact(trail);
+    expect(out).not.toContain('a"b\\c');
+    expect(out).not.toContain('a\\"b');
+    expect(out).not.toContain('b\\\\c');
+    expect(out).toContain('<redacted, 7 chars>');
+  }
+});

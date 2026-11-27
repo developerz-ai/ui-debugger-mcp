@@ -654,3 +654,41 @@ test('record() by the owner twice is re-entrant — the second record keeps the 
   const claim = JSON.parse(await readFile(ownerLockPath(ws), 'utf8'));
   expect(claim.pid).toBe(process.pid);
 });
+
+test('markStatus re-reads and revalidates before writing — a concurrent write is not clobbered', async () => {
+  const path = join(dir, 'state.json');
+  const running = { ...SAMPLE, status: 'running' as const };
+  const stopped = { ...SAMPLE, status: 'stopped' as const };
+
+  // markStatus's first read is held pending until we release it. While it waits,
+  // a concurrent writer publishes `stopped`. The fixed markStatus must re-read,
+  // observe `stopped`, and keep it — never overwrite with `ended`.
+  let releaseFirst: ((v: StateFile | null) => void) | undefined;
+  let releaseSecond: ((v: StateFile | null) => void) | undefined;
+  let reads = 0;
+  const io: StateIo = {
+    read: async () => {
+      reads += 1;
+      return new Promise<StateFile | null>((resolve) => {
+        if (reads === 1) releaseFirst = resolve;
+        else releaseSecond = resolve;
+      });
+    },
+    write: async (_p, state) => {
+      latest = state;
+    },
+  };
+  let latest: StateFile | undefined;
+
+  const mark = markStatus(path, 'ended', new Date('2026-07-01T00:00:00.000Z'), undefined, io);
+  await writeState(path, running);
+  // First read is pending; the concurrent write lands first.
+  await writeState(path, stopped);
+  releaseFirst?.(running);
+  await new Promise((r) => setTimeout(r, 50));
+  releaseSecond?.(stopped);
+  await mark;
+
+  expect(latest?.status).toBe('stopped');
+  expect(await readState(path)).toMatchObject({ status: 'stopped' });
+});

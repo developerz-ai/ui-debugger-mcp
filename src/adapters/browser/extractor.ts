@@ -59,7 +59,7 @@ declare function getComputedStyle(el: DomEl): {
  * its params and nested locals. One batched call powers both `find` and
  * `readState`.
  */
-export const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
+export const NODE_EXTRACTOR = (elements: DomEl[], limit?: number): RawNode[] => {
   const clean = (s: string | null | undefined): string => (s ?? '').replace(/\s+/g, ' ').trim();
 
   interface Rgba {
@@ -231,7 +231,7 @@ export const NODE_EXTRACTOR = (elements: DomEl[]): RawNode[] => {
     return tag === 'input' || tag === 'textarea' || tag === 'select';
   };
 
-  return elements.map((el) => {
+  return (limit === undefined ? elements : elements.slice(0, limit)).map((el) => {
     const r = el.getBoundingClientRect();
     const style = getComputedStyle(el);
     const testid = clean(el.getAttribute('data-testid'));

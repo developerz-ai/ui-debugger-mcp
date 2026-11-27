@@ -7,13 +7,14 @@
  * post-verdict replay lives in `session.replay.test.ts`.
  */
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentError } from '../errors.js';
 import { FindingsStore } from './findings-store.js';
 import { SessionManager } from './manager.js';
 import { Session, type SessionAdapter } from './session.js';
+import { markStatus, type StateIo } from './state-file.js';
 import { sessionPaths, workspacePaths } from './workspace.js';
 
 /** Adapter stub that records how many times it was closed. */
@@ -429,4 +430,68 @@ test('start may be called only once', async () => {
   const run = session.start(async () => undefined);
   expect(() => session.start(async () => undefined)).toThrow(AgentError);
   await run;
+});
+
+test('markStatus re-validation preserves a concurrent successor status', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ui-debugger-mcp-sess-'));
+  try {
+    const cwd = join(root, 'proj');
+    const ws = workspacePaths(cwd, join(root, 'ws'));
+    await mkdir(ws.sessions, { recursive: true });
+    const statePath = ws.stateJson;
+
+    // Pre-create state file like a healthy run would.
+    const running = {
+      pid: 4242,
+      sessionId: '1700000000000-0001',
+      target: 'web',
+      goal: 'check the signup flow',
+      status: 'running' as const,
+      startedAt: '2026-07-01T00:00:00.000Z',
+      updatedAt: '2026-07-01T00:00:00.000Z',
+      sessionDir: sessionPaths(ws, '1700000000000-0001').root,
+      identity: { startTicks: 987_654 },
+    };
+    await writeFile(statePath, JSON.stringify(running), 'utf8');
+
+    // A concurrent reader (the fix reads twice). We capture its first read and
+    // let a concurrent writer publish `stopped` before we release it.
+    let releaseFirst: ((v: import('./state-file.js').StateFile | null) => void) | undefined;
+    let releaseSecond: ((v: import('./state-file.js').StateFile | null) => void) | undefined;
+    let reads = 0;
+    let published: import('./state-file.js').StateFile | undefined;
+    const io: StateIo = {
+      read: async () => {
+        reads += 1;
+        return new Promise<import('./state-file.js').StateFile | null>((resolve) => {
+          if (reads === 1) releaseFirst = resolve;
+          else releaseSecond = resolve;
+        });
+      },
+      write: async (_p, state) => {
+        published = state;
+      },
+    };
+
+    const mark = markStatus(
+      statePath,
+      'ended',
+      new Date('2026-07-01T01:00:00.000Z'),
+      undefined,
+      io,
+    );
+    // Concurrent write lands while markStatus's first read is pending.
+    await writeFile(statePath, JSON.stringify({ ...running, status: 'stopped' }), 'utf8');
+    releaseFirst?.(running);
+    await new Promise((r) => setTimeout(r, 50));
+    releaseSecond?.({ ...running, status: 'stopped' });
+    await mark;
+
+    // Pre-fix implementation would have overwritten `stopped` with `ended`.
+    expect(published?.status).toBe('stopped');
+    const final = JSON.parse(await readFile(statePath, 'utf8'));
+    expect(final.status).toBe('stopped');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

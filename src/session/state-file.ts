@@ -443,8 +443,17 @@ export async function markStatus(
   if (onlySessionId !== undefined && prior.sessionId !== onlySessionId) return;
   // Not ours to end — never write over it.
   if (ownedBy !== undefined && !ownedBy(prior)) return;
-  const nextStatus = prior.status === 'stopped' ? 'stopped' : status;
-  await io.write(path, { ...prior, status: nextStatus, updatedAt: now.toISOString() });
+  // Re-read and revalidate immediately before publishing: a concurrent writer
+  // (a successor's record) may have replaced the breadcrumb since our first
+  // read. If it did, we base the write on that confirmed current state so the
+  // successor is never silently clobbered (KB finding #4: non-atomic
+  // read-modify-write without revalidation at publish time).
+  const confirmed = await io.read(path);
+  if (!confirmed) return;
+  if (onlySessionId !== undefined && confirmed.sessionId !== onlySessionId) return;
+  if (ownedBy !== undefined && !ownedBy(confirmed)) return;
+  const finalStatus = confirmed.status === 'stopped' ? 'stopped' : status;
+  await io.write(path, { ...confirmed, status: finalStatus, updatedAt: now.toISOString() });
 }
 
 /**

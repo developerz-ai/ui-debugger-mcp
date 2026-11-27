@@ -289,6 +289,32 @@ test('a failed unlock still frees the kernel lock and reaches the caller', async
   expect(JSON.parse(await readFile(lockPath, 'utf8'))).toEqual(rival);
 });
 
+test('when emptyBoard throws, the fd is still closed and the lock released', async () => {
+  // KB finding #4: the old ordering deleted the registry entry FIRST, then
+  // emptied the board and released the fd. When emptyBoard threw, the registry
+  // named NO hold (no retry path), the fd stayed open keeping the kernel lock
+  // alive with nothing able to reach it, and every rival was wedged until the
+  // process exited. Release ordering now closes/truncates the board and
+  // releases the fd BEFORE deleting the registry entry: any failing step
+  // leaves the resource releasable.
+  const holder = owner(process.pid, 'holder');
+  expect(await acquireOwnerLock(lockPath, holder)).toEqual({ acquired: true, created: true });
+
+  const boardFailure = new Error('board is read-only');
+  await expect(
+    releaseOwnerLock(lockPath, holder, () => {
+      throw boardFailure;
+    }),
+  ).rejects.toBe(boardFailure); // the failure still reaches the caller
+
+  // The fd came home anyway — a rival can take over immediately, which the
+  // kernel only allows when the lock was actually released.
+  const rival = owner(process.pid, 'rival');
+  rival.identity = { startTicks: (holder.identity.startTicks ?? 0) + 1 };
+  expect(await acquireOwnerLock(lockPath, rival)).toEqual({ acquired: true, created: true });
+  expect(JSON.parse(await readFile(lockPath, 'utf8'))).toEqual(rival);
+});
+
 test('two real child processes contend: exactly one acquires and one is busy', async () => {
   const results = await contendViaChildren(lockPath, ['child-a', 'child-b']);
   expectExactlyOneAcquired(results);

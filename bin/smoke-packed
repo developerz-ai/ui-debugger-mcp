@@ -100,7 +100,9 @@ fi
 missing=""
 while IFS= read -r entry; do
   [ -n "$entry" ] || continue
-  if ! printf '%s\n' "$entries" | grep -qxF "$entry"; then
+  # Quiet grep can exit before a pipe producer finishes. Feed the listing
+  # directly so pipefail cannot turn a match into a missing entry.
+  if ! grep -qxF -- "$entry" <<< "$entries"; then
     missing="$missing $entry"
   fi
 done <<< "$required"
