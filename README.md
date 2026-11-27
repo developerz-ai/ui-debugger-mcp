@@ -1,6 +1,23 @@
-# UI Debugger MCP
+<p align="center">
+  <img src="https://raw.githubusercontent.com/developerz-ai/ui-debugger-mcp/main/docs/assets/logo.png" alt="UI Debugger MCP — a goblin bug-hunter with a magnifying glass" width="240">
+</p>
 
-> An MCP server that debugs UIs **autonomously** — so the AI that wrote your app can also test it, without a human clicking through every flow.
+<h1 align="center">UI Debugger MCP 🔍</h1>
+
+<p align="center"><strong>An MCP server that debugs UIs <em>autonomously</em></strong> — so the AI that wrote your app can also test it, without a human clicking through every flow.</p>
+
+<div align="center">
+
+[![npm](https://img.shields.io/npm/v/@developerz.ai/ui-debugger-mcp.svg?logo=npm)](https://www.npmjs.com/package/@developerz.ai/ui-debugger-mcp)
+[![CI](https://github.com/developerz-ai/ui-debugger-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/developerz-ai/ui-debugger-mcp/actions/workflows/ci.yml)
+[![AI-maintained](https://img.shields.io/badge/maintained%20by-developerz.ai-8a2be2.svg)](#ai-maintained)
+[![MCP](https://img.shields.io/badge/MCP-stdio%20server-000000.svg)](https://modelcontextprotocol.io)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](./tsconfig.json)
+[![Bun](https://img.shields.io/badge/Bun-runtime-fbf0df?logo=bun&logoColor=black)](https://bun.sh)
+[![Node](https://img.shields.io/badge/node-%E2%89%A5%2022-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+</div>
 
 ## The problem
 
@@ -461,6 +478,25 @@ See [`docs/idea/`](docs/idea/) for design notes.
 - [`docs/idea/workspace.md`](docs/idea/workspace.md) — per-project space + logs
 - [`docs/claude/SKILL.md`](docs/claude/SKILL.md) — driving `claude` as a headless CLI tool (generic)
 - [`CLAUDE.md`](CLAUDE.md) — instructions for AI agents working on this repo
+
+## AI-maintained
+
+UI Debugger MCP is maintained by AI: the [developerz.ai](https://developerz.ai) maintainer agent
+looks after it the way a human maintainer looks after an open-source project. It works publicly as
+`developerz-ai[bot]`, and its rules are committed in
+[`.dz/maintainer/maintainer.yml`](.dz/maintainer/maintainer.yml).
+
+| What arrives                       | What happens                                                                               |
+| ---------------------------------- | ------------------------------------------------------------------------------------------ |
+| an issue                           | triaged; a qualified one is scoped and handed to the coding fleet                          |
+| the bot's own or a dependency PR   | reviewed (CodeRabbit + the developerz.ai reviewer, advisory only), driven to green, merged |
+| a PR from anyone else              | reviewed the same way, then waits for a human member to merge                              |
+| quiet issues / PRs awaiting author | commented on, then closed after 60 days                                                    |
+| a branch idle 60 days              | tagged `archive/<branch>/<date>`, then deleted                                             |
+
+Green CI and the branch ruleset are the merge gate, not the bot's review. A merge never cuts a
+release: a weekly checkup judges whether one is due, and publishing to npm + the MCP Registry runs
+from `release.yml` on a published GitHub Release.
 
 ## Credits / influences
 
