@@ -151,6 +151,6 @@ test('createSecretRedactor redacts the U+FFFD form a browser sends for a lone su
   // The browser replaces the lone surrogate with U+FFFD; a JSON echo of THAT
   // value (bare, or as �) is the same secret.
   const redact = createSecretRedactor(['pw\ud800synthetic']);
-  expect(redact('res={"p":"pw�synthetic"}')).not.toContain('synthetic');
-  expect(redact('res={"p":"pw\\uFFFDsynthetic"}')).not.toContain('synthetic');
+  expect(redact('res={"p":"pw�synthetic"}')).toBe('res={"p":"<redacted, 12 chars>"}');
+  expect(redact('res={"p":"pw\\uFFFDsynthetic"}')).toBe('res={"p":"<redacted, 17 chars>"}');
 });
