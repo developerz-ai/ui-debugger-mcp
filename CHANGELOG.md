@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-11-27
+
+### Changed
+
+- README: project logo, badge row and an `AI-maintained` section (#227).
+
 ### Fixed
 
 - Release workflow waits (capped at 5 min) for npm to serve the new version
