@@ -70,6 +70,89 @@ test('writeState + readState round-trips', async () => {
   expect(await readState(path)).toEqual(SAMPLE);
 });
 
+test('a successor cannot publish between a status check and its write', async () => {
+  const path = join(dir, 'state.json');
+  await writeState(path, SAMPLE);
+  let resume!: () => void;
+  let entered!: () => void;
+  const paused = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  const io: StateIo = {
+    read: readState,
+    write: async (p, state) => {
+      entered();
+      await gate;
+      await writeFile(p, JSON.stringify(state));
+    },
+  };
+  const stopping = markStatus(path, 'stopped', new Date(), SAMPLE.sessionId, io);
+  await paused;
+  let published = false;
+  const successor = writeState(path, { ...SAMPLE, sessionId: 'successor' }).then(() => {
+    published = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(published).toBe(false);
+  resume();
+  await Promise.all([stopping, successor]);
+  expect((await readState(path))?.sessionId).toBe('successor');
+  expect((await readState(path))?.status).toBe('running');
+});
+
+test('a separate process waits for the status mutation before publishing a successor', async () => {
+  const path = join(dir, 'state.json');
+  await writeState(path, SAMPLE);
+  let resume!: () => void;
+  let entered!: () => void;
+  const paused = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  const io: StateIo = {
+    read: readState,
+    write: async (p, state) => {
+      entered();
+      await gate;
+      await writeFile(p, JSON.stringify(state));
+    },
+  };
+  const stopping = markStatus(path, 'stopped', new Date(), SAMPLE.sessionId, io);
+  await paused;
+  const modulePath = join(import.meta.dir, 'state-file.ts');
+  const child = Bun.spawn({
+    cmd: [
+      'bun',
+      '-e',
+      `
+      import { writeState } from ${JSON.stringify(modulePath)};
+      const state = ${JSON.stringify({ ...SAMPLE, sessionId: 'successor' })};
+      console.log('ready');
+      await writeState(${JSON.stringify(path)}, state);
+      console.log('published');
+    `,
+    ],
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  children.push(child);
+  const reader = child.stdout.getReader();
+  const first = await reader.read();
+  expect(new TextDecoder().decode(first.value)).toContain('ready');
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect((await readState(path))?.sessionId).toBe(SAMPLE.sessionId);
+  resume();
+  await stopping;
+  expect(await child.exited).toBe(0);
+  expect((await readState(path))?.sessionId).toBe('successor');
+  expect((await readState(path))?.status).toBe('running');
+});
+
 test('readState returns null when the file is absent', async () => {
   expect(await readState(join(dir, 'nope.json'))).toBeNull();
 });
@@ -114,7 +197,7 @@ test('writeState publishes atomically — the CLI never reads a torn state.json'
     writeState(path, { ...SAMPLE, goal: 'other' }),
   ]);
 
-  expect(await readdir(dir)).toEqual(['state.json']);
+  expect((await readdir(dir)).sort()).toEqual(['state.json', 'state.json.lock']);
   expect(await readState(path)).not.toBeNull();
 });
 
@@ -655,6 +738,25 @@ test('record() by the owner twice is re-entrant — the second record keeps the 
   expect(claim.pid).toBe(process.pid);
 });
 
+test('unscoped markStatus never marks a successor observed on its second read', async () => {
+  for (const successor of [
+    { ...SAMPLE, sessionId: 'successor' },
+    { ...SAMPLE, pid: SAMPLE.pid + 1 },
+    { ...SAMPLE, identity: { startTicks: (SAMPLE.identity.startTicks ?? 0) + 1 } },
+  ]) {
+    let reads = 0;
+    let written = false;
+    const io: StateIo = {
+      read: async () => (++reads === 1 ? SAMPLE : successor),
+      write: async () => {
+        written = true;
+      },
+    };
+    await markStatus(join(dir, 'state.json'), 'ended', new Date(), undefined, io);
+    expect(written).toBe(false);
+  }
+});
+
 test('markStatus re-reads and revalidates before writing — a concurrent write is not clobbered', async () => {
   const path = join(dir, 'state.json');
   const running = { ...SAMPLE, status: 'running' as const };
@@ -680,12 +782,12 @@ test('markStatus re-reads and revalidates before writing — a concurrent write 
   };
   let latest: StateFile | undefined;
 
-  const mark = markStatus(path, 'ended', new Date('2026-07-01T00:00:00.000Z'), undefined, io);
   await writeState(path, running);
-  // First read is pending; the concurrent write lands first.
   await writeState(path, stopped);
+  const mark = markStatus(path, 'ended', new Date('2026-07-01T00:00:00.000Z'), undefined, io);
+  while (!releaseFirst) await new Promise((r) => setTimeout(r, 1));
   releaseFirst?.(running);
-  await new Promise((r) => setTimeout(r, 50));
+  while (!releaseSecond) await new Promise((r) => setTimeout(r, 1));
   releaseSecond?.(stopped);
   await mark;
 

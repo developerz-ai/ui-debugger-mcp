@@ -28,11 +28,13 @@
  * no-op port by default, the real {@link FileStatePort} wired at boot.
  */
 
+import { closeSync, openSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { SessionBusyError } from '../errors.js';
 import { writeFileAtomic } from './atomic-write.js';
+import { loadBackend } from './flock-backend.js';
 import { writeLivePointer } from './live-pointer.js';
 import {
   acquireOwnerLock,
@@ -77,9 +79,32 @@ export type StateFile = z.infer<typeof StateFileSchema>;
  * the swap goes through {@link writeFileAtomic} — a `status`/`stop` that lands
  * mid-write must never read a truncated file and report "no debug run".
  */
-export async function writeState(path: string, state: StateFile): Promise<void> {
+async function writeStateUnlocked(path: string, state: StateFile): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFileAtomic(path, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+/** Serialize every breadcrumb mutation across processes on a stable inode. */
+async function withStateLock<T>(path: string, task: () => Promise<T>): Promise<T> {
+  await mkdir(dirname(path), { recursive: true });
+  const backend = await loadBackend();
+  const fd = openSync(`${path}.lock`, 'a');
+  let locked = false;
+  try {
+    while (!locked) {
+      locked = await backend.tryLock(fd);
+      if (locked) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return await task();
+  } finally {
+    if (locked) backend.release(fd);
+    else closeSync(fd);
+  }
+}
+
+export async function writeState(path: string, state: StateFile): Promise<void> {
+  await withStateLock(path, () => writeStateUnlocked(path, state));
 }
 
 /** Read + validate `state.json`; `null` when absent or malformed (never throws). */
@@ -105,7 +130,7 @@ export interface StateIo {
 }
 
 /** The real fs — {@link StateIo} as {@link writeState}/{@link readState} implement it. */
-export const fsStateIo: StateIo = { read: readState, write: writeState };
+export const fsStateIo: StateIo = { read: readState, write: writeStateUnlocked };
 
 /** What a run reports to the state file when it opens. */
 export interface RunState {
@@ -233,18 +258,20 @@ export class FileStatePort implements StatePort {
         // goes BEFORE the breadcrumb: a pointer failure then leaves no `running`
         // state.json naming this (healthy, idle) server for `stop` to SIGTERM.
         if (this.#cwd !== undefined) await writeLivePointer(this.#cwd, this.#workspace.root);
-        await this.#io.write(this.#workspace.stateJson, {
-          pid: this.#pid,
-          sessionId: run.sessionId,
-          target: run.target,
-          goal: run.goal,
-          status: 'running',
-          startedAt: iso,
-          updatedAt: iso,
-          sessionDir: sessionPaths(this.#workspace, run.sessionId).root,
-          identity: captureIdentity(this.#pid),
-          workspaceRoot: this.#workspace.root,
-        });
+        await withStateLock(this.#workspace.stateJson, () =>
+          this.#io.write(this.#workspace.stateJson, {
+            pid: this.#pid,
+            sessionId: run.sessionId,
+            target: run.target,
+            goal: run.goal,
+            status: 'running',
+            startedAt: iso,
+            updatedAt: iso,
+            sessionDir: sessionPaths(this.#workspace, run.sessionId).root,
+            identity: captureIdentity(this.#pid),
+            workspaceRoot: this.#workspace.root,
+          }),
+        );
       } catch (err) {
         // The breadcrumb never landed. Give back ONLY a claim this call
         // created: a re-entrant claim belongs to an earlier successful
@@ -414,14 +441,8 @@ export class FileStatePort implements StatePort {
  * the existing `stopped` here so `status` keeps reporting the true terminal state
  * after a stop.
  *
- * This read-modify-write is not a cross-process lock — the ordering is what makes
- * it deterministic. The server cannot begin its teardown until the signal lands,
- * and the signal is only sent once `stopped` is durably on disk (see
- * `runStop`), so the server's read always observes `stopped` and keeps it.
- *
- * In-process callers (the server's own `clear`) must not rely on that ordering:
- * a `clear` racing a successor's `record` is exactly the interleaving the port's
- * write queue closes, which is why `FileStatePort` routes this through its queue.
+ * All breadcrumb mutations share a cross-process lock, so neither a successor
+ * record nor a rollback can publish between this check and its write.
  *
  * `ownedBy` is an OPTIONAL trailing predicate: it receives the recorded run and
  * decides whether THIS caller may flip it. It exists so ownership is enforced
@@ -436,24 +457,33 @@ export async function markStatus(
   onlySessionId?: string,
   io: StateIo = fsStateIo,
   ownedBy?: (prior: StateFile) => boolean,
-): Promise<void> {
-  const prior = await io.read(path);
-  if (!prior) return;
-  // Not our run anymore (a successor owns the breadcrumb) — never write over it.
-  if (onlySessionId !== undefined && prior.sessionId !== onlySessionId) return;
-  // Not ours to end — never write over it.
-  if (ownedBy !== undefined && !ownedBy(prior)) return;
-  // Re-read and revalidate immediately before publishing: a concurrent writer
-  // (a successor's record) may have replaced the breadcrumb since our first
-  // read. If it did, we base the write on that confirmed current state so the
-  // successor is never silently clobbered (KB finding #4: non-atomic
-  // read-modify-write without revalidation at publish time).
-  const confirmed = await io.read(path);
-  if (!confirmed) return;
-  if (onlySessionId !== undefined && confirmed.sessionId !== onlySessionId) return;
-  if (ownedBy !== undefined && !ownedBy(confirmed)) return;
-  const finalStatus = confirmed.status === 'stopped' ? 'stopped' : status;
-  await io.write(path, { ...confirmed, status: finalStatus, updatedAt: now.toISOString() });
+): Promise<boolean> {
+  return withStateLock(path, async () => {
+    const prior = await io.read(path);
+    if (!prior) return false;
+    // Not our run anymore (a successor owns the breadcrumb) — never write over it.
+    if (onlySessionId !== undefined && prior.sessionId !== onlySessionId) return false;
+    // Not ours to end — never write over it.
+    if (ownedBy !== undefined && !ownedBy(prior)) return false;
+    // Re-read and revalidate immediately before publishing: a concurrent writer
+    // (a successor's record) may have replaced the breadcrumb since our first
+    // read. If it did, we base the write on that confirmed current state so the
+    // successor is never silently clobbered (KB finding #4: non-atomic
+    // read-modify-write without revalidation at publish time).
+    const confirmed = await io.read(path);
+    if (!confirmed) return false;
+    if (
+      confirmed.sessionId !== prior.sessionId ||
+      confirmed.pid !== prior.pid ||
+      JSON.stringify(confirmed.identity) !== JSON.stringify(prior.identity)
+    )
+      return false;
+    if (onlySessionId !== undefined && confirmed.sessionId !== onlySessionId) return false;
+    if (ownedBy !== undefined && !ownedBy(confirmed)) return false;
+    const finalStatus = confirmed.status === 'stopped' ? 'stopped' : status;
+    await io.write(path, { ...confirmed, status: finalStatus, updatedAt: now.toISOString() });
+    return true;
+  });
 }
 
 /**
@@ -465,8 +495,22 @@ export async function markStatus(
  * Only a `stopped` still on disk is rolled back: any other status was written by
  * someone else and is left alone.
  */
-export async function restoreRunning(path: string, now: Date = new Date()): Promise<void> {
-  const prior = await readState(path);
-  if (prior?.status !== 'stopped') return;
-  await writeState(path, { ...prior, status: 'running', updatedAt: now.toISOString() });
+export async function restoreRunning(
+  path: string,
+  now: Date = new Date(),
+  expected?: StateFile,
+): Promise<void> {
+  await withStateLock(path, async () => {
+    const prior = await readState(path);
+    if (prior?.status !== 'stopped' || (expected && !sameRun(prior, expected))) return;
+    await writeStateUnlocked(path, { ...prior, status: 'running', updatedAt: now.toISOString() });
+  });
+}
+
+export function sameRun(a: StateFile, b: StateFile): boolean {
+  return (
+    a.sessionId === b.sessionId &&
+    a.pid === b.pid &&
+    a.identity.startTicks === b.identity.startTicks
+  );
 }

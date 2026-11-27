@@ -21,7 +21,13 @@ import { ConfigError, WorkspaceError } from '../errors.js';
 import { FindingsSchema } from '../findings/schema.js';
 import { readLivePointer } from '../session/live-pointer.js';
 import { ownerAlive } from '../session/process-identity.js';
-import { markStatus, readState, restoreRunning, type StateFile } from '../session/state-file.js';
+import {
+  markStatus,
+  readState,
+  restoreRunning,
+  type StateFile,
+  sameRun,
+} from '../session/state-file.js';
 import { resolveProject, workspacePaths } from '../session/workspace.js';
 
 /** Read + validate a session's `findings.json`; `null` when absent/malformed. */
@@ -160,6 +166,7 @@ export async function runStop(
   kill: Kill = (pid, signal) => {
     process.kill(pid, signal);
   },
+  beforeMark?: () => Promise<void>,
 ): Promise<void> {
   const { project, stateJson } = await resolveState(cwd);
   const state = await readRecordedState(stateJson);
@@ -179,12 +186,15 @@ export async function runStop(
   }
 
   const { check, alive } = ownerAlive(state.pid, state.identity);
+  await beforeMark?.();
 
   // The recorded PID is alive but now owns an *unrelated* process (it was recycled
   // after our server died). Signaling it would kill an innocent process — don't.
   // Our server is provably gone, so mark the run stopped without ever signaling.
   if (check === 'stale') {
-    await markStatus(stateJson, 'stopped');
+    await markStatus(stateJson, 'stopped', new Date(), state.sessionId, undefined, (current) =>
+      sameRun(current, state),
+    );
     console.log(
       `ui-debugger-mcp: server (pid ${state.pid}) is gone — its PID was reused by an unrelated process; marked run '${state.sessionId}' stopped without signaling.`,
     );
@@ -196,13 +206,23 @@ export async function runStop(
     // ends the run and calls `markStatus('ended')`, whose read-modify-write can
     // only preserve our `stopped` if it is already on disk when the signal lands.
     // Marking afterwards races that handler and can leave `ended` — or nothing.
-    await markStatus(stateJson, 'stopped');
+    const marked = await markStatus(
+      stateJson,
+      'stopped',
+      new Date(),
+      state.sessionId,
+      undefined,
+      (current) => sameRun(current, state),
+    );
+    if (!marked) {
+      throw new WorkspaceError('The recorded run changed before stop could mark it; retry stop.');
+    }
     const signaled = signalStop(state.pid, kill);
     if (!signaled.ok) {
       // The signal failed for a reason other than the process already being gone
       // (e.g. EPERM). Teardown did NOT happen — roll the mark back rather than
       // report a live run as stopped.
-      await restoreRunning(stateJson);
+      await restoreRunning(stateJson, new Date(), state);
       console.error(
         `ui-debugger-mcp: failed to signal server (pid ${state.pid}): ${signaled.reason}. Run '${state.sessionId}' left as-is.`,
       );
@@ -214,7 +234,9 @@ export async function runStop(
     return;
   }
 
-  await markStatus(stateJson, 'stopped');
+  await markStatus(stateJson, 'stopped', new Date(), state.sessionId, undefined, (current) =>
+    sameRun(current, state),
+  );
   console.log(
     `ui-debugger-mcp: server (pid ${state.pid}) is not running; marked run '${state.sessionId}' stopped.`,
   );

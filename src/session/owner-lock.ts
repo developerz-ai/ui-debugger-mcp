@@ -106,7 +106,10 @@ export function ownerLockPath(workspace: WorkspacePaths): string {
  * as the ownership: `flock` is released when the fd closes, and the kernel
  * releases it when the process dies — a crashed server never wedges anything.
  */
-const holds = new Map<string, { fd: number; owner: OwnerLock; flock: FlockBackend }>();
+const holds = new Map<
+  string,
+  { fd: number; owner: OwnerLock; flock: FlockBackend; releasing?: boolean }
+>();
 
 /** Whether two owners identify the same live process. */
 function sameOwner(left: OwnerLock, right: OwnerLock): boolean {
@@ -166,6 +169,7 @@ export async function acquireOwnerLock(
   const flock =
     opener !== undefined ? symbolBackend(await resolveFlock(opener)) : await loadBackend();
   const held = holds.get(lockPath);
+  if (held?.releasing) throw new OwnerLockBusyError('owner lock release is in progress');
   if (held !== undefined && sameOwner(held.owner, owner)) {
     return { acquired: true, created: false }; // re-entrant: this process already owns it
   }
@@ -249,7 +253,8 @@ export async function releaseOwnerLock(
   unlock?: UnlockFn,
 ): Promise<boolean> {
   const held = holds.get(lockPath);
-  if (held === undefined || !sameOwner(held.owner, owner)) return false;
+  if (held === undefined || held.releasing || !sameOwner(held.owner, owner)) return false;
+  held.releasing = true;
 
   // 1. Empty the notice board first — this may throw (read-only remount, say).
   //    We still release the lock below so a failing step never keeps the fd

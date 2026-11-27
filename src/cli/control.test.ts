@@ -197,6 +197,30 @@ test('a successor breadcrumb survives the ending run\u2019s late scoped clear â€
   expect((await readState(stateJson))?.status).toBe('stopped');
 });
 
+test('stop does not mark or signal a successor replacing the selected run', async () => {
+  for (const change of [
+    { sessionId: 'successor' },
+    { identity: { startTicks: (captureIdentity(process.pid).startTicks ?? 0) + 1 } },
+  ]) {
+    const stateJson = await seedState(liveOwner());
+    const original = await readState(stateJson);
+    if (!original) throw new Error('missing test state');
+    const successor = { ...original, ...change };
+    const kills: number[] = [];
+    await expect(
+      runStop(
+        cwd,
+        (pid) => kills.push(pid),
+        async () => {
+          await writeState(stateJson, successor);
+        },
+      ),
+    ).rejects.toThrow('recorded run changed');
+    expect(kills).toEqual([]);
+    expect(await readState(stateJson)).toEqual(successor);
+  }
+});
+
 test('stop records `stopped` before the signal reaches the server', async () => {
   const stateJson = await seedState(liveOwner());
   // The server's SIGTERM handler marks `ended` via a read-modify-write; it can

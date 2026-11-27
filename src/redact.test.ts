@@ -6,7 +6,15 @@
  */
 
 import { expect, test } from 'bun:test';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Adapter } from './adapters/contract.js';
+import { runObserve } from './agent/belt/observe.js';
 import { createSecretRedactor } from './redact.js';
+import { createCaptureSink } from './services/session-builder.js';
+import { FindingsStore } from './session/findings-store.js';
+import { sessionPaths, workspacePaths } from './session/workspace.js';
 
 // --- credentials a persona TYPES --------------------------------------------
 
@@ -176,63 +184,57 @@ test('redaction binds per-run: each runner sees only its own secret masked', () 
   );
 });
 
-test('a raw credential never reaches session logs, findings, or diagnostic output', () => {
-  const redact = createSecretRedactor(['hunter2']);
-
-  const sessionLog = 'POST /login → 200 set-cookie=session=abc hunter2';
-  const persistedFinding = 'bug: user can type "hunter2" into the password field';
-  const diagnosticOutput = 'act type {"text":"hunter2","field":"password"}';
-
-  for (const trail of [sessionLog, persistedFinding, diagnosticOutput]) {
-    expect(redact(trail)).not.toContain('hunter2');
-    expect(redact(trail)).toContain('<redacted, 7 chars>');
-  }
-});
-
-test('a percent-encoded credential is redacted from every trail', () => {
-  const redact = createSecretRedactor(['p@ss']);
-
-  const sessionLog = 'POST /login req=email%3Duser%40example.com%26pass%3Dp%40ss';
-  const persistedFinding = 'network: p%40ss seen in the request body';
-  const diagnosticOutput = 'form: password=p%40ss&next=/dashboard';
-
-  for (const trail of [sessionLog, persistedFinding, diagnosticOutput]) {
-    const out = redact(trail);
-    expect(out).not.toContain('p@ss');
-    expect(out).not.toContain('p%40ss');
-    expect(out).not.toContain('p%40');
-    expect(out).toContain('<redacted, 6 chars>');
-  }
-});
-
-test('a +-for-space credential spelling is redacted from every trail', () => {
-  const redact = createSecretRedactor(['pass word']);
-
-  const sessionLog = 'POST /login req=password:pass+word&next=/';
-  const persistedFinding = 'console: typed pass+word into the field';
-  const diagnosticOutput = 'act type {"text":"pass+word"}';
-
-  for (const trail of [sessionLog, persistedFinding, diagnosticOutput]) {
-    const out = redact(trail);
-    expect(out).not.toContain('pass word');
-    expect(out).not.toContain('pass+word');
-    expect(out).not.toContain('pass%20word');
-    expect(out).toContain('<redacted, 9 chars>');
-  }
-});
-
-test('a JSON-escaped credential spelling is redacted from every trail', () => {
-  const redact = createSecretRedactor(['a"b\\c']);
-
-  const sessionLog = 'POST {"password":"a\\"b\\\\c"}';
-  const persistedFinding = 'error: could not parse {"password":"a\\"b\\\\c"}';
-  const diagnosticOutput = 'act type {"text":"a\\"b\\\\c","field":"password"}';
-
-  for (const trail of [sessionLog, persistedFinding, diagnosticOutput]) {
-    const out = redact(trail);
-    expect(out).not.toContain('a"b\\c');
-    expect(out).not.toContain('a\\"b');
-    expect(out).not.toContain('b\\\\c');
-    expect(out).toContain('<redacted, 7 chars>');
+test('credential spellings are masked in captured logs, persisted findings and observe output', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'redaction-sinks-'));
+  try {
+    const cases = [
+      { secret: 'hunter2', spelling: 'hunter2', mask: '<redacted, 7 chars>' },
+      { secret: 'p@ss', spelling: 'p%40ss', mask: '<redacted, 6 chars>' },
+      { secret: 'pass word', spelling: 'pass+word', mask: '<redacted, 9 chars>' },
+      { secret: 'a"b\\c', spelling: 'a\\"b\\\\c', mask: '<redacted, 7 chars>' },
+    ];
+    for (const [index, { secret, spelling, mask }] of cases.entries()) {
+      const redact = createSecretRedactor([secret]);
+      const paths = sessionPaths(workspacePaths(dir), `case-${index}`);
+      const store = new FindingsStore(paths, redact);
+      const line = `echo ${spelling} done`;
+      const expected = `echo ${mask} done`;
+      let logged!: () => void;
+      const logDone = new Promise<void>((resolve) => {
+        logged = resolve;
+      });
+      const append = store.appendLog.bind(store);
+      store.appendLog = async (channel, text) => {
+        const path = await append(channel, text);
+        logged();
+        return path;
+      };
+      createCaptureSink(store, redact)('network', line);
+      await logDone;
+      expect(await readFile(join(paths.logs, 'network.log'), 'utf8')).toBe(`${expected}\n`);
+      await store.writeFindings({
+        status: 'failed',
+        steps: [],
+        bugs: [{ kind: 'flow', detail: line }],
+        visual: [],
+      });
+      expect(JSON.parse(await readFile(paths.findingsJson, 'utf8'))).toEqual({
+        status: 'failed',
+        steps: [],
+        bugs: [{ kind: 'flow', detail: expected }],
+        visual: [],
+      });
+      const adapter = {
+        console: async () => [{ level: 'error', text: line, timestamp: 1 }],
+      } as Adapter;
+      const result = await runObserve(adapter, store, { kind: 'console' }, redact);
+      expect(result).toEqual({
+        kind: 'console',
+        count: 1,
+        entries: [{ level: 'error', text: expected, timestamp: 1 }],
+      });
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
