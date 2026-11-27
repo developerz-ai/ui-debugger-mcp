@@ -108,6 +108,20 @@ jobs:
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
             | tar xz mcp-publisher
 
+      # npm serves a fresh version a little after `npm publish` returns, and the
+      # registry rejects one it cannot resolve yet (1.11.0's first run failed on
+      # exactly this 404). Wait — capped — until npm reports this version.
+      - name: wait for npm to serve this version
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          for i in $(seq 1 30); do
+            if [ "$(npm view "@developerz.ai/ui-debugger-mcp@${VERSION}" version 2>/dev/null)" = "${VERSION}" ]; then
+              echo "npm serves ${VERSION}"; exit 0
+            fi
+            echo "npm does not serve ${VERSION} yet (${i}/30)"; sleep 10
+          done
+          echo "::error::npm never served ${VERSION} within 5 minutes"; exit 1
+
       - name: publish to MCP Registry
         run: |
           ./mcp-publisher login github-oidc
