@@ -47,9 +47,13 @@ export function createSecretRedactor(secrets: readonly string[]): Redactor {
   const sources = new Set<string>();
   for (const secret of secrets) {
     if (secret.length === 0) continue;
-    sources.add(literal(secret));
-    sources.add(jsonPattern(secret));
-    sources.add(percentPattern(secret));
+    // A lone surrogate reaches the app as U+FFFD (the browser replaces it), so
+    // echoes of THAT value are the same secret. The Set drops the duplicate.
+    for (const value of [secret, secret.replace(/\p{Cs}/gu, '\ufffd')]) {
+      sources.add(literal(value));
+      sources.add(jsonPattern(value));
+    }
+    sources.add(percentPattern(secret)); // already encodes a lone surrogate as U+FFFD
   }
   if (sources.size === 0) return (line) => line;
   const regexes = [...sources].map((source) => new RegExp(source, 'g'));

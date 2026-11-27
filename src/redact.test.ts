@@ -146,3 +146,11 @@ test('createSecretRedactor redacts an astral character bare, in both encoded fam
   expect(redact('typed pw\u{1F600}synthetic')).toBe('typed <redacted, 13 chars>');
   expect(redact('p=pw%F0%9F%98%80synthetic')).toBe('p=<redacted, 23 chars>');
 });
+
+test('createSecretRedactor redacts the U+FFFD form a browser sends for a lone surrogate', () => {
+  // The browser replaces the lone surrogate with U+FFFD; a JSON echo of THAT
+  // value (bare, or as �) is the same secret.
+  const redact = createSecretRedactor(['pw\ud800synthetic']);
+  expect(redact('res={"p":"pw�synthetic"}')).not.toContain('synthetic');
+  expect(redact('res={"p":"pw\\uFFFDsynthetic"}')).not.toContain('synthetic');
+});
