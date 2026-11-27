@@ -29,6 +29,17 @@ test('createSecretRedactor covers the form-encoded and JSON-escaped spellings', 
   expect(quoted('req={"password":"a\\"b\\\\c"}')).not.toContain('a\\"b');
 });
 
+test('createSecretRedactor covers the browser form serializer and ASCII-only JSON', () => {
+  // A real `<form>` POST percent-encodes `!'()~` too (URLSearchParams / the
+  // urlencoded serializer), which `encodeURIComponent` leaves bare.
+  const secret = "pa!ss wo(r)d~'é";
+  const redact = createSecretRedactor([secret]);
+  const form = new URLSearchParams({ password: secret }).toString();
+  expect(redact(`req="${form}"`)).not.toContain('pa%21ss');
+  // A backend echoing JSON with ASCII-only escaping (Python's json.dumps default).
+  expect(redact('res={"password":"pa!ss wo(r)d~\'\\u00e9"}')).not.toContain('pa!ss');
+});
+
 test('createSecretRedactor redacts the longest value first', () => {
   // A value that CONTAINS another must still redact whole — shortest-first would
   // blank the inner one and leave the rest of the credential in the clear.
@@ -41,4 +52,25 @@ test('createSecretRedactor is the identity when the run has no persona', () => {
   const line = 'act type {"text":"hello"}';
   expect(redact(line)).toBe(line);
   expect(createSecretRedactor([''])(line)).toBe(line); // an empty value redacts nothing
+});
+
+test('createSecretRedactor leaves no fragment of two secrets that overlap in a line', () => {
+  // Sequential replace blanked `abcXYZ`, after which `XYZdef` no longer matched — `def` leaked.
+  const redact = createSecretRedactor(['abcXYZ', 'XYZdef']);
+  expect(redact('typed abcXYZdef!')).toBe('typed <redacted, 9 chars>!');
+});
+
+test('createSecretRedactor never re-matches its own label', () => {
+  // A short secret that occurs inside `<redacted, N chars>` must not mangle the label.
+  const redact = createSecretRedactor(['re', 'supersecret']);
+  expect(redact('a supersecret b re')).toBe('a <redacted, 11 chars> b <redacted, 2 chars>');
+});
+
+test('createSecretRedactor accepts a lone-surrogate secret and still redacts it', () => {
+  // `encodeURIComponent` throws URIError on it; that spelling cannot occur on the wire.
+  const secret = 'pw\ud800x';
+  const redact = createSecretRedactor([secret]);
+  expect(redact(`typed ${secret}`)).toBe('typed <redacted, 4 chars>');
+  const form = new URLSearchParams({ p: secret }).toString();
+  expect(redact(form)).toBe(`p=<redacted, ${form.length - 2} chars>`);
 });

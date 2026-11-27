@@ -20,7 +20,7 @@
 import { readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { WorkspaceError } from '../errors.js';
-import type { WorkspacePaths } from './workspace.js';
+import { SESSION_DIR_PATTERN, type WorkspacePaths } from './workspace.js';
 
 /** How many session directories survive a prune — the newest N by id. */
 export const SESSION_RETENTION = 5;
@@ -41,7 +41,8 @@ export interface PruneOptions {
  * Remove all but the newest `keep` session directories under `workspace.sessions`.
  *
  * A missing `sessions/` dir is not an error (nothing has run here yet) — it prunes
- * nothing. Loose files in `sessions/` are left alone; only directories are runs.
+ * nothing. Only directories named like a run ({@link SESSION_DIR_PATTERN}) count:
+ * loose files and foreign dirs are left alone and hold no retention slot.
  *
  * @returns the ids that were removed, oldest first.
  * @throws {WorkspaceError} if the directory cannot be read, or any removal fails.
@@ -53,7 +54,9 @@ export async function pruneSessions(
   let ids: string[];
   try {
     const entries = await readdir(workspace.sessions, { withFileTypes: true });
-    ids = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    ids = entries
+      .filter((entry) => entry.isDirectory() && SESSION_DIR_PATTERN.test(entry.name))
+      .map((entry) => entry.name);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw new WorkspaceError(

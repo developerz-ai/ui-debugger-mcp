@@ -201,6 +201,48 @@ test('close is not blocked by a hung replay (teardown wins the abort race)', asy
   expect((await store.readFindings()).evidence).toBeUndefined(); // hung replay never written
 });
 
+test('a replay that settles AFTER close never writes into the torn-down run', async () => {
+  // An encoder that ignores the abort and resolves late (rendered OR skipped
+  // with a note): `close()` already returned, so neither write-back may land.
+  for (const late of [
+    { kind: 'rendered', path: '/x/replay.mp4' },
+    { kind: 'skipped', note: 'ffmpeg missing' },
+  ] satisfies ReplayOutcome[]) {
+    const store = makeStore(`late-${late.kind}`);
+    let finish: (outcome: ReplayOutcome) => void = () => undefined;
+    let enterReplay: () => void = () => undefined;
+    const entered = new Promise<void>((resolve) => {
+      enterReplay = resolve;
+    });
+    const session = new Session({
+      id: 's1',
+      story: 'x',
+      adapter: new FakeAdapter(),
+      findingsStore: store,
+      replay: () => {
+        enterReplay();
+        return new Promise<ReplayOutcome>((resolve) => {
+          finish = resolve;
+        });
+      },
+    });
+
+    const run = session.start(async (ctx) => {
+      await ctx.progress.writeFindings({ status: 'passed', steps: [], bugs: [], visual: [] });
+    });
+
+    await entered;
+    await session.close();
+    finish(late);
+    await run;
+    await new Promise((resolve) => setTimeout(resolve, 20)); // let the abandoned write-back run
+
+    const findings = await store.readFindings();
+    expect(findings.evidence).toBeUndefined();
+    expect(findings.steps).toEqual([]);
+  }
+});
+
 test('a session aborted before the replay never spawns the encoder', async () => {
   // `#raceAbort` only stops the WAITING — the step was still evaluated first, so a
   // teardown spawned ffmpeg anyway, `close()` returned, the process exited, and the

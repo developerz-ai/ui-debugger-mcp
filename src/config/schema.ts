@@ -8,9 +8,9 @@ import { z } from 'zod';
 
 /** Per-role model strings (OpenAI-compatible router; defaults: free OpenRouter models). */
 export const ModelsSchema = z.strictObject({
-  driver: z.string(), // fast guy — controls the target (blind, text)
-  vision: z.string(), // vision guy — describes screenshots, judges looks
-  summary: z.string().optional(), // optional — compress findings for the smart agent
+  driver: z.string().min(1), // fast guy — controls the target (blind, text)
+  vision: z.string().min(1), // vision guy — describes screenshots, judges looks
+  summary: z.string().min(1).optional(), // optional — compress findings for the smart agent
   // optional — the paid model every role falls back to when its primary is
   // rate-limited / unavailable / empty. Must take tools AND images: it stands in for all three.
   fallback: z.string().min(1).optional(),
@@ -123,7 +123,7 @@ const WindowMatchSchema = z.strictObject({
  */
 export const DesktopTargetSchema = z.strictObject({
   adapter: z.literal('desktop'),
-  launch: z.string(), // command that starts the app (managed, must stay foreground)
+  launch: z.string().min(1), // command that starts the app (managed, must stay foreground)
   notes: TargetNotesSchema.optional(), // standing preconditions — see the schema above
   window: WindowMatchSchema.optional(), // which window to drive; omit → `open` must supply a title
   display: z.string().nullish(), // X11 DISPLAY, e.g. ":99" for Xvfb; null = inherit env
@@ -140,9 +140,9 @@ export const AndroidTargetSchema = z
   .strictObject({
     adapter: z.literal('android'),
     notes: TargetNotesSchema.optional(), // standing preconditions — see the schema above
-    avd: z.string().optional(), // required in managed mode (see the refinement below)
+    avd: z.string().min(1).optional(), // required in managed mode (see the refinement below)
     emulatorPath: z.string().nullish(), // null = auto-detect from SDK (managed)
-    adbSerial: z.string().nullish(), // set → attach to a running device, no start/stop
+    adbSerial: z.string().min(1).nullish(), // set → attach to a running device, no start/stop
     headless: z.boolean().default(true), // managed-only; same default as the web target
     emulatorArgs: z.array(z.string()).optional(), // managed-only, appended to the emulator argv
   })
@@ -172,7 +172,7 @@ export const TargetSchema = z.discriminatedUnion('adapter', [
 /** Top-level `.ui-debugger-mcp.json` shape. Targets keyed by name (web, desktop, mobile, …). */
 export const ConfigSchema = z.strictObject({
   models: ModelsSchema.partial().optional(),
-  workspace: z.string().optional(),
+  workspace: z.string().min(1).optional(), // `""` would resolve to the project root
   // Key must be nonempty: start_debug names targets (a nameless one is unaddressable),
   // so an empty key is dead config — reject it here rather than ship it.
   targets: z.record(z.string().min(1), TargetSchema),

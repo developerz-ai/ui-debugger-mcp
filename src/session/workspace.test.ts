@@ -1,14 +1,18 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { WorkspaceError } from '../errors.js';
 import {
   _resetCounter,
+  allocateSessionId,
   ensureSession,
   ensureWorkspace,
   generateSessionId,
   resolveProfileDir,
   resolveProject,
+  SESSION_DIR_PATTERN,
+  SESSION_ID_ATTEMPTS,
   sessionPaths,
   workspacePaths,
 } from './workspace.js';
@@ -184,12 +188,54 @@ test('ensureSession creates screenshots and logs dirs', async () => {
   expect(logsStat.isDirectory()).toBe(true);
 });
 
-test('ensureSession is idempotent', async () => {
+test('ensureSession refuses a session dir that already exists (id collision)', async () => {
+  // The id counter is per process: a server restarted inside the same wall-clock
+  // second hands out `...-0001` again. Reusing that dir would mix two runs'
+  // evidence — and a run that never reports would inherit the old `passed`.
   const ws = workspacePaths('/project/my-app', tmpDir);
-  await ensureWorkspace(ws);
   const sp = sessionPaths(ws, 'sess-002');
   await ensureSession(sp);
-  await ensureSession(sp);
-  const screenshotsStat = await stat(sp.screenshots);
-  expect(screenshotsStat.isDirectory()).toBe(true);
+  await writeFile(sp.findingsJson, '{"status":"passed"}');
+
+  const err = await ensureSession(sp).catch((e: unknown) => e);
+  expect(err).toBeInstanceOf(WorkspaceError);
+  expect((err as WorkspaceError).message).toContain(sp.root);
+  expect(await readFile(sp.findingsJson, 'utf8')).toBe('{"status":"passed"}'); // untouched
+});
+
+test('generated ids are the run dirs the prune recognises', () => {
+  expect(SESSION_DIR_PATTERN.test(generateSessionId(Date.now()))).toBe(true);
+  expect(SESSION_DIR_PATTERN.test('1784985071909-0001')).toBe(true); // legacy epoch-ms
+  expect(SESSION_DIR_PATTERN.test('Default')).toBe(false);
+});
+
+// --- allocateSessionId -------------------------------------------------------
+
+const NOW = new Date(2026, 6, 27, 14, 30, 5).getTime();
+
+test('allocateSessionId skips an id a previous process already used', async () => {
+  // A restarted server's counter starts over: `-0001` is taken on disk.
+  const ws = workspacePaths('/project/my-app', tmpDir);
+  await ensureSession(sessionPaths(ws, '2026-07-27_14-30-05-0001'));
+
+  const id = await allocateSessionId(ws, NOW);
+
+  expect(id).toBe('2026-07-27_14-30-05-0002'); // next counter: fixed-width, sorts after
+  await ensureSession(sessionPaths(ws, id)); // and the exclusive create accepts it
+});
+
+test('allocateSessionId returns the first id when nothing is taken', async () => {
+  const ws = workspacePaths('/project/my-app', tmpDir);
+  expect(await allocateSessionId(ws, NOW)).toBe('2026-07-27_14-30-05-0001');
+});
+
+test('allocateSessionId fails loud once every candidate is taken', async () => {
+  const ws = workspacePaths('/project/my-app', tmpDir);
+  for (let n = 1; n <= SESSION_ID_ATTEMPTS; n += 1) {
+    await ensureSession(sessionPaths(ws, `2026-07-27_14-30-05-${String(n).padStart(4, '0')}`));
+  }
+
+  const err = await allocateSessionId(ws, NOW).catch((e: unknown) => e);
+  expect(err).toBeInstanceOf(WorkspaceError);
+  expect((err as WorkspaceError).message).toContain(ws.sessions);
 });

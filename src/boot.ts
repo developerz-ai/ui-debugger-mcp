@@ -153,6 +153,10 @@ export async function bootServer(cwd: string, deps: BootDeps = {}): Promise<Boot
     configChanged: makeConfigWatch(cwd),
   });
 
+  // Built BEFORE the signal handlers go in: nothing that can throw may sit
+  // between installing them and the `try` that removes them on failure.
+  const tools = outerTools(service);
+
   // Graceful stop: a CLI `stop` (or any SIGTERM/SIGINT) tears the run down —
   // abort the loop, close the browser, free the profile — then exits cleanly.
   // Bounded: a teardown that wedges (a tool call that never observes its abort)
@@ -170,7 +174,6 @@ export async function bootServer(cwd: string, deps: BootDeps = {}): Promise<Boot
   // nothing can read findings or `end_session` any more, so the run must not
   // keep a browser (and the profile lock) alive until its cap. Same idempotent
   // teardown path as the signals above.
-  const tools = outerTools(service);
   let server: McpServer;
   try {
     server = await start(tools, { onClose: () => shutdown(0) });

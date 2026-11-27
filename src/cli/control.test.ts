@@ -59,6 +59,18 @@ test('status reports no run when there is no state file', async () => {
   expect(logs.join('\n')).toContain('no debug run recorded');
 });
 
+test('status and stop fail loud on a present but malformed state.json, never "no run"', async () => {
+  // A breadcrumb from an incompatible server version (no `identity`) or a hand edit:
+  // reading it as "no debug run" hides a live run and turns `stop` into a no-op.
+  const ws = workspacePaths(cwd);
+  await mkdir(ws.root, { recursive: true });
+  await writeFile(ws.stateJson, JSON.stringify({ pid: 1, status: 'running' }), 'utf8');
+
+  await expect(runStatus(cwd)).rejects.toThrow(/not a valid run breadcrumb/);
+  await expect(runStop(cwd)).rejects.toThrow(/not a valid run breadcrumb/);
+  expect(logs.join('\n')).not.toContain('no debug run');
+});
+
 test('status prints the run identity + a dead-server line', async () => {
   await seedState();
   await runStatus(cwd);

@@ -27,6 +27,7 @@
 import type { LoopInbox, ProgressWriter } from '../agent/loop.js';
 import { AgentError } from '../errors.js';
 import type { Findings, TerminalStatus } from '../findings/schema.js';
+import { ensureReplay, ensureSummary, type FinalizeContext, hasText } from './finalize.js';
 import type { FindingsStore } from './findings-store.js';
 
 /** Run lifecycle status — mirrors the findings verdict (`running` until concluded). */
@@ -236,11 +237,11 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
       // Best-effort, non-blocking: race the summary against the abort signal so a
       // hung summary model can never stall `close()` (which aborts, then awaits the
       // run). A natural finish awaits it fully; teardown short-circuits the wait.
-      await this.#raceAbort(this.#ensureSummary());
+      await this.#raceAbort(ensureSummary(this.#finalizeContext()));
       // Then stitch the ordered screenshots into a captioned replay.mp4, recording
       // its path in findings.evidence — same best-effort, abort-raced contract, run
       // after the summary so its write-back preserves it.
-      await this.#raceAbort(this.#ensureReplay());
+      await this.#raceAbort(ensureReplay(this.#finalizeContext()));
     } catch (error) {
       this.#status = 'failed';
       // Aborted by `close()` — the teardown is the verdict, not the agent's failure:
@@ -288,128 +289,15 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
     return this.#inbox.splice(0, this.#inbox.length);
   }
 
-  /**
-   * Fill `findings.summary` with the summary actor's paragraph when the driver left
-   * it empty (and a summarizer is wired). Best-effort and non-blocking: any failure
-   * is swallowed so a missing summary never delays teardown — the verdict already
-   * stands and `get_findings` falls back to the driver's own summary (if any). Writes
-   * back under the settled terminal `status`, never a stale `running`.
-   */
-  async #ensureSummary(): Promise<void> {
-    try {
-      const findings = await this.#findingsStore.tryReadFindings();
-      if (findings === null || hasText(findings.summary)) return;
-      // The driver never called `report` — the persisted verdict is still
-      // `running` even though the loop is over (step cap, or it simply stopped).
-      // There is nothing to condense, and a summary model handed an empty
-      // findings set will INVENT a cause: an observed run drove 30 clean steps
-      // and got back "the run failed due to a non-functional crash". A fabricated
-      // root cause is worse than none — it sends the caller hunting a bug that
-      // does not exist. State the real outcome instead.
-      if (findings.status === 'running') {
-        await this.#writeUnreportedSummary(findings);
-        return;
-      }
-      if (this.#summarize === undefined) return;
-      // Summarize the terminal record: `#verdict()` may have settled `status` to a
-      // value the persisted findings don't yet carry (e.g. `failed` over a stale
-      // `running`), so the digest must reflect the final verdict, not the disk copy.
-      const terminalFindings = { ...findings, status: this.#status };
-      // Threaded abort: `#raceAbort` stops WAITING on teardown, but only the signal
-      // actually cancels the in-flight model call instead of leaving it dangling.
-      const summary = await this.#summarize(terminalFindings, this.#abort.signal);
-      if (!hasText(summary)) return;
-      await this.#findingsStore.writeFindings({ ...terminalFindings, summary });
-    } catch {
-      // Fail soft: the verdict stands; the driver's own summary (if any) is the fallback.
-    }
-  }
-
-  /**
-   * Record, as the summary, the fact that the run produced no verdict — naming
-   * what actually happened and what to do about it, with no invented cause and
-   * never a model in the loop (deterministic counts and framing only). Two
-   * branches, one terminal framing: when the loop streamed evidence before the
-   * cap (the `progressForStep` running writes), the summary names those leads by
-   * count as partial and unconfirmed — the arrays below carry them — and never
-   * claims the run recorded nothing; a truly empty run keeps that claim. Both
-   * branches lead with the no-verdict fact and close with the same cut-short
-   * guidance, so an empty and a partial run read the same way.
-   */
-  async #writeUnreportedSummary(findings: Findings): Promise<void> {
-    const steps = findings.steps ?? [];
-    const bugs = findings.bugs ?? [];
-    const visual = findings.visual ?? [];
-    const failed = steps.filter((step) => step.ok === false).length;
-    const lead =
-      'Run ended WITHOUT a verdict: the driver used up its step budget without calling `report`';
-    const evidence =
-      bugs.length + visual.length > 0
-        ? `. ${plural(bugs.length, 'bug')} and ${plural(visual.length, 'visual issue')} streamed in ` +
-          'before the cap as partial, unconfirmed leads and are preserved below — none was ' +
-          'confirmed by a `report`. '
-        : ', so no findings were recorded. ';
-    const summary =
-      lead +
-      evidence +
-      `${steps.length} step(s) ran (${failed} failed) — read the step trail and screenshots for ` +
-      'what it actually did. This is NOT a clean pass and NOT evidence of a crash: the run was ' +
-      'simply cut short. Re-run with a narrower goal, or raise `timeout`.';
-    await this.#findingsStore.writeFindings({ ...findings, status: this.#status, summary });
-  }
-
-  /**
-   * Stitch the run's ordered screenshots into a captioned `replay.mp4` and record
-   * its path in `findings.evidence` — PR evidence the smart agent can attach. Runs
-   * after the verdict (and after the summary, so its write-back preserves the
-   * summary). Best-effort and fail-soft: no frames, a missing ffmpeg, or any stitch
-   * failure is swallowed so the replay never delays teardown or overturns the
-   * verdict. A `skipped` outcome with a `note` (e.g. ffmpeg absent) is recorded as a
-   * step so the missing video is explained, not silent. Writes back under the settled
-   * terminal `status`, never a stale `running`.
-   *
-   * Skipped outright once the session has aborted: `#raceAbort` only stops the
-   * *waiting*, and the step is evaluated before it — so without this check a
-   * teardown would still spawn ffmpeg, `close()` would resolve, the process would
-   * exit and orphan the encoder (whose write-back would land after the run ended).
-   */
-  async #ensureReplay(): Promise<void> {
-    if (this.#replay === undefined || this.#abort.signal.aborted) return;
-    try {
-      const outcome = await this.#replay(this.#abort.signal);
-      if (outcome.kind === 'skipped') {
-        if (outcome.note !== undefined) await this.#noteReplaySkipped(outcome.note);
-        return;
-      }
-      const findings = await this.#findingsStore.tryReadFindings();
-      if (findings === null) return;
-      await this.#findingsStore.writeFindings({
-        ...findings,
-        status: this.#status,
-        evidence: outcome.path,
-      });
-    } catch {
-      // Fail soft: replay is best-effort PR evidence; the verdict always stands.
-    }
-  }
-
-  /**
-   * Record a skipped replay as a `skipped` (NOT failed) step in the findings so
-   * `get_findings` explains the absent `replay.mp4` without making a clean run
-   * read as broken — replay is optional PR evidence, and a missing ffmpeg is not
-   * a test failure. `ok` stays true; `skipped` + `note` carry the reason (the loud
-   * `agent.log` line is written upstream in the replay step). Preserves the
-   * existing trail + summary; writes under the settled terminal `status`.
-   * Best-effort — wrapped by `#ensureReplay`'s catch.
-   */
-  async #noteReplaySkipped(note: string): Promise<void> {
-    const findings = await this.#findingsStore.tryReadFindings();
-    if (findings === null) return;
-    await this.#findingsStore.writeFindings({
-      ...findings,
+  /** The post-verdict seams `finalize.ts` writes through, under the settled status. */
+  #finalizeContext(): FinalizeContext {
+    return {
+      store: this.#findingsStore,
       status: this.#status,
-      steps: [...findings.steps, { step: 'replay video', ok: true, skipped: true, note }],
-    });
+      signal: this.#abort.signal,
+      summarize: this.#summarize,
+      replay: this.#replay,
+    };
   }
 
   /**
@@ -504,14 +392,4 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
 function toAgentError(error: unknown): AgentError {
   if (error instanceof AgentError) return error;
   return new AgentError(error instanceof Error ? error.message : String(error));
-}
-
-/** True when `value` is a non-blank string (a real summary, not absent or whitespace). */
-function hasText(value: string | undefined): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}
-
-/** `plural(1, 'bug')` → '1 bug'; `plural(2, 'bug')` → '2 bugs' — the summary's deterministic counts. */
-function plural(n: number, noun: string): string {
-  return `${n} ${noun}${n === 1 ? '' : 's'}`;
 }

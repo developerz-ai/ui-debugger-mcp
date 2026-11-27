@@ -338,9 +338,16 @@ export class FileStatePort implements StatePort {
       const holder = await this.#readClaim();
       if (holder === null || !this.#isUs(holder)) return;
       const prior = await this.#io.read(this.#workspace.stateJson);
+      // No readable breadcrumb (deleted or corrupted out-of-band): nothing names a
+      // successor, so a claim taken for THIS run goes back — kept, it would wedge
+      // every other server until this idle one exits, and `stop` cannot reach it.
+      if (prior === null) {
+        if (holder.sessionId === sessionId) await this.#releaseClaim();
+        return;
+      }
       // Scoped to the run being ended: a successor that recorded itself while
       // this teardown was in flight keeps its own breadcrumb AND its claim.
-      if (prior?.sessionId !== sessionId) return;
+      if (prior.sessionId !== sessionId) return;
       try {
         await markStatus(
           this.#workspace.stateJson,

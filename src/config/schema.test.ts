@@ -333,3 +333,17 @@ test('ConfigSchema: a target needs a name — an empty key is unaddressable', ()
     }).success,
   ).toBe(true); // nonempty names still parse
 });
+
+test('ConfigSchema: an empty string is never a usable value — it fails here, not mid-run', () => {
+  // `""` is not "unset": `??` keeps it, so an empty model id reached the router, an
+  // empty workspace resolved to the project root, an empty `launch`/`avd`/`adbSerial`
+  // spawned or attached to nothing.
+  const web = { web: { adapter: 'browser' } };
+  for (const models of [{ driver: '' }, { vision: '' }, { summary: '' }]) {
+    expect(ConfigSchema.safeParse({ models, targets: web }).success).toBe(false);
+  }
+  expect(ConfigSchema.safeParse({ workspace: '', targets: web }).success).toBe(false);
+  expect(DesktopTargetSchema.safeParse({ adapter: 'desktop', launch: '' }).success).toBe(false);
+  expect(AndroidTargetSchema.safeParse({ adapter: 'android', avd: '' }).success).toBe(false);
+  expect(AndroidTargetSchema.safeParse({ adapter: 'android', adbSerial: '' }).success).toBe(false);
+});
