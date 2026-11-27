@@ -304,6 +304,10 @@ test('body routing: a declared form is never taken for JSON, and a failed JSON p
   const form = 'application/x-www-form-urlencoded';
   expect(redactBody('[x]=1&password=hunter2', form)).toBe('[x]=1&password=<redacted, 7 chars>');
   expect(redactBody('{a}=1&token=t', form)).toBe('{a}=1&token=<redacted, 1 chars>');
+  // A VALID JSON body mislabelled as a form is still JSON-masked (pins that the
+  // declared type never switches the JSON masker off).
+  expect(redactBody('{"password":"x"}', form)).toBe('{"password":"<redacted, 1 chars>"}');
+  expect(redactBody('[{"token":"t"}]', form)).toBe('[{"token":"<redacted, 1 chars>"}]');
   // Undeclared: not valid JSON, so it is judged as a form.
   expect(redactBody('[x]=1&password=h')).toBe('[x]=1&password=<redacted, 1 chars>');
   // A declared JSON type stays JSON; a mislabelled form-shaped body is still masked.
