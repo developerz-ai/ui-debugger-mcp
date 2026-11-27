@@ -74,3 +74,16 @@ test('createSecretRedactor accepts a lone-surrogate secret and still redacts it'
   const form = new URLSearchParams({ p: secret }).toString();
   expect(redact(form)).toBe(`p=<redacted, ${form.length - 2} chars>`);
 });
+
+test('createSecretRedactor covers DEL in the ASCII-only JSON spelling', () => {
+  // Python's ensure_ascii escapes everything outside space..tilde — DEL included.
+  const redact = createSecretRedactor(['pw\u007fsynthetic']);
+  expect(redact('res={"password":"pw\\u007fsynthetic"}')).not.toContain('synthetic');
+});
+
+test('createSecretRedactor merges dense overlapping matches into one label', () => {
+  // Many spellings matching at nearly every offset of a long line — one span, one label.
+  const line = `x${'ab'.repeat(50_000)}y`;
+  const redact = createSecretRedactor(['ab', 'ba', 'aba']);
+  expect(redact(line)).toBe(`x<redacted, ${line.length - 2} chars>y`);
+});

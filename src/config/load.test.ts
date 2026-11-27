@@ -114,6 +114,18 @@ test('a malformed OPENAI_BASE_URL fails at boot, naming the variable — not on 
   );
 });
 
+test('a malformed OPENAI_BASE_URL never echoes its value — it may carry credentials', () => {
+  const OPENAI_BASE_URL = 'user:s3cr3t-token@openrouter.ai/api/v1';
+  let message = '';
+  try {
+    loadConfig({ cwd: tmpProject(minimal), env: { ...key, OPENAI_BASE_URL } });
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e);
+  }
+  expect(message).toContain('OPENAI_BASE_URL');
+  expect(message).not.toContain('s3cr3t-token');
+});
+
 test('missing provider API key throws ConfigError', () => {
   expect(() => loadConfig({ cwd: tmpProject(minimal), env: {} })).toThrow(ConfigError);
   expect(() => loadConfig({ cwd: tmpProject(minimal), env: { OPENAI_API_KEY: '  ' } })).toThrow(

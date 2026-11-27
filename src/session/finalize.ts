@@ -30,7 +30,8 @@ export interface FinalizeContext {
 export async function ensureSummary(ctx: FinalizeContext): Promise<void> {
   try {
     const findings = await ctx.store.tryReadFindings();
-    if (findings === null || hasText(findings.summary)) return;
+    // Re-checked after every read: an abort during it means `close()` may have returned.
+    if (ctx.signal.aborted || findings === null || hasText(findings.summary)) return;
     // The driver never called `report` — the persisted verdict is still
     // `running` even though the loop is over (step cap, or it simply stopped).
     // There is nothing to condense, and a summary model handed an empty
@@ -121,7 +122,7 @@ export async function ensureReplay(ctx: FinalizeContext): Promise<void> {
       return;
     }
     const findings = await ctx.store.tryReadFindings();
-    if (findings === null) return;
+    if (ctx.signal.aborted || findings === null) return;
     await ctx.store.writeFindings({
       ...findings,
       status: ctx.status,
@@ -143,7 +144,7 @@ export async function ensureReplay(ctx: FinalizeContext): Promise<void> {
  */
 async function noteReplaySkipped(ctx: FinalizeContext, note: string): Promise<void> {
   const findings = await ctx.store.tryReadFindings();
-  if (findings === null) return;
+  if (ctx.signal.aborted || findings === null) return;
   await ctx.store.writeFindings({
     ...findings,
     status: ctx.status,

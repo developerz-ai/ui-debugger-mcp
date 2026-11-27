@@ -14,8 +14,7 @@
  * Neither needs the model API key — they resolve only the workspace dir.
  */
 
-import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { loadWorkspaceDir } from '../config/load.js';
 import { ConfigError, WorkspaceError } from '../errors.js';
@@ -37,13 +36,23 @@ async function readFindings(sessionDir: string) {
 }
 
 /**
- * `state.json`, or `null` only when the file is ABSENT. A present file that does
+ * `state.json`, or `null` only when the file is ABSENT (`ENOENT`). A present file that does
  * not parse (hand-edited, or written by an incompatible server version) is a
  * `WorkspaceError` — reporting "no debug run" there would hide a live run from
  * `status` and make `stop` a no-op while the server keeps the profile locked.
  */
 async function readRecordedState(stateJson: string): Promise<StateFile | null> {
-  if (!existsSync(stateJson)) return null;
+  try {
+    // `stat`, not `existsSync`: that is false on EACCES too, so an unreadable
+    // workspace read as "no run". Only ENOENT means absent.
+    await stat(stateJson);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return null;
+    throw new WorkspaceError(
+      `Cannot access ${stateJson}: ${code ?? (err instanceof Error ? err.message : String(err))}.`,
+    );
+  }
   const state = await readState(stateJson);
   if (state === null) {
     throw new WorkspaceError(

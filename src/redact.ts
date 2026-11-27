@@ -51,10 +51,11 @@ export function createSecretRedactor(secrets: readonly string[]): Redactor {
     spellings.add(new URLSearchParams({ v: secret }).toString().slice(2));
     const json = JSON.stringify(secret).slice(1, -1);
     spellings.add(json); // JSON body escaping
-    // ASCII-only JSON (`\u00e9` — e.g. Python's `json.dumps` default) in a response body.
+    // ASCII-only JSON (`\u00e9` — e.g. Python's `json.dumps` default) in a response
+    // body. Python escapes everything outside space..`~`, so DEL (U+007F) too.
     spellings.add(
       json.replace(
-        /[\u0080-\uffff]/g,
+        /[\u007f-\uffff]/g,
         (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
       ),
     );
@@ -64,26 +65,36 @@ export function createSecretRedactor(secrets: readonly string[]): Redactor {
   return (line) => {
     // `indexOf`, not a regex: a credential is arbitrary text and escaping it for a
     // pattern is one missed metacharacter away from not redacting at all.
-    const spans: Array<[number, number]> = [];
-    for (const value of values) {
-      for (let i = line.indexOf(value); i !== -1; i = line.indexOf(value, i + 1)) {
-        spans.push([i, i + value.length]);
-      }
-    }
-    if (spans.length === 0) return line;
-    spans.sort((a, b) => a[0] - b[0]);
+    // A k-way merge over each spelling's NEXT match, in offset order: no per-match
+    // allocation, and matches wholly inside the current span are skipped.
+    const next = values.map((value) => line.indexOf(value));
     let out = '';
     let cursor = 0;
-    let [start, end] = spans[0] as [number, number];
-    for (const [s, e] of spans.slice(1)) {
-      if (s < end) {
-        end = Math.max(end, e);
-        continue;
+    let start = -1;
+    let end = -1;
+    for (;;) {
+      let k = -1;
+      for (let j = 0; j < values.length; j++) {
+        const at = next[j] as number;
+        if (at !== -1 && (k === -1 || at < (next[k] as number))) k = j;
       }
-      out += `${line.slice(cursor, start)}<redacted, ${end - start} chars>`;
-      cursor = end;
-      [start, end] = [s, e];
+      if (k === -1) break;
+      const at = next[k] as number;
+      const value = values[k] as string;
+      if (at < end) {
+        end = Math.max(end, at + value.length);
+      } else {
+        if (start !== -1) {
+          out += `${line.slice(cursor, start)}<redacted, ${end - start} chars>`;
+          cursor = end;
+        }
+        start = at;
+        end = at + value.length;
+      }
+      // A later match of this spelling starting before `end - length` ends inside the span.
+      next[k] = line.indexOf(value, Math.max(at + 1, end - value.length + 1));
     }
+    if (start === -1) return line;
     return `${out}${line.slice(cursor, start)}<redacted, ${end - start} chars>${line.slice(end)}`;
   };
 }

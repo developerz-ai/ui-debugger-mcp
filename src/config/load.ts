@@ -245,7 +245,8 @@ function resolveProvider(env: ProviderEnv): ProviderConfig {
   // and only fails as an opaque fetch error on the run's first model call.
   if (!BaseUrlSchema.safeParse(baseUrl).success) {
     throw new ConfigError(
-      `OPENAI_BASE_URL must be an http(s) URL (e.g. ${OPENROUTER_BASE_URL}), got ${JSON.stringify(baseUrl)}.`,
+      // Never echo the value: a base url can carry `user:token@` credentials.
+      `OPENAI_BASE_URL must be an absolute http(s) URL (e.g. ${OPENROUTER_BASE_URL}).`,
     );
   }
   return { apiKey, baseUrl };

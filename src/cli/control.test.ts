@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Findings } from '../findings/schema.js';
@@ -69,6 +69,20 @@ test('status and stop fail loud on a present but malformed state.json, never "no
   await expect(runStatus(cwd)).rejects.toThrow(/not a valid run breadcrumb/);
   await expect(runStop(cwd)).rejects.toThrow(/not a valid run breadcrumb/);
   expect(logs.join('\n')).not.toContain('no debug run');
+});
+
+test('status and stop surface an unreadable workspace instead of reporting no run', async () => {
+  // `existsSync` is false on EACCES too, so a permission problem read as "no run".
+  if (process.getuid?.() === 0) return; // root ignores directory permissions
+  const ws = workspacePaths(cwd);
+  await seedState();
+  await chmod(ws.root, 0o000);
+  try {
+    await expect(runStatus(cwd)).rejects.toThrow(/EACCES/);
+    await expect(runStop(cwd)).rejects.toThrow(/EACCES/);
+  } finally {
+    await chmod(ws.root, 0o755);
+  }
 });
 
 test('status prints the run identity + a dead-server line', async () => {
