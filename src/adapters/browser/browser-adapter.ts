@@ -1,20 +1,6 @@
 /**
- * Browser adapter — drives a Chrome page over CDP via Playwright.
- *
- * Two lifecycles (see `idea/adapters.md`):
- *   - **managed** (default): launch a persistent context with the per-project
- *     profile; we OWN start/stop. `executablePath` picks the binary, else system
- *     Chrome (`channel`) — `playwright-core` ships no bundled browser.
- *   - **attach**: connect to an already-running browser over CDP (`cdpUrl`) and
- *     NEVER start/stop it — `close()` returns the adopted tab to its pre-run
- *     URL (best-effort) and then disconnects.
- *
- * Implements the shared {@link Adapter} contract over the DOM/a11y: every element
- * normalizes to a {@link Node} (role/name/bounds/enabled) via one batched in-page
- * extraction. Console/network capture is wired by the CDP capture module (next).
- *
- * Fails loud — every Playwright call is wrapped to throw {@link AdapterError},
- * never a silent fallback.
+ * Playwright/CDP web adapter. Managed mode owns its Chromium process;
+ * attach mode restores the adopted tab and disconnects without stopping Chrome.
  */
 
 import type { Browser, BrowserContext, Page } from 'playwright-core';
@@ -381,13 +367,13 @@ export class BrowserAdapter implements Adapter {
   /**
    * Build, scope, filter, and cap the normalized node list shared by `find`/`readState`.
    *
-   * Reads EVERY frame of the page, not just the main document: a page-level
-   * locator stops at an iframe boundary, so anything embedded (payment fields,
-   * editors, consent screens) was previously invisible — the agent saw an empty
-   * region and had no way to learn why. Child-frame bounds are translated into
-   * page coordinates, so a coordinate click needs no frame awareness at all.
+   * Includes child frames until the limit is met. Their bounds are translated
+   * into page coordinates so a coordinate click needs no frame awareness.
    */
   async #collect(opts: Query, defaultLimit?: number): Promise<Node[]> {
+    const limit = opts.limit ?? defaultLimit;
+    // Use the shared limit guard before any Playwright calls.
+    capToLimit([], limit);
     // Agent queries are role+name / plain text (what the tree shows), not raw CSS —
     // normalize them onto a Playwright engine; an absent query reads the default set.
     const selector = opts.query ? normalizeQuery(opts.query) : DEFAULT_SELECTOR;
@@ -398,25 +384,30 @@ export class BrowserAdapter implements Adapter {
     const region =
       opts.within === undefined ? null : await regionAcrossFrames(this.#page, opts.within);
 
-    let nodes: RawNode[] = [];
+    const nodes: Node[] = [];
     for (const frame of this.#page.frames()) {
       const offset = await frameOffset(frame);
       if (offset === null) continue;
       let found: RawNode[];
       try {
-        found = await frame.locator(selector).evaluateAll<RawNode[], void>(NODE_EXTRACTOR);
+        // A scope or filter may discard early matches, so only pre-cap an unfiltered read.
+        const remaining =
+          limit === undefined || region || opts.filters ? undefined : limit - nodes.length;
+        found = await frame.locator(selector).evaluateAll(NODE_EXTRACTOR, remaining);
       } catch (error) {
         // Only a vanished frame is skippable — a bad selector must fail loud.
         if (isFrameGone(error, frame.isDetached())) continue;
         throw error;
       }
-      nodes.push(...found.map((node) => placeInPage(node, offset, frame)));
+      const placed = found.map((node) => placeInPage(node, offset, frame));
+      const scoped = region ? placed.filter((node) => centerWithin(node, region)) : placed;
+      for (const node of applyNodeFilters(scoped, opts.filters)) {
+        if (nodes.length === limit) break;
+        nodes.push(toNode(node));
+      }
+      if (nodes.length === limit) break;
     }
-
-    if (region) nodes = nodes.filter((n) => centerWithin(n, region));
-    nodes = applyNodeFilters(nodes, opts.filters);
-
-    return capToLimit(nodes, opts.limit ?? defaultLimit).map(toNode);
+    return nodes;
   }
 
   async tabs(): Promise<TabInfo[]> {

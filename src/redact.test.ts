@@ -6,7 +6,15 @@
  */
 
 import { expect, test } from 'bun:test';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Adapter } from './adapters/contract.js';
+import { runObserve } from './agent/belt/observe.js';
 import { createSecretRedactor } from './redact.js';
+import { createCaptureSink } from './services/session-builder.js';
+import { FindingsStore } from './session/findings-store.js';
+import { sessionPaths, workspacePaths } from './session/workspace.js';
 
 // --- credentials a persona TYPES --------------------------------------------
 
@@ -153,4 +161,80 @@ test('createSecretRedactor redacts the U+FFFD form a browser sends for a lone su
   const redact = createSecretRedactor(['pw\ud800synthetic']);
   expect(redact('res={"p":"pw�synthetic"}')).toBe('res={"p":"<redacted, 12 chars>"}');
   expect(redact('res={"p":"pw\\uFFFDsynthetic"}')).toBe('res={"p":"<redacted, 17 chars>"}');
+});
+
+/** --- credential spellings never reach any durable trail ------------------- */
+
+test('redaction binds per-run: each runner sees only its own secret masked', () => {
+  const aRedact = createSecretRedactor(['runner-alpha-secret']);
+  const bRedact = createSecretRedactor(['runner-beta-secret']);
+
+  // Each run redacts ONLY its own credential; the other run's value passes through untouched.
+  expect(aRedact('act type {"text":"runner-alpha-secret"}')).toBe(
+    'act type {"text":"<redacted, 19 chars>"}',
+  );
+  expect(bRedact('act type {"text":"runner-alpha-secret"}')).toBe(
+    'act type {"text":"runner-alpha-secret"}',
+  );
+  expect(bRedact('act type {"text":"runner-beta-secret"}')).toBe(
+    'act type {"text":"<redacted, 18 chars>"}',
+  );
+  expect(aRedact('act type {"text":"runner-beta-secret"}')).toBe(
+    'act type {"text":"runner-beta-secret"}',
+  );
+});
+
+test('credential spellings are masked in captured logs, persisted findings and observe output', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'redaction-sinks-'));
+  try {
+    const cases = [
+      { secret: 'hunter2', spelling: 'hunter2', mask: '<redacted, 7 chars>' },
+      { secret: 'p@ss', spelling: 'p%40ss', mask: '<redacted, 6 chars>' },
+      { secret: 'pass word', spelling: 'pass+word', mask: '<redacted, 9 chars>' },
+      { secret: 'a"b\\c', spelling: 'a\\"b\\\\c', mask: '<redacted, 7 chars>' },
+    ];
+    for (const [index, { secret, spelling, mask }] of cases.entries()) {
+      const redact = createSecretRedactor([secret]);
+      const paths = sessionPaths(workspacePaths(dir), `case-${index}`);
+      const store = new FindingsStore(paths, redact);
+      const line = `echo ${spelling} done`;
+      const expected = `echo ${mask} done`;
+      let logged!: () => void;
+      const logDone = new Promise<void>((resolve) => {
+        logged = resolve;
+      });
+      const append = store.appendLog.bind(store);
+      store.appendLog = async (channel, text) => {
+        const path = await append(channel, text);
+        logged();
+        return path;
+      };
+      createCaptureSink(store, redact)('network', line);
+      await logDone;
+      expect(await readFile(join(paths.logs, 'network.log'), 'utf8')).toBe(`${expected}\n`);
+      await store.writeFindings({
+        status: 'failed',
+        steps: [],
+        bugs: [{ kind: 'flow', detail: line }],
+        visual: [],
+      });
+      expect(JSON.parse(await readFile(paths.findingsJson, 'utf8'))).toEqual({
+        status: 'failed',
+        steps: [],
+        bugs: [{ kind: 'flow', detail: expected }],
+        visual: [],
+      });
+      const adapter = {
+        console: async () => [{ level: 'error', text: line, timestamp: 1 }],
+      } as Adapter;
+      const result = await runObserve(adapter, store, { kind: 'console' }, redact);
+      expect(result).toEqual({
+        kind: 'console',
+        count: 1,
+        entries: [{ level: 'error', text: expected, timestamp: 1 }],
+      });
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

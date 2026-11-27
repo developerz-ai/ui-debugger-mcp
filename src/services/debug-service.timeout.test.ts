@@ -10,7 +10,7 @@
  * `debug-service.breadcrumb.test.ts` and `debug-service.cross-process.test.ts`.
  */
 
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import { SessionNotFoundError, SessionSettledError } from '../errors.js';
 import {
   CWD,
@@ -38,6 +38,17 @@ function fakeClock(start = NOW): { now: () => number; advance: (ms: number) => v
   };
 }
 
+async function waitForAutoEnd(): Promise<void> {
+  // The active slot disappears before async findings persistence and adapter
+  // teardown finish. Wait for both without using teardown time to judge the cap.
+  const deadline = Date.now() + 2_000;
+  while ((manager.has(CWD) || manager.closingId(CWD) !== undefined) && Date.now() < deadline) {
+    await tick(10);
+  }
+  expect(manager.has(CWD)).toBe(false);
+  expect(manager.closingId(CWD)).toBeUndefined();
+}
+
 // --- wall-clock cap ---------------------------------------------------------
 
 test('a run auto-ends when its wall-clock timeout fires (frees the lock + closes the adapter)', async () => {
@@ -47,8 +58,7 @@ test('a run auto-ends when its wall-clock timeout fires (frees the lock + closes
   await svc.start({ target: 'web', goal: 'x' });
   expect(manager.has(CWD)).toBe(true);
 
-  await tick(60);
-  expect(manager.has(CWD)).toBe(false);
+  await waitForAutoEnd();
   expect(log.adapters[0]?.closeCalls).toBe(1);
 });
 
@@ -78,14 +88,20 @@ test('the cap is wall-clock from start: build + open spend the same budget', asy
   };
   const svc = makeService(slowBuild, { now: clock.now, defaultTimeoutMs: 200 });
 
-  await svc.start({ target: 'web', goal: 'x' });
+  const timer = spyOn(globalThis, 'setTimeout');
+  try {
+    await svc.start({ target: 'web', goal: 'x' });
+    expect(manager.has(CWD)).toBe(true);
+    // A fresh cap or one that ignores time spent in open must fail even
+    // when teardown finishes quickly.
+    expect(timer.mock.calls.map(([, delay]) => delay)).toEqual([50]);
+  } finally {
+    timer.mockRestore();
+  }
   expect(log.buildBudgets[0]).toBe(200); // whole cap at build entry
   expect(log.openBudgets[0]).toBe(80); // what the launch left for the navigation
 
-  // Only ~50ms of cap remain, so the run is already down here; a cap restarted at
-  // `open` would still be running (it would not fire until 200ms).
-  await tick(120);
-  expect(manager.has(CWD)).toBe(false);
+  await waitForAutoEnd();
   expect(log.adapters[0]?.closeCalls).toBe(1);
 });
 
@@ -158,14 +174,7 @@ test('end_session forgets a timed-out run (acks once, then acks the repeat as al
   const { build, log } = fakeBuilder({ run: partialRun });
   const svc = makeService(build, { defaultTimeoutMs: 20 });
   const { session_id } = await svc.start({ target: 'web', goal: 'x' });
-  // The timer releases the active slot before async findings persistence and
-  // adapter teardown finish. Test the retained-run ack only after both settle.
-  const deadline = Date.now() + 2_000;
-  while ((manager.has(CWD) || manager.closingId(CWD) !== undefined) && Date.now() < deadline) {
-    await tick(10);
-  }
-  expect(manager.has(CWD)).toBe(false);
-  expect(manager.closingId(CWD)).toBeUndefined();
+  await waitForAutoEnd();
   expect(log.adapters[0]?.closeCalls).toBe(1);
 
   expect(await svc.end({ session_id })).toEqual({ ok: true, session_id });

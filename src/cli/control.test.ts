@@ -1,10 +1,13 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Findings } from '../findings/schema.js';
 import { ownerLockPath } from '../session/owner-lock.js';
+import * as pidfd from '../session/pidfd.js';
+import { openPidfd, type PidfdHelper } from '../session/pidfd.js';
 import { captureIdentity } from '../session/process-identity.js';
 import type { StateFile } from '../session/state-file.js';
 import { FileStatePort, readState, writeState } from '../session/state-file.js';
@@ -53,6 +56,141 @@ async function seedState(overrides: Partial<StateFile> = {}): Promise<string> {
   await writeState(ws.stateJson, state);
   return ws.stateJson;
 }
+
+test('pidfd signals only its verified process and rejects a mismatched identity', async () => {
+  if (process.platform !== 'linux') return;
+  const child = Bun.spawn(['sleep', '30']);
+  try {
+    const ticks = captureIdentity(child.pid).startTicks;
+    if (ticks === null) throw new Error('missing Linux process identity');
+    await expect(openPidfd(child.pid, ticks + 1)).rejects.toThrow('identity changed');
+    const handle = await openPidfd(child.pid, ticks);
+    await handle.signal();
+    expect(await child.exited).not.toBe(0);
+  } finally {
+    child.kill();
+  }
+});
+
+test('stop uses a pidfd to signal the recorded live process', async () => {
+  if (process.platform !== 'linux') return;
+  const child = Bun.spawn(['sleep', '30']);
+  try {
+    const stateJson = await seedState({ pid: child.pid, identity: captureIdentity(child.pid) });
+    await runStop(cwd);
+    expect(await child.exited).not.toBe(0);
+    expect((await readState(stateJson))?.status).toBe('stopped');
+  } finally {
+    child.kill();
+  }
+});
+
+/** Launch a shell helper in tests; production still uses the trusted Python. */
+function shellHelper(script: string, args: string[] = []): PidfdHelper {
+  // Deliberately pass an arbitrary script through: the test owns its helper.
+  return spawn('/bin/sh', ['-c', script, 'sh', ...args], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }) as PidfdHelper;
+}
+
+test('stop never executes an interpreter found only on PATH', async () => {
+  if (process.platform !== 'linux') return;
+  const marker = join(cwd, 'attacker-ran');
+  const identity = captureIdentity(process.pid);
+  if (identity.startTicks === null) throw new Error('missing Linux process identity');
+  await writeFile(
+    join(cwd, 'python3'),
+    `#!/bin/sh\nprintf 'x' > '${marker}'\necho ready\nread line\n`,
+    { mode: 0o755 },
+  );
+  const path = process.env.PATH;
+  process.env.PATH = cwd;
+  try {
+    const handle = await openPidfd(process.pid, identity.startTicks);
+    handle.close();
+    await expect(handle.signal()).rejects.toThrow('Cannot signal pidfd');
+    // Shell builtin redirection: no external `touch` is available with this PATH.
+    expect(await Bun.file(marker).exists()).toBe(false);
+  } finally {
+    process.env.PATH = path;
+  }
+}, 5000);
+
+test('pidfd helper requires -I isolation and rejects an identity mismatch', async () => {
+  if (process.platform !== 'linux') return;
+  let launched = false;
+  const identity = captureIdentity(process.pid);
+  if (identity.startTicks === null) throw new Error('missing Linux process identity');
+  const staleTicks = identity.startTicks + 1;
+  await expect(
+    openPidfd(process.pid, staleTicks, (invocation) => {
+      launched = true;
+      // The production argv itself: dropping `-I` here fails the test.
+      expect(['/usr/bin/python3', '/bin/python3']).toContain(invocation.command);
+      expect(invocation.args.slice(0, 2)).toEqual(['-I', '-B']);
+      expect(invocation.args[2]).toBe('-c');
+      const script = invocation.args[3];
+      expect(script).toContain('pidfd_open');
+      expect(script).toContain('identity changed');
+      expect(invocation.args.slice(4)).toEqual([String(process.pid), String(staleTicks)]);
+      // Fake a helper that refused to attach, as a stale identity would.
+      return shellHelper('echo identity changed >&2\nexit 1\n');
+    }),
+  ).rejects.toThrow('identity changed');
+  expect(launched).toBe(true);
+}, 5000);
+
+test('pidfd helper fails boundedly when readiness never arrives', async () => {
+  if (process.platform !== 'linux') return;
+  const identity = captureIdentity(process.pid);
+  if (identity.startTicks === null) throw new Error('missing Linux process identity');
+  const start = Date.now();
+  await expect(
+    openPidfd(process.pid, identity.startTicks, () => shellHelper('sleep 30\n', [])),
+  ).rejects.toThrow('Cannot safely open pidfd');
+  expect(Date.now() - start).toBeLessThan(10_000);
+}, 10_000);
+
+test('pidfd helper signal rejects when the helper closes its input', async () => {
+  if (process.platform !== 'linux') return;
+  const identity = captureIdentity(process.pid);
+  if (identity.startTicks === null) throw new Error('missing Linux process identity');
+  const handle = await openPidfd(process.pid, identity.startTicks, () =>
+    shellHelper('echo ready\nexec 0<&-\nsleep 1\n', []),
+  );
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await expect(handle.signal()).rejects.toThrow('Cannot signal pidfd');
+  } finally {
+    handle.close();
+  }
+}, 5000);
+
+test('stop opens the recorded identity and signals through its handle', async () => {
+  const identity = captureIdentity(process.pid);
+  const calls: string[] = [];
+  const open = spyOn(pidfd, 'openPidfd').mockImplementation(async (pid, ticks) => {
+    expect(pid).toBe(process.pid);
+    expect(ticks).toBe(identity.startTicks);
+    calls.push('open');
+    return {
+      async signal() {
+        calls.push('signal');
+      },
+      close() {
+        calls.push('close');
+      },
+    };
+  });
+  try {
+    await seedState({ pid: process.pid, identity });
+    await runStop(cwd);
+    expect(calls).toEqual(['open', 'signal', 'close']);
+    expect(open).toHaveBeenCalledTimes(1);
+  } finally {
+    open.mockRestore();
+  }
+});
 
 test('status reports no run when there is no state file', async () => {
   await runStatus(cwd);
@@ -195,6 +333,48 @@ test('a successor breadcrumb survives the ending run\u2019s late scoped clear â€
 
   expect(kills).toEqual([process.pid]); // the live successor was signaled, not skipped
   expect((await readState(stateJson))?.status).toBe('stopped');
+});
+
+test('stop does not mark or signal a successor replacing the selected run', async () => {
+  for (const change of [
+    { sessionId: 'successor' },
+    { identity: { startTicks: (captureIdentity(process.pid).startTicks ?? 0) + 1 } },
+  ]) {
+    const stateJson = await seedState(liveOwner());
+    const original = await readState(stateJson);
+    if (!original) throw new Error('missing test state');
+    const successor = { ...original, ...change };
+    const kills: number[] = [];
+    await expect(
+      runStop(
+        cwd,
+        (pid) => kills.push(pid),
+        async () => {
+          await writeState(stateJson, successor);
+        },
+      ),
+    ).rejects.toThrow('recorded run changed');
+    expect(kills).toEqual([]);
+    expect(await readState(stateJson)).toEqual(successor);
+  }
+});
+
+test('stop rejects a successor replacing a dead or stale owner', async () => {
+  for (const owner of [{}, { pid: process.pid, identity: { startTicks: 1 } }]) {
+    if (owner.pid && process.platform !== 'linux') continue;
+    const stateJson = await seedState(owner);
+    const original = await readState(stateJson);
+    if (!original) throw new Error('missing test state');
+    const successor = { ...original, sessionId: 'successor' };
+    await expect(
+      runStop(
+        cwd,
+        () => {},
+        () => writeState(stateJson, successor),
+      ),
+    ).rejects.toThrow('recorded run changed');
+    expect(await readState(stateJson)).toEqual(successor);
+  }
 });
 
 test('stop records `stopped` before the signal reaches the server', async () => {

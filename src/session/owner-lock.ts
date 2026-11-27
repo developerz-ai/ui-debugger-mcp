@@ -40,7 +40,12 @@
  * kernel, not in file contents.
  *
  * How this process reaches `flock(2)` (Bun FFI or util-linux `flock(1)`) lives
- * in `flock-backend.ts`; its public surface is re-exported from here.
+ * in `flock-backend.ts`; its public surface is re-exported from here. The FFI
+ * access there is DYNAMIC because the published bin runs on Node, where
+ * `bun:ffi` does not exist — a static import would crash the module on LOAD.
+ * The boot gate (`assertOwnerLockBackend`) resolves the backend BEFORE the
+ * server comes up: a host that cannot provide one can never enforce the
+ * one-run rule.
  */
 
 import {
@@ -101,7 +106,10 @@ export function ownerLockPath(workspace: WorkspacePaths): string {
  * as the ownership: `flock` is released when the fd closes, and the kernel
  * releases it when the process dies — a crashed server never wedges anything.
  */
-const holds = new Map<string, { fd: number; owner: OwnerLock; flock: FlockBackend }>();
+const holds = new Map<
+  string,
+  { fd: number; owner: OwnerLock; flock: FlockBackend; releasing?: boolean }
+>();
 
 /** Whether two owners identify the same live process. */
 function sameOwner(left: OwnerLock, right: OwnerLock): boolean {
@@ -161,6 +169,7 @@ export async function acquireOwnerLock(
   const flock =
     opener !== undefined ? symbolBackend(await resolveFlock(opener)) : await loadBackend();
   const held = holds.get(lockPath);
+  if (held?.releasing) throw new OwnerLockBusyError('owner lock release is in progress');
   if (held !== undefined && sameOwner(held.owner, owner)) {
     return { acquired: true, created: false }; // re-entrant: this process already owns it
   }
@@ -219,10 +228,13 @@ export type UnlockFn = (fd: number) => void | Promise<void>;
  * never unlinked: a stale claim file must never be mistaken for a held lock,
  * and unlinking the path would put a fresh inode where the owner's lock lives.
  *
- * The lock ALWAYS comes home: the release runs in a `finally`, so a failed
- * board write (a read-only remount, say) fails loud but cannot leave this
- * process holding the kernel lock with no registry entry to reach it by —
- * that would wedge every rival until the process exits (PR #104 review).
+ * Release ordering (KB finding #4): close/truncate the notice board and
+ * release the fd BEFORE deleting the registry entry so any failing step leaves
+ * the resource releasable. The lock ALWAYS comes home: the fd close runs in a
+ * `finally`, so a failed board write (a read-only remount, say) fails loud but
+ * cannot leave this process holding the kernel lock with no registry entry to
+ * reach it by — that would wedge every rival until the process exits (PR #104
+ * review).
  *
  * @param emptyBoard the notice-board teardown, injectable for tests (defaults
  *   to truncating the file to nothing) — the same seam doctrine as `makeExec`'s
@@ -241,25 +253,38 @@ export async function releaseOwnerLock(
   unlock?: UnlockFn,
 ): Promise<boolean> {
   const held = holds.get(lockPath);
-  if (held === undefined || !sameOwner(held.owner, owner)) return false;
-  holds.delete(lockPath); // teardown has begun — the registry names no hold from here
+  if (held === undefined || held.releasing || !sameOwner(held.owner, owner)) return false;
+  held.releasing = true;
+
+  // 1. Empty the notice board first — this may throw (read-only remount, say).
+  //    We still release the lock below so a failing step never keeps the fd
+  //    open holding the kernel lock with no registry entry to reach it by.
+  let firstError: unknown;
   try {
     emptyBoard(held.fd); // the board names no owner once we are out
-  } finally {
-    if (unlock !== undefined) {
-      try {
-        await unlock(held.fd);
-      } finally {
-        // The fd closes even when the unlock fails: closing alone releases the
-        // flock, and a fd left open would keep the kernel lock alive with no
-        // registry entry to reach it by.
-        closeSync(held.fd);
-      }
-    } else {
-      // The backend that took the lock gives it back — and disposes of the
-      // descriptor, which alone releases the flock even after a failed write.
-      held.flock.release(held.fd);
-    }
+  } catch (error) {
+    firstError = error;
   }
+
+  // 2. Always close the fd and release the lock. Closing alone releases the
+  //    flock, so even a failed explicit unlock leaves the resource free.
+  if (unlock !== undefined) {
+    try {
+      await unlock(held.fd);
+    } catch (error) {
+      firstError ??= error; // record the failure, but keep going — close comes home
+    }
+    closeSync(held.fd); // closing alone releases the flock after an explicit unlock
+  } else {
+    held.flock.release(held.fd); // backend gives back the lock + disposes the fd
+  }
+
+  // 3. Delete the registry entry now that the fd is closed and the lock
+  //    released — so any failing step above never leaves a hold the next
+  //    acquire can't overwrite. Close/truncate → release → delete, in order.
+  holds.delete(lockPath);
+
+  // 4. Propagate the first failure only after the resource is fully released.
+  if (firstError !== undefined) throw firstError;
   return true;
 }

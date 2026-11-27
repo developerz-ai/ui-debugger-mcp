@@ -1,6 +1,17 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  link,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionBusyError } from '../errors.js';
@@ -70,6 +81,135 @@ test('writeState + readState round-trips', async () => {
   expect(await readState(path)).toEqual(SAMPLE);
 });
 
+test('state lock is private, including an existing permissive lock', async () => {
+  const path = join(dir, 'state.json');
+  await writeFile(`${path}.lock`, '', { mode: 0o666 });
+  await chmod(`${path}.lock`, 0o666);
+  await writeState(path, SAMPLE);
+  expect((await stat(`${path}.lock`)).mode & 0o777).toBe(0o600);
+});
+
+test("state lock refuses a hard link without changing the other name's mode", async () => {
+  const path = join(dir, 'state.json');
+  const other = join(dir, 'other');
+  await writeFile(other, 'untouched', { mode: 0o644 });
+  await chmod(other, 0o644);
+  await link(other, `${path}.lock`);
+  await expect(writeState(path, SAMPLE)).rejects.toThrow(/multiple links/);
+  expect((await stat(other)).mode & 0o777).toBe(0o644);
+  expect(await readFile(other, 'utf8')).toBe('untouched');
+});
+
+test('state lock refuses a symlink without changing its target', async () => {
+  const path = join(dir, 'state.json');
+  const target = join(dir, 'target');
+  await writeFile(target, 'untouched');
+  await chmod(target, 0o644);
+  await symlink(target, `${path}.lock`);
+  await expect(writeState(path, SAMPLE)).rejects.toThrow();
+  expect((await stat(target)).mode & 0o777).toBe(0o644);
+  expect(await readFile(target, 'utf8')).toBe('untouched');
+});
+
+test('a held state lock fails with a bounded timeout', async () => {
+  const path = join(dir, 'state.json');
+  const child = Bun.spawn(
+    ['flock', '-x', `${path}.lock`, 'sh', '-c', 'echo ready; exec sleep 30'],
+    {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+  );
+  children.push(child);
+  expect(new TextDecoder().decode((await child.stdout.getReader().read()).value)).toContain(
+    'ready',
+  );
+  await expect(writeState(path, SAMPLE)).rejects.toThrow(/timed out.*state.*lock/i);
+}, 10000);
+
+test('a successor cannot publish between a status check and its write', async () => {
+  const path = join(dir, 'state.json');
+  await writeState(path, SAMPLE);
+  let resume!: () => void;
+  let entered!: () => void;
+  const paused = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  const io: StateIo = {
+    read: readState,
+    write: async (p, state) => {
+      entered();
+      await gate;
+      await writeFile(p, JSON.stringify(state));
+    },
+  };
+  const stopping = markStatus(path, 'stopped', new Date(), SAMPLE.sessionId, io);
+  await paused;
+  let published = false;
+  const successor = writeState(path, { ...SAMPLE, sessionId: 'successor' }).then(() => {
+    published = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(published).toBe(false);
+  resume();
+  await Promise.all([stopping, successor]);
+  expect((await readState(path))?.sessionId).toBe('successor');
+  expect((await readState(path))?.status).toBe('running');
+});
+
+test('a separate process waits for the status mutation before publishing a successor', async () => {
+  const path = join(dir, 'state.json');
+  await writeState(path, SAMPLE);
+  let resume!: () => void;
+  let entered!: () => void;
+  const paused = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  const io: StateIo = {
+    read: readState,
+    write: async (p, state) => {
+      entered();
+      await gate;
+      await writeFile(p, JSON.stringify(state));
+    },
+  };
+  const stopping = markStatus(path, 'stopped', new Date(), SAMPLE.sessionId, io);
+  await paused;
+  const modulePath = join(import.meta.dir, 'state-file.ts');
+  const child = Bun.spawn({
+    cmd: [
+      'bun',
+      '-e',
+      `
+      import { writeState } from ${JSON.stringify(modulePath)};
+      const state = ${JSON.stringify({ ...SAMPLE, sessionId: 'successor' })};
+      console.log('ready');
+      await writeState(${JSON.stringify(path)}, state);
+      console.log('published');
+    `,
+    ],
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  children.push(child);
+  const reader = child.stdout.getReader();
+  const first = await reader.read();
+  expect(new TextDecoder().decode(first.value)).toContain('ready');
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect((await readState(path))?.sessionId).toBe(SAMPLE.sessionId);
+  resume();
+  await stopping;
+  expect(await child.exited).toBe(0);
+  expect((await readState(path))?.sessionId).toBe('successor');
+  expect((await readState(path))?.status).toBe('running');
+});
+
 test('readState returns null when the file is absent', async () => {
   expect(await readState(join(dir, 'nope.json'))).toBeNull();
 });
@@ -114,7 +254,7 @@ test('writeState publishes atomically — the CLI never reads a torn state.json'
     writeState(path, { ...SAMPLE, goal: 'other' }),
   ]);
 
-  expect(await readdir(dir)).toEqual(['state.json']);
+  expect((await readdir(dir)).sort()).toEqual(['state.json', 'state.json.lock']);
   expect(await readState(path)).not.toBeNull();
 });
 
@@ -653,4 +793,47 @@ test('record() by the owner twice is re-entrant — the second record keeps the 
   // Still ours — the re-entrant acquire did not hand the workspace away.
   const claim = JSON.parse(await readFile(ownerLockPath(ws), 'utf8'));
   expect(claim.pid).toBe(process.pid);
+});
+
+test('unscoped markStatus never marks a successor observed on its second read', async () => {
+  for (const successor of [
+    { ...SAMPLE, sessionId: 'successor' },
+    { ...SAMPLE, pid: SAMPLE.pid + 1 },
+    { ...SAMPLE, identity: { startTicks: (SAMPLE.identity.startTicks ?? 0) + 1 } },
+  ]) {
+    let reads = 0;
+    let written = false;
+    const io: StateIo = {
+      read: async () => (++reads === 1 ? SAMPLE : successor),
+      write: async () => {
+        written = true;
+      },
+    };
+    await markStatus(join(dir, 'state.json'), 'ended', new Date(), undefined, io);
+    expect(written).toBe(false);
+  }
+});
+
+test('markStatus re-reads and revalidates before writing — a concurrent write is not clobbered', async () => {
+  const path = join(dir, 'state.json');
+  const running = { ...SAMPLE, status: 'running' as const };
+  const stopped = { ...SAMPLE, status: 'stopped' as const };
+
+  // The snapshots differ, so omitting either read fails without polling.
+  let reads = 0;
+  const io: StateIo = {
+    read: async () => (++reads === 1 ? running : stopped),
+    write: async (_p, state) => {
+      latest = state;
+    },
+  };
+  let latest: StateFile | undefined;
+
+  await writeState(path, running);
+  await writeState(path, stopped);
+  await markStatus(path, 'ended', new Date('2026-07-01T00:00:00.000Z'), undefined, io);
+
+  expect(reads).toBe(2);
+  expect(latest?.status).toBe('stopped');
+  expect(await readState(path)).toMatchObject({ status: 'stopped' });
 });

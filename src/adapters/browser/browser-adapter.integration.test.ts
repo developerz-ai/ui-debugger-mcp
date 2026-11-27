@@ -30,14 +30,15 @@
  * screenshot · console · network.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { chromium } from 'playwright-core';
 import type { WebTarget } from '../../config/schema.js';
 import { AdapterError } from '../../errors.js';
-import { BrowserAdapter } from './browser-adapter.js';
+import type { NetworkEntry } from '../contract.js';
+import { BrowserAdapter, remainingTimeout } from './browser-adapter.js';
 
 // ---------------------------------------------------------------------------
 // Skip guard
@@ -142,6 +143,12 @@ const FIXTURE_HTML = `<!DOCTYPE html>
     // Fires immediately on load — captured by the console listener.
     console.error('fixture-error');
 
+    if (new URLSearchParams(location.search).has('guard-tree-limit')) {
+      document.getElementById('status').getBoundingClientRect = function() {
+        throw new Error('readState extracted a node beyond the requested limit');
+      };
+    }
+
     // Fires on button click — captured by the network listener as a 404.
     document.getElementById('go').addEventListener('click', function() {
       document.getElementById('status').textContent = 'clicked';
@@ -215,15 +222,15 @@ const FRAME2_HTML = `<!DOCTYPE html>
 (RUN_INTEGRATION ? describe : describe.skip)('BrowserAdapter integration', () => {
   let server: ReturnType<typeof Bun.serve>;
   let adapter: BrowserAdapter;
-  let profileDir: string;
+  let closeFixture: (() => Promise<void>) | undefined;
   // Resolve the OS-assigned port ONCE at startup and cache the URL. Reading
   // `server.port` repeatedly is unreliable on some CI runners (the getter can
   // return -1 mid-run even while the server stays up), which yields a bogus
   // `http://localhost:-1/` and fails every navigation after the first few.
   let baseUrl: string;
 
-  beforeAll(async () => {
-    // 1. Serve the fixture on a random OS-assigned port. Bind + navigate via the
+  beforeAll(() => {
+    // Serve the fixture on a random OS-assigned port. Bind + navigate via the
     // IPv4 loopback explicitly: on some CI runners `localhost` resolves to `::1`
     // (IPv6) while Bun.serve binds IPv4, so the browser hits a refused connection.
     server = Bun.serve({
@@ -263,11 +270,28 @@ const FRAME2_HTML = `<!DOCTYPE html>
       throw new Error(`fixture server did not bind a valid port (got ${assignedPort})`);
     }
     baseUrl = `http://127.0.0.1:${assignedPort}/`;
+  });
 
-    // 2. Isolated Chrome profile so tests don't share state with the user's browser.
-    profileDir = mkdtempSync(`${tmpdir()}/ui-dbg-test-`);
+  afterAll(() => {
+    server?.stop(true);
+  });
 
-    // 3. Construct the adapter (does NOT navigate yet).
+  // Bun can kill the Chromium subprocess when a case times out. A fresh managed
+  // adapter per case prevents that failure from closing every subsequent test's page.
+  beforeEach(async () => {
+    // Bound both Playwright calls within the hook's deadline, with time to report
+    // the actual Playwright failure before Bun times out the hook.
+    const deadline = Date.now() + 12_000;
+    const profileDir = mkdtempSync(`${tmpdir()}/ui-dbg-test-`);
+    let ownedAdapter: BrowserAdapter | undefined;
+    closeFixture = async () => {
+      try {
+        await ownedAdapter?.close();
+      } finally {
+        rmSync(profileDir, { recursive: true, force: true });
+      }
+    };
+
     const config: WebTarget = {
       adapter: 'browser',
       url: baseUrl,
@@ -275,22 +299,21 @@ const FRAME2_HTML = `<!DOCTYPE html>
       executablePath: CHROME,
     };
 
-    adapter = await BrowserAdapter.create({ config, profileDir });
-  }, 30_000);
-
-  afterAll(async () => {
-    await adapter?.close().catch(() => {});
-    server?.stop();
-    if (profileDir) rmSync(profileDir, { recursive: true, force: true });
-  });
-
-  // Per-test setup: every case starts from a freshly loaded fixture so no test
-  // depends on another having run first (order-independent, safe to rerun in
-  // isolation). The fixture's `console.error` re-fires on each load.
-  beforeEach(async () => {
-    await adapter.open(baseUrl);
-    await adapter.waitFor({ query: '#go', timeout: 10_000 });
+    ownedAdapter = await BrowserAdapter.create({
+      config,
+      profileDir,
+      timeoutMs: remainingTimeout(deadline),
+    });
+    adapter = ownedAdapter;
+    // open() already waits for the fixture's load event, including its iframes.
+    await adapter.open(baseUrl, remainingTimeout(deadline));
   }, 15_000);
+
+  afterEach(async () => {
+    const close = closeFixture;
+    closeFixture = undefined;
+    await close?.();
+  });
 
   // Click the button and let the triggered fetch settle, so the network buffer
   // holds the `/api/missing` 404 the network tests assert on — each test that
@@ -421,13 +444,11 @@ const FRAME2_HTML = `<!DOCTYPE html>
 
   test('scroll: an off-viewport `within` region fails loud instead of scrolling the page', async () => {
     // Parking the cursor off-screen would wheel the VIEWPORT and report success —
-    // same guard the coordinate click applies.
-    await expect(adapter.scroll({ direction: 'down', within: '#offscreen' })).rejects.toThrow(
-      AdapterError,
-    );
-    await expect(adapter.scroll({ direction: 'down', within: '#offscreen' })).rejects.toThrow(
-      /outside the viewport/,
-    );
+    // same guard the coordinate click applies. One call, then both the rejection
+    // reason and the absence of a viewport scroll are asserted on that same call.
+    const attempt = adapter.scroll({ direction: 'down', within: '#offscreen' });
+    await expect(attempt).rejects.toThrow(AdapterError);
+    await expect(attempt).rejects.toThrow(/outside the viewport/);
     expect(Number((await adapter.find({ query: '#scrolly' }))?.name)).toBe(0);
   }, 15_000);
 
@@ -452,9 +473,20 @@ const FRAME2_HTML = `<!DOCTYPE html>
   // -------------------------------------------------------------------------
 
   test('readState: caps at limit and rejects a bad one', async () => {
-    expect((await adapter.readState({ limit: 2 })).length).toBe(2);
-    // `slice(0, -1)` would silently drop the last node — fail loud instead.
-    await expect(adapter.readState({ limit: -1 })).rejects.toThrow(AdapterError);
+    await adapter.open(`${baseUrl}?guard-tree-limit`, 5_000);
+    const nodes = await adapter.readState({ limit: 2 });
+    expect(nodes.map((node) => node.name)).toEqual(['Test Fixture', 'Click me']);
+    const embedded = await adapter.readState({
+      query: 'button',
+      limit: 1,
+      filters: { name_contains: 'Inner' },
+    });
+    expect(embedded.map((node) => node.name)).toEqual(['Inner Button']);
+    // Reject the bad limit before visiting any frame, even if the selector
+    // would also fail. This must report validation, not a Playwright error.
+    await expect(adapter.readState({ limit: -1, query: 'div:contains("Total")' })).rejects.toThrow(
+      /limit.*must be a non-negative integer/,
+    );
   }, 15_000);
 
   // -------------------------------------------------------------------------
@@ -520,10 +552,20 @@ const FRAME2_HTML = `<!DOCTYPE html>
   // network payloads — the reason a request failed, not just that it did
   // -------------------------------------------------------------------------
 
-  test('network: captures request + response bodies for a failing API call', async () => {
+  async function submitAndReadEcho(ready: (entry: NetworkEntry) => boolean) {
     await adapter.click('#submit');
-    await adapter.waitFor({ networkIdle: true, timeout: 5_000 });
-    const [entry] = await adapter.network({ filters: { url_contains: '/api/echo' } });
+    // Network idle is a page load state, not a signal that capture has enriched
+    // the row. Wait for the fields under test and return the last read on timeout.
+    const deadline = performance.now() + 5_000;
+    for (;;) {
+      const [entry] = await adapter.network({ filters: { url_contains: '/api/echo' } });
+      if ((entry && ready(entry)) || performance.now() >= deadline) return entry;
+      await Bun.sleep(25);
+    }
+  }
+
+  test('network: captures request + response bodies for a failing API call', async () => {
+    const entry = await submitAndReadEcho((row) => row.responseBody !== undefined);
     expect(entry?.status).toBe(400);
     expect(entry?.method).toBe('POST');
     expect(entry?.requestBody).toBe('{"email":"a@b.c"}');
@@ -533,9 +575,9 @@ const FRAME2_HTML = `<!DOCTYPE html>
   }, 15_000);
 
   test('network: credential headers are redacted, ordinary ones are not', async () => {
-    await adapter.click('#submit');
-    await adapter.waitFor({ networkIdle: true, timeout: 5_000 });
-    const [entry] = await adapter.network({ filters: { url_contains: '/api/echo' } });
+    const entry = await submitAndReadEcho(
+      (row) => row.requestHeaders !== undefined && row.responseHeaders !== undefined,
+    );
     expect(entry?.requestHeaders?.authorization).toMatch(/^<redacted, \d+ chars>$/);
     expect(entry?.requestHeaders?.['content-type']).toContain('application/json');
     expect(entry?.responseHeaders?.['set-cookie']).toMatch(/^<redacted, \d+ chars>$/);
@@ -656,7 +698,14 @@ const FRAME2_HTML = `<!DOCTYPE html>
     const before = await adapter.tabs();
     await adapter.click('#popup');
     await adapter.waitFor({ networkIdle: true, timeout: 5_000 });
-    const after = await adapter.tabs();
+    // The popup is created asynchronously by Chrome: `networkidle` on the
+    // ORIGINAL page can settle before the new target is registered. Poll the
+    // tab list until the popup appears instead of racing the browser process.
+    let after = await adapter.tabs();
+    for (let i = 0; i < 40 && after.length === before.length; i++) {
+      await Bun.sleep(25);
+      after = await adapter.tabs();
+    }
     expect(after.length).toBe(before.length + 1);
     // Still driving the original tab — the new one is not stolen silently.
     expect(after.find((t) => t.active)?.index).toBe(before.find((t) => t.active)?.index);
