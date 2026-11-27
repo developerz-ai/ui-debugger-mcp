@@ -137,32 +137,43 @@ function maskJson(value: unknown): boolean {
   return seen;
 }
 
-/**
- * `a=1&b=2` — a form-urlencoded body, not prose that happens to hold an `=`.
- * Lenient where the format is: empty pairs (`a=1&&b=2`, a trailing `&`) and a
- * bare key (`remember`) are valid; raw whitespace never is (it is `+`/`%20`).
- */
-const FORM_BODY = /^&*[^=&\s]+(=[^&\s]*)?(&+[^=&\s]+(=[^&\s]*)?)*&*$/;
+/** A declared `application/x-www-form-urlencoded` content type (any params). */
+const FORM_TYPE = /^\s*application\/x-www-form-urlencoded\b/i;
 
-/** A form key as the server reads it (`user%5Bpassword%5D` → `user[password]`). */
+/**
+ * Whether to treat `text` as form-urlencoded. A DECLARED form always is. Else the
+ * test is deliberately loose — every valid form passes it (empty names `=x`,
+ * empty pairs, bare keys, stray `=`); a grammar that rejected any of those let
+ * the password beside it through. Only text that cannot be a form is out: no
+ * `=` at all, or raw whitespace (a serialized form encodes it as `+`/`%20`).
+ */
+function isForm(text: string, contentType: string | undefined): boolean {
+  if (contentType !== undefined && FORM_TYPE.test(contentType)) return true;
+  return text.includes('=') && !/\s/.test(text);
+}
+
+/**
+ * A form key as the server reads it (`user%5Bpassword%5D` → `user[password]`),
+ * decoded by `URLSearchParams` — the WHATWG parser, lenient exactly where servers
+ * are: a malformed `%zz` stays literal while the valid escapes around it
+ * (`%zz%5Bpassword%5D` → `%zz[password]`) still decode, instead of the whole key failing to decode.
+ */
 function formKey(raw: string): string {
-  try {
-    return decodeURIComponent(raw.replace(/\+/g, ' '));
-  } catch {
-    return raw;
-  }
+  return new URLSearchParams(`${raw}=`).keys().next().value ?? raw;
 }
 
 /**
  * Copy a captured request/response body with credential-keyed values replaced by
  * `<redacted, N chars>` — JSON (at any depth) and `application/x-www-form-urlencoded`.
+ * `contentType`, when the exchange's header is known, makes a declared form
+ * parse as one even if it breaks the shape heuristic (raw spaces).
  *
  * A login POST and the token response it gets back carry the secret in the BODY,
  * which reaches the driver on every network read and `network.log` on failure;
  * the header and URL redactors above never see it. Anything else (plain text, HTML,
  * a body with nothing sensitive in it) comes back byte-for-byte untouched.
  */
-export function redactBody(body: string): string {
+export function redactBody(body: string, contentType?: string): string {
   const trimmed = body.trim();
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     let parsed: unknown;
@@ -173,7 +184,7 @@ export function redactBody(body: string): string {
     }
     return maskJson(parsed) ? JSON.stringify(parsed) : body;
   }
-  if (!FORM_BODY.test(trimmed)) return body;
+  if (!isForm(trimmed, contentType)) return body;
   let masked = false;
   const out = trimmed
     .split('&')

@@ -66,6 +66,7 @@ export const fakeResponse = (o: {
     resourceType: () => o.resourceType ?? 'fetch',
     postData: () => o.postData ?? null,
     allHeaders: async () => o.requestHeaders ?? {},
+    headers: () => o.requestHeaders ?? {},
   };
   return {
     status: () => o.status,

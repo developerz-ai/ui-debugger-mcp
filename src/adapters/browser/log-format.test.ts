@@ -270,3 +270,32 @@ test('redactBody never returns a duplicate-key JSON body whose parse hid the sec
   expect(out).not.toContain('hunter2');
   expect(out).toBe('{"password":null}');
 });
+
+test('no valid urlencoded shape bypasses form masking — empty names, stray `=`, odd separators', () => {
+  // [input, expected]: every one is a body a server would parse as a form.
+  const table: Array<[string, string]> = [
+    ['=x&password=hunter2', '=x&password=<redacted, 7 chars>'],
+    ['&=&password=hunter2', '&=&password=<redacted, 7 chars>'],
+    ['=&=&password=pw', '=&=&password=<redacted, 2 chars>'],
+    ['password=a=b=c', 'password=<redacted, 5 chars>'],
+    ['password=', 'password=<redacted, 0 chars>'],
+    ['a&password=pw&b', 'a&password=<redacted, 2 chars>&b'],
+    ['==&token=t0k', '==&token=<redacted, 3 chars>'],
+    ['password=%F0%9F%94%91', 'password=<redacted, 12 chars>'],
+    ['pass%77ord=pw', 'pass%77ord=<redacted, 2 chars>'],
+    ['password=pw%', 'password=<redacted, 3 chars>'],
+    ['%zz=1&password=pw', '%zz=1&password=<redacted, 2 chars>'],
+    ['%zz%5Bpassword%5D=pw', '%zz%5Bpassword%5D=<redacted, 2 chars>'],
+    ['pass+word=x&pass_word=pw', 'pass+word=x&pass_word=<redacted, 2 chars>'],
+  ];
+  for (const [input, expected] of table) expect(redactBody(input)).toBe(expected);
+});
+
+test('a declared form content type masks even a sloppy body with raw spaces', () => {
+  const type = 'application/x-www-form-urlencoded; charset=UTF-8';
+  expect(redactBody('user=bob smith&password=hunter 2', type)).toBe(
+    'user=bob smith&password=<redacted, 8 chars>',
+  );
+  // Without the header, prose with a raw space is not a form.
+  expect(redactBody('password=hunter 2 is what I typed')).toBe('password=hunter 2 is what I typed');
+});

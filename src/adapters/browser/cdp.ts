@@ -376,7 +376,7 @@ export class CdpCapture {
     if (!data) return undefined;
     if (data.length > BODY_READ_MAX_BYTES) return `<body not read, ${data.length} chars>`;
     // Redact BEFORE truncating: a cut JSON body no longer parses, so its secret would survive.
-    return truncateBody(redactBody(data));
+    return truncateBody(redactBody(data, request.headers()['content-type']));
   }
 
   readonly #onRequestFailed = (request: Request): void => {

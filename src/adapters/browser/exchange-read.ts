@@ -64,7 +64,8 @@ function unreadBody(response: Response): string | undefined {
 async function readBody(response: Response): Promise<string | undefined> {
   try {
     // Redact BEFORE truncating: a cut JSON body no longer parses, so its secret would survive.
-    return unreadBody(response) ?? truncateBody(redactBody(await response.text()));
+    const type = response.headers()['content-type'];
+    return unreadBody(response) ?? truncateBody(redactBody(await response.text(), type));
   } catch {
     return undefined;
   }

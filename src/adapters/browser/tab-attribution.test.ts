@@ -77,6 +77,7 @@ const fakeResponse = (url: string) => {
     resourceType: () => 'fetch',
     postData: () => null,
     allHeaders: async () => ({}),
+    headers: () => ({}),
   };
   return {
     status: () => 200,

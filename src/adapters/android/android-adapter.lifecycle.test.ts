@@ -19,21 +19,12 @@ import { AndroidAdapter, type AndroidAdapterInit } from './android-adapter.js';
 import {
   FakeAdb,
   FakeUi,
+  isAlive,
   makeAdapter,
   makeAttachAdapter,
   makeFakeEmulator,
   stubResolveBin,
 } from './android-adapter.test-helpers.js';
-
-/** True while `pid` is alive (`kill -0`); false once it's gone (ESRCH). */
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Spawn the SIGTERM-ignoring stand-in, retrying a transient runtime failure.

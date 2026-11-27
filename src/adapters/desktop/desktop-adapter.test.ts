@@ -15,6 +15,7 @@ import {
 import type { ScreenCapture } from './capture.js';
 import { DesktopAdapter, scrollRepeat } from './desktop-adapter.js';
 import type { PointerInput, WindowMatch } from './input.js';
+import { isAlive } from './process-alive.test-helpers.js';
 
 // --- fakes ------------------------------------------------------------------
 
@@ -512,16 +513,6 @@ test('open refuses to launch when there is no window to drive', async () => {
   expect(input.calls).toEqual([]);
   await expect(adapter.close()).resolves.toBeUndefined(); // nothing was spawned
 });
-
-/** True while `pid` is alive (`kill -0`); false once it's gone (ESRCH). */
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 test('close SIGTERMs the whole process group, not just the shell', async () => {
   // The launched shell backgrounds a real child (`sleep`) and waits on it — a group

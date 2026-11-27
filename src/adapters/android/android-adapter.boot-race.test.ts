@@ -9,7 +9,12 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { AdapterError, AdbError } from '../../errors.js';
 import type { Adb } from './adb.js';
 import { AndroidAdapter } from './android-adapter.js';
-import { FakeUi, makeFakeEmulator, stubResolveBin } from './android-adapter.test-helpers.js';
+import {
+  FakeUi,
+  isAlive,
+  makeFakeEmulator,
+  stubResolveBin,
+} from './android-adapter.test-helpers.js';
 
 function managed(adb: Adb, spawnChild: () => ChildProcess, bootWaitMs = 5000): AndroidAdapter {
   return AndroidAdapter.create({
@@ -102,7 +107,7 @@ describe('managed boot: failure releases the emulator', () => {
         .catch((e: unknown) => e);
       expect(err).toBeInstanceOf(AdapterError);
       // Reaped, not orphaned: the group is gone once `open` has rejected.
-      expect(() => process.kill(pid, 0)).toThrow();
+      expect(isAlive(pid)).toBe(false);
     } finally {
       try {
         process.kill(-pid, 'SIGKILL');
@@ -154,7 +159,7 @@ describe('managed boot: wrapper exits, group survives', () => {
         .catch((e: unknown) => e);
       expect(err).toBeInstanceOf(AdapterError);
       expect(sleeper).toBeGreaterThan(0);
-      expect(() => process.kill(sleeper, 0)).toThrow();
+      expect(isAlive(sleeper)).toBe(false);
     } finally {
       try {
         process.kill(-(child.pid as number), 'SIGKILL');

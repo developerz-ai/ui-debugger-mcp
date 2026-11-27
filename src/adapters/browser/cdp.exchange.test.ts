@@ -225,3 +225,25 @@ test('a credential-bearing URL never reaches the buffer or the log verbatim', as
   expect(urls).toContain('https://app/oauth?access_token=<redacted, 11 chars>');
   expect(lines.some((l) => l.includes('SECRET'))).toBe(false);
 });
+
+test('the exchange content type reaches the body redactor — a declared form with raw spaces is masked', async () => {
+  const { page, cap } = setup();
+  const form = { 'content-type': 'application/x-www-form-urlencoded' };
+  page.emit(
+    'response',
+    fakeResponse({
+      method: 'POST',
+      url: 'http://x/api/login',
+      status: 401,
+      ok: false,
+      postData: 'user=bob smith&password=hunter 2',
+      requestHeaders: form,
+      body: 'error=bad creds&token=t 1',
+      responseHeaders: form,
+    }),
+  );
+  await flush();
+  const [entry] = cap.network();
+  expect(entry?.requestBody).toBe('user=bob smith&password=<redacted, 8 chars>');
+  expect(entry?.responseBody).toBe('error=bad creds&token=<redacted, 3 chars>');
+});
