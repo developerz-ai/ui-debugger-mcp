@@ -140,6 +140,20 @@ function maskJson(value: unknown): boolean {
 /** A declared `application/x-www-form-urlencoded` content type (any params). */
 const FORM_TYPE = /^\s*application\/x-www-form-urlencoded\b/i;
 
+/** A declared JSON content type — `application/json` or any `+json` suffix. */
+const JSON_TYPE = /^\s*application\/([\w.-]+\+)?json\b/i;
+
+const NOT_JSON = Symbol('not-json');
+
+/** `text` parsed as JSON, or {@link NOT_JSON} when it does not parse. */
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return NOT_JSON;
+  }
+}
+
 /**
  * Whether to treat `text` as form-urlencoded. A DECLARED form always is. Else the
  * test is deliberately loose — every valid form passes it (empty names `=x`,
@@ -175,14 +189,14 @@ function formKey(raw: string): string {
  */
 export function redactBody(body: string, contentType?: string): string {
   const trimmed = body.trim();
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch {
-      return body;
-    }
-    return maskJson(parsed) ? JSON.stringify(parsed) : body;
+  // Routing: a DECLARED form is always a form (`[x]=1&password=…` starts like
+  // JSON). Anything else is JSON only if it actually PARSES — a failed parse
+  // falls through to the form check, never to "return untouched".
+  const declaredForm = contentType !== undefined && FORM_TYPE.test(contentType);
+  const declaredJson = contentType !== undefined && JSON_TYPE.test(contentType);
+  if (!declaredForm && (declaredJson || trimmed.startsWith('{') || trimmed.startsWith('['))) {
+    const parsed = parseJson(trimmed);
+    if (parsed !== NOT_JSON) return maskJson(parsed) ? JSON.stringify(parsed) : body;
   }
   if (!isForm(trimmed, contentType)) return body;
   let masked = false;

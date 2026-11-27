@@ -299,3 +299,20 @@ test('a declared form content type masks even a sloppy body with raw spaces', ()
   // Without the header, prose with a raw space is not a form.
   expect(redactBody('password=hunter 2 is what I typed')).toBe('password=hunter 2 is what I typed');
 });
+
+test('body routing: a declared form is never taken for JSON, and a failed JSON parse still gets the form check', () => {
+  const form = 'application/x-www-form-urlencoded';
+  expect(redactBody('[x]=1&password=hunter2', form)).toBe('[x]=1&password=<redacted, 7 chars>');
+  expect(redactBody('{a}=1&token=t', form)).toBe('{a}=1&token=<redacted, 1 chars>');
+  // Undeclared: not valid JSON, so it is judged as a form.
+  expect(redactBody('[x]=1&password=h')).toBe('[x]=1&password=<redacted, 1 chars>');
+  // A declared JSON type stays JSON; a mislabelled form-shaped body is still masked.
+  expect(redactBody('{"password":"pw"}', 'application/json')).toBe(
+    '{"password":"<redacted, 2 chars>"}',
+  );
+  expect(redactBody('password=pw', 'application/json; charset=utf-8')).toBe(
+    'password=<redacted, 2 chars>',
+  );
+  // Real JSON that happens to hold `=` and no whitespace is never form-split.
+  expect(redactBody('{"q":"a=b&password=x"}')).toBe('{"q":"a=b&password=x"}');
+});
