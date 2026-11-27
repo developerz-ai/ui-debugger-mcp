@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-11-27
+
+A multi-area quality sweep (#215): secrets kept out of the model's context and
+the logs, runs that no longer lose their verdict or hang on teardown, resource
+hygiene across all three adapters, and a developer-experience pass.
+
+### Security
+
+- **Persona secrets no longer reach the driver's context.** The run redactor
+  now also wraps belt outputs: `observe` network rows (url, bodies, error,
+  header values), tab urls/titles, tree node `name`/`value`/`testid`/`frame`,
+  `act` results and errors, and vision `look` descriptions. A fetch/XHR login
+  POST used to put the plaintext password in the driver's context on every
+  later step. A selector that would carry a secret is handed out as an opaque
+  `@@ref:N`, resolved inside the belt.
+- **Password fields** read back as `<redacted, N chars>` in `readState`.
+- **Bodies:** values under credential-shaped keys (`password`, `token`,
+  `secret`, `apikey`, `authorization`, `otp`, …) are masked in JSON and
+  form-urlencoded request/response bodies, whatever the declared content type.
+  More credential headers are redacted (`apikey`, `x-goog-api-key`,
+  `x-xsrf-token`, `x-*-token`, `x-amz-security-token`).
+- **Redactor spellings:** a secret is matched however JSON or percent encoding
+  escapes it — any per-character `\uXXXX` / short escape (either hex case,
+  surrogate pairs) and any `%XX` mix, `+` for space, the browser `<form>`
+  spelling, U+FFFD for a lone surrogate. Overlapping secrets are merged in one
+  pass, so no fragment is ever left visible.
+- A failed login no longer quotes the persona's password back to the
+  `start_debug` caller; `OPENAI_BASE_URL` errors never echo the value.
+- Log lines: CR/LF/U+2028/U+2029 inside page-controlled fields are folded to a
+  literal `\n`, so a page can't forge lines in `console.log` / `network.log`.
+
+### Added
+
+- `NetworkEntry.pending` + filter `pending_eq`: in-flight requests read back as
+  pending rows (time in flight so far), so a hung call behind a spinner is
+  diagnosable. Status/ok filters skip them unless `pending_eq` is given.
+- `WaitOptions.signal`: an ended or timed-out run cancels an adapter `waitFor`
+  (and `act wait`) at once instead of holding `close()` for up to 60s.
+- `end_session` on a run the previous call just ended returns
+  `{ ok: true, already_ended: { status } }` (honours its idempotent hint).
+- DX: `.vscode/` (Biome on save, tasks, launch configs), `bin/dev`,
+  `bin/lib/preflight.sh` (each miss names `bin/setup`; `bin/check` preflights
+  first), weekly `.dz` maintenance schedule.
+
+### Changed
+
+- A driver turn with no tool call no longer ends the run without a verdict:
+  the driver is nudged, bounded by the run's step cap. Content-filtered,
+  errored or truncated turns stay terminal.
+- `look` has its own 90s deadline.
+- Auth personas: a late-rendered login form is waited for; an already-signed-in
+  profile is reused only for a sole persona whose `expect` marker shows (set
+  `expect` to something that identifies the account); otherwise `AuthError`.
+- `send_message` on an auto-ended run → `SessionSettledError`.
+- Config: empty strings are rejected for `models.*`, `workspace`, `launch`,
+  `avd`, `adbSerial`; a malformed `OPENAI_BASE_URL` fails at boot.
+- `status` / `stop` fail loud on a present-but-unreadable `state.json`.
+- Android `type` rejects non-ASCII text (it was silently dropped).
+- Desktop selector actions ignore hidden nodes and prefer an exact name match;
+  a `readState` walk over 30s fails loud.
+
+### Fixed
+
+- Shutdown is single-flight: stdin close + SIGTERM no longer exit mid-teardown;
+  teardown errors are logged.
+- A run's timeout no longer aborts a `replace: true` start in flight.
+- A same-second restart allocates the next free session id instead of mixing
+  two runs' evidence; the prune ignores non-run directories under `sessions/`;
+  `clear()` releases the lock when `state.json` is missing; late summary or
+  replay never writes into a torn-down run.
+- Browser: response bodies are never read whole for binary or > 1 MiB
+  payloads; page listeners are removed on close; attach closes a tab it opened.
+- Desktop: a launch group whose leader exited is reaped; the literal `+` key;
+  `xdotool key --`; NaN `waitFor` timeouts; scroll lands on the scoped window.
+- Android: a failed `screencap` is no longer sent to vision as a frame; boot
+  survives a transient `device offline`; a failed managed boot (or wrapper
+  launcher) no longer orphans the emulator.
+- All error classes keep `{ cause }`.
+- `bin/setup`'s `ldd` / `sudo -n` probes are capped at 30s.
+- CI: `permissions: contents: read`; release workflow concurrency guard.
+
+### Dependencies
+
+- `ai` 7.0.183, `@modelcontextprotocol/sdk` 1.32.2, `playwright-core` 1.65.1 (Chromium 159), `zod` 4.6.7, Biome 2.6.9; `dummy/web` vite 8.4, stylelint 18.1.
+
 ## [1.10.0] - 2026-11-15
 
 ### Changed
