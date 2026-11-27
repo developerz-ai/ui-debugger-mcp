@@ -27,39 +27,53 @@ export interface ShutdownDeps {
   exit: (code: number) => void;
   /** Cap on the graceful wait; defaults to {@link SHUTDOWN_TIMEOUT_MS}. */
   timeoutMs?: number;
-  /** Sink for the "gave up waiting" line; defaults to `console.error`. */
+  /** Sink for the "gave up waiting" / "teardown failed" lines; defaults to `console.error`. */
   warn?: (line: string) => void;
 }
 
 /**
  * Build the shutdown handler: tear the run down, then exit with `code` — after
- * `timeoutMs` at the very latest. Fire-and-forget (signal handlers are sync), and
- * idempotent per invocation: whichever of the teardown and the timer lands first
- * exits, the other is a no-op.
+ * `timeoutMs` at the very latest. Fire-and-forget (signal handlers are sync).
+ *
+ * Single-flight: the FIRST invocation owns the teardown and its exit code; every
+ * later one is a no-op. A dying client closes stdin AND signals, so two triggers
+ * are the normal case — and `endActive` answers the second at once (the manager
+ * frees the slot before the close), which used to exit the process while the
+ * first teardown was still closing the browser and writing the verdict.
  */
 export function createShutdown(deps: ShutdownDeps): (code: number) => void {
   const timeoutMs = deps.timeoutMs ?? SHUTDOWN_TIMEOUT_MS;
   const warn = deps.warn ?? ((line: string) => console.error(line));
+  let started = false;
   return (code: number) => {
+    if (started) return;
+    started = true;
     let done = false;
-    const finish = (exitCode: number) => {
+    const finish = () => {
       if (done) return;
       done = true;
-      deps.exit(exitCode);
+      deps.exit(code);
     };
     const timer = setTimeout(() => {
       warn(
         `ui-debugger-mcp: graceful shutdown did not finish within ${timeoutMs}ms — exiting anyway. ` +
           'The debug run may not have closed its target cleanly.',
       );
-      finish(code);
+      finish();
     }, timeoutMs);
     deps
       .endActive()
-      .catch(() => undefined)
+      // Still exits — but a teardown that failed may have left its target up, and
+      // this process is about to be the last witness: say so before it goes.
+      .catch((error: unknown) => {
+        warn(
+          `ui-debugger-mcp: teardown failed during shutdown — ${error instanceof Error ? error.message : String(error)}. ` +
+            'The debug run may not have closed its target cleanly.',
+        );
+      })
       .finally(() => {
         clearTimeout(timer);
-        finish(code);
+        finish();
       });
   };
 }

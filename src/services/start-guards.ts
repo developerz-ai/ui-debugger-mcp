@@ -1,5 +1,5 @@
 /**
- * The two start-time refusals — the checks that run BEFORE a browser is
+ * The start-time refusals — the checks that run BEFORE a browser is
  * launched, so a run never starts on terms its caller cannot honour.
  *
  * Split out of `debug-service.ts` to keep that file under the 500-LOC cap. Both
@@ -8,7 +8,7 @@
  */
 
 import { CONFIG_FILENAME } from '../config/load.js';
-import { ConfigError, SessionBusyError } from '../errors.js';
+import { ConfigError, SessionBusyError, SessionSettledError } from '../errors.js';
 import type { StatePort } from '../session/state-file.js';
 
 /**
@@ -51,5 +51,18 @@ export async function assertNoForeignRun(state: StatePort, cwd: string): Promise
       `Read what it is doing with get_findings({session_id:'${foreign.sessionId}'}) — a run ` +
       'that has already settled is just waiting to be closed by its own client. To take the ' +
       "project over, run 'ui-debugger-mcp stop' in this directory, then start again.",
+  );
+}
+
+/**
+ * Stop a start that the shutdown path has cancelled (SIGTERM, a CLI `stop`, the
+ * MCP client dying). The caller tears down whatever it had already built.
+ */
+export function assertStartNotAborted(signal: AbortSignal, id: string): void {
+  if (!signal.aborted) return;
+  throw new SessionSettledError(
+    `Debug run '${id}' was torn down while it was still starting — this ui-debugger-mcp server ` +
+      'is shutting down (SIGTERM, `ui-debugger-mcp stop`, or the MCP client disconnected). ' +
+      'Nothing was left running; start again once the server is back.',
   );
 }

@@ -575,6 +575,182 @@ test('buildSession rejects a persona on a non-web target', async () => {
   ).rejects.toThrow(ConfigError);
 });
 
+/** A login page the fake never leaves: every control resolves, the URL stays put. */
+function stuckLoginAdapter(url: string, overrides: Partial<Adapter> = {}): Adapter {
+  const node = { role: 'textbox', name: 'x', bounds: { x: 0, y: 0, width: 1, height: 1 } };
+  return fakeAdapter({
+    find: async () => ({ ...node, enabled: true }),
+    tabs: async () => [{ index: 0, url, title: '', active: true }],
+    ...overrides,
+  });
+}
+
+test('a failed login never hands the persona password back to the start_debug caller', async () => {
+  // A form with no `method="post"` submits by GET: the credentials land in the URL
+  // of the page the login is "still on", and that URL is quoted in the AuthError —
+  // which is the tool result, so it reaches the caller's context past every log sink.
+  const stuck = 'http://localhost:3000/login?email=admin%40dev.local&password=hunter2';
+  const d = { ...authDeps(), createAdapter: async () => stuckLoginAdapter(stuck) };
+  const built = await buildSession(d, { id: 'auth-leak', target: 'web', goal: 'x', as: 'admin' });
+
+  const error = await built.open(300).catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(AuthError);
+  const message = (error as AuthError).message;
+  expect(message).toContain('still on http://localhost:3000/login');
+  expect(message).not.toContain('hunter2');
+  expect(message).not.toContain('admin%40dev.local');
+  expect(message).toContain('<redacted, 7 chars>');
+});
+
+test("the builder tells the login when the persona is the target's only one", async () => {
+  // An already-signed-in profile (the login page bounces) is accepted for a sole
+  // persona and refused once the target has a second one it could belong to.
+  const bounced = () =>
+    fakeAdapter({
+      tabs: async () => [
+        { index: 0, url: 'http://localhost:3000/dashboard', title: '', active: true },
+      ],
+    });
+  const sole = { ...authDeps(), createAdapter: async () => bounced() };
+  const built = await buildSession(sole, {
+    id: 'auth-sole',
+    target: 'web',
+    goal: 'x',
+    as: 'admin',
+  });
+  await expect(built.open(300)).resolves.toBeUndefined();
+
+  const admin = AUTH_TARGET.adapter === 'browser' ? AUTH_TARGET.auth?.admin : undefined;
+  if (!admin) throw new AdapterError('fixture lost its admin persona');
+  const two: Target = { ...AUTH_TARGET, auth: { admin, viewer: admin } };
+  const shared = {
+    ...authDeps(),
+    config: { ...CONFIG, targets: { ...CONFIG.targets, web: two } },
+    createAdapter: async () => bounced(),
+  };
+  const other = await buildSession(shared, {
+    id: 'auth-two',
+    target: 'web',
+    goal: 'x',
+    as: 'admin',
+  });
+  await expect(other.open(300)).rejects.toThrow(/other personas/);
+});
+
+test('a redacted login failure keeps the class and name of the error it replaces', async () => {
+  // An adapter error that quotes what it typed: the secret goes, the error stays an
+  // AdapterError — and the original is never chained as `cause` (it holds the secret).
+  const adapter = stuckLoginAdapter('http://localhost:3000/login', {
+    type: async (_target, text) => {
+      if (text !== '') throw new AdapterError(`type: timed out typing "${text}"`);
+    },
+  });
+  const d = { ...authDeps(), createAdapter: async () => adapter };
+  const built = await buildSession(d, { id: 'auth-class', target: 'web', goal: 'x', as: 'admin' });
+
+  const error = await built.open(300).catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(AdapterError);
+  expect((error as Error).name).toBe('AdapterError');
+  expect((error as Error).message).toContain('timed out typing "<redacted, 15 chars>"');
+  expect((error as Error).cause).toBeUndefined();
+});
+
+test('the login spends what the first navigation LEFT of the budget, not the budget again', async () => {
+  const budgets: Array<number | undefined> = [];
+  const adapter = stuckLoginAdapter('http://localhost:3000/login', {
+    open: async (_target, timeoutMs) => {
+      budgets.push(timeoutMs);
+      if (budgets.length === 1) await new Promise((resolve) => setTimeout(resolve, 150));
+    },
+  });
+  const d = { ...authDeps(), createAdapter: async () => adapter };
+  const built = await buildSession(d, { id: 'auth-budget', target: 'web', goal: 'x', as: 'admin' });
+
+  await expect(built.open(300)).rejects.toThrow(AuthError);
+  expect(budgets[0]).toBe(300);
+  // 150ms went on the first navigation; the login page open gets the rest.
+  expect(budgets[1]).toBeLessThanOrEqual(155);
+});
+
+test('a persona value in an act result or a vision description never reaches the driver', async () => {
+  // Both come back as tool results the SDK re-sends on every later step: the tab
+  // list `act` attaches (a GET-submitted form leaves the password in a URL) and
+  // the vision guy's prose about a screen that SHOWS the credential.
+  const secret = 'hunter2';
+  const prompts: string[] = [];
+  const reply = {
+    finishReason: { unified: 'tool-calls' as const, raw: 'tool-calls' },
+    usage: {
+      inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+      outputTokens: { total: 1, text: 1, reasoning: undefined },
+    },
+    warnings: [],
+  };
+  const turns = [
+    { toolName: 'act', input: { action: 'click', target: '#go' } },
+    { toolName: 'look', input: {} },
+    { toolName: 'report', input: { status: 'passed', summary: 'ok' } },
+  ];
+  const driver = new MockLanguageModelV3({
+    doGenerate: async ({ prompt }) => {
+      prompts.push(JSON.stringify(prompt));
+      const turn = turns[Math.min(prompts.length, turns.length) - 1];
+      return {
+        ...reply,
+        content: [
+          {
+            type: 'tool-call' as const,
+            toolCallId: `call-${prompts.length}`,
+            toolName: turn?.toolName ?? 'report',
+            input: JSON.stringify(turn?.input ?? {}),
+          },
+        ],
+      };
+    },
+  });
+  const vision = new MockLanguageModelV3({
+    doGenerate: async () => ({
+      ...reply,
+      finishReason: { unified: 'stop' as const, raw: 'stop' },
+      content: [
+        {
+          type: 'text' as const,
+          text: `{"description":"a field showing ${secret} in clear text","issues":[]}`,
+        },
+      ],
+    }),
+  });
+  const tab = { title: '', active: true };
+  const node = { role: 'button', name: 'Go', bounds: { x: 0, y: 0, width: 1, height: 1 } };
+  const adapter = fakeAdapter({
+    find: async () => ({ ...node, enabled: true }),
+    screenshot: async () => new Uint8Array([137, 80, 78, 71]),
+    tabs: async () => [
+      { ...tab, index: 0, url: `http://localhost:3000/login?pw=${secret}` },
+      { ...tab, index: 1, url: 'http://localhost:3000/help', active: false },
+    ],
+  });
+  const d = { ...authDeps(), createAdapter: async () => adapter };
+  d.models = { ...d.models, driver, vision, selfLook: false };
+  const built = await buildSession(d, { id: 'belt-redact', target: 'web', goal: 'x', as: 'admin' });
+
+  // Not awaited to the end: the post-verdict summary/replay steps are not under
+  // test — `close()` aborts them once the driver has made its three calls.
+  void built.session.start(built.run);
+  const deadline = Date.now() + 3_000;
+  while (prompts.length < 3 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  await built.session.close();
+
+  const fed = prompts.join('\n');
+  expect(prompts.length).toBeGreaterThanOrEqual(3);
+  expect(fed).toContain('/login?pw='); // the act tab list did reach the driver…
+  expect(fed).toContain('a field showing'); // …and so did the vision description
+  expect(fed).not.toContain(secret);
+  expect(fed).toContain('<redacted, 7 chars>');
+});
+
 for (const selected of [true, false]) {
   test(`findings from a real failing act ${selected ? 'redact the selected' : 'preserve the unselected'} persona`, async () => {
     const secret = 'fixture"pass\\word with @';

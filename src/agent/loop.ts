@@ -23,10 +23,11 @@
  * aborted run rejects loud (wired to `end_session`), never a silent half-finish.
  */
 
-import { type LanguageModel, type ModelMessage, stepCountIs, type Tool, ToolLoopAgent } from 'ai';
+import { type LanguageModel, type ModelMessage, type Tool, ToolLoopAgent } from 'ai';
 import type { Findings } from '../findings/schema.js';
 import { EMPTY_EVIDENCE } from './belt/report.js';
 import type { ActTrail, TrailEvidence } from './belt/trail.js';
+import { pruneStaleFrames } from './loop-frames.js';
 
 /**
  * Safety cap on driver steps before the loop force-stops (paired with the
@@ -44,6 +45,14 @@ export const DEFAULT_MAX_STEPS = 60;
 /** Kickoff turn — the story lives in `instructions`; this nudges the driver to start the loop. */
 export const KICKOFF_PROMPT =
   'Begin. Work toward the goal with observe/act/look, then call report exactly once with your verdict.';
+
+/**
+ * Re-entry turn after a step with NO tool call. The SDK ends a tool loop on any
+ * such step, so one line of prose ("I will now click Save.") used to end the
+ * whole run with no verdict — {@link runDebugLoop} re-enters with this instead.
+ */
+export const NO_TOOL_CALL_NUDGE =
+  'You replied without calling a tool, which does nothing. Continue with observe/act/look, or call report now if you are done.';
 
 /** The driver's inner belt — the four fat tools the loop drives (see `idea/mcp-tools.md`). */
 export type BeltTools = {
@@ -145,130 +154,12 @@ export function stripInjectedStepMessages(messages: ModelMessage[]): ModelMessag
   return messages.filter((message) => !isInjectedStepMessage(message));
 }
 
-/** What a pruned frame collapses to — tells the driver how to get a fresh one. */
-export const STALE_FRAME_NOTE = '[stale frame removed — call look again for a fresh screenshot]';
-
-/**
- * A tool-result part that may carry a self-look frame, narrowed to what the
- * prune reads: a `look` tool-result whose `content` output holds the frame.
- */
-type FramePart = {
-  type?: string;
-  toolName?: string;
-  output?: { type?: string; value?: unknown };
-};
-
-/** Where one live self-look frame sits in the transcript. */
-type FrameSite = {
-  /** Index of the message holding the frame. */
-  messageIndex: number;
-  /** Index of the tool-result part inside that message's content. */
-  partIndex: number;
-  /** Index of the `file-data` value inside that part's output value array. */
-  valueIndex: number;
-};
-
-/** The content parts of a message as a plain array (empty for string content). */
-function partsOf(message: ModelMessage): unknown[] {
-  return Array.isArray(message.content) ? (message.content as unknown[]) : [];
-}
-
-/**
- * Every self-look frame in the transcript, in transcript order (message →
- * content part → output value).
- *
- * A frame is ONE `file-data` value part of a look tool-result. AI SDK 6 puts ALL
- * of a step's tool results into ONE `tool`-role message, so a step that called
- * `look` twice carries TWO frames inside a SINGLE message — counting messages
- * instead of frames let both survive and stacked the driver's images.
- */
-function findFrames(messages: ModelMessage[]): FrameSite[] {
-  const frames: FrameSite[] = [];
-  messages.forEach((message, messageIndex) => {
-    partsOf(message).forEach((part, partIndex) => {
-      // A content array may hold a null/undefined part — skip it instead of
-      // dereferencing it and killing the whole run inside `prepareStep`.
-      if (typeof part !== 'object' || part === null) return;
-      const p = part as FramePart;
-      if (p.type !== 'tool-result' || p.toolName !== 'look') return;
-      const output = p.output;
-      if (output?.type !== 'content') return;
-      const values = output.value;
-      if (!Array.isArray(values)) return;
-      (values as unknown[]).forEach((value, valueIndex) => {
-        if ((value as { type?: string } | null | undefined)?.type === 'file-data') {
-          frames.push({ messageIndex, partIndex, valueIndex });
-        }
-      });
-    });
-  });
-  return frames;
-}
-
-/** Collapse the stale frames of ONE tool-result part to the stale-frame note. */
-function collapseStaleFrames(part: unknown, staleValues: ReadonlySet<number>): unknown {
-  const p = part as FramePart;
-  const values = (p.output?.value ?? []) as unknown[];
-  return {
-    ...p,
-    output: {
-      ...p.output,
-      value: values.map((value, valueIndex) =>
-        staleValues.has(valueIndex) ? { type: 'text' as const, text: STALE_FRAME_NOTE } : value,
-      ),
-    },
-  };
-}
-
-/**
- * Keep only the NEWEST self-look frame in the transcript. The SDK re-sends every
- * tool result on every step, so each `look` image would otherwise ride along for
- * the rest of the run — N looks × M steps of image tokens. Rebuilt per step in
- * `prepareStep`, over the stripped chain (see {@link stripInjectedStepMessages}).
- *
- * Counts FRAMES, not messages: AI SDK 6 collects ALL of a step's tool results
- * into ONE `tool`-role message, so a step that looked twice holds two frames in
- * a single message. The newest frame (last in transcript order) stays live and
- * every older one collapses to {@link STALE_FRAME_NOTE}; the rest of each
- * tool-result (its own text, a sibling `act` result) is left exactly as it was.
- * Returns the SAME array when the transcript holds at most ONE frame, keeping
- * the no-change fast path.
- */
-export function pruneStaleFrames(messages: ModelMessage[]): ModelMessage[] {
-  const frames = findFrames(messages);
-  if (frames.length <= 1) return messages;
-  // Every frame but the LAST is stale — group them by the part they live in.
-  const staleByMessage = new Map<number, Map<number, Set<number>>>();
-  for (const frame of frames.slice(0, -1)) {
-    let parts = staleByMessage.get(frame.messageIndex);
-    if (!parts) {
-      parts = new Map<number, Set<number>>();
-      staleByMessage.set(frame.messageIndex, parts);
-    }
-    let values = parts.get(frame.partIndex);
-    if (!values) {
-      values = new Set<number>();
-      parts.set(frame.partIndex, values);
-    }
-    values.add(frame.valueIndex);
-  }
-  return messages.map((message, messageIndex) => {
-    const staleParts = staleByMessage.get(messageIndex);
-    if (!staleParts) return message;
-    const content = partsOf(message).map((part, partIndex) => {
-      const staleValues = staleParts.get(partIndex);
-      return staleValues ? collapseStaleFrames(part, staleValues) : part;
-    });
-    return { ...message, content } as unknown as ModelMessage;
-  });
-}
-
 /** Steps left at or below which the driver is nudged to wrap up and `report`. */
 export const BUDGET_WARN = 6;
 
 /**
  * A step-budget reminder folded into the turn as the run nears its cap — so the
- * driver converges on `report` instead of churning to the hard `stepCountIs` stop
+ * driver converges on `report` instead of churning to the hard step-cap stop
  * (which leaves an empty, verdict-less `failed` run). `null` while there is ample
  * budget. `stepNumber` is the 0-based index of the step about to run.
  */
@@ -420,6 +311,9 @@ function withUndeliveredInbox(report: Tool, inbox: LoopInbox): Tool {
  * folds in mid-run messages; after each step `onStepFinish` flushes the running
  * trail (skipping the `report` step, which writes the final verdict itself).
  */
+/** Run-long step budget of a built agent — shared by every `generate` re-entry. */
+const stepsLeft = new WeakMap<ToolLoopAgent<never, BeltTools>, () => number>();
+
 export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<never, BeltTools> {
   const {
     model,
@@ -432,6 +326,11 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
     trail,
   } = options;
   let stepIndex = 0;
+  // Steps STARTED, run-long. The SDK's own `stepNumber` restarts at 0 on every
+  // `generate`, and `runDebugLoop` re-enters after a no-tool-call step — the cap
+  // and the budget nudge must count across re-entries, or a stalling driver
+  // would get a fresh budget each time.
+  let started = 0;
   // Run-long list of mid-run caller instructions: drained from the inbox once,
   // re-folded into EVERY step's prompt (AI SDK 7 persists the previous override;
   // `stripInjectedStepMessages` drops it before the re-fold).
@@ -439,7 +338,7 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
   // What the running flush has already persisted. The trail's arrays only grow,
   // so growth past these lengths is exactly "this step surfaced something new".
   let flushed: TrailEvidence = EMPTY_EVIDENCE;
-  return new ToolLoopAgent<never, BeltTools>({
+  const agent = new ToolLoopAgent<never, BeltTools>({
     model,
     tools: { ...tools, report: withUndeliveredInbox(tools.report, inbox) },
     instructions,
@@ -451,10 +350,12 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
     // `report` actually ran and wrote the verdict; anything else keeps the loop
     // going, and the driver gets the tool-error and retries.
     stopWhen: [
-      stepCountIs(maxSteps),
+      () => started >= maxSteps,
       ({ steps }) => steps.at(-1)?.toolResults.some((r) => r.toolName === 'report') ?? false,
     ],
-    prepareStep: ({ messages, stepNumber }) => {
+    prepareStep: ({ messages }) => {
+      const stepNumber = started;
+      started += 1;
       // AI SDK 7 persists the previous step's override into `messages` — strip
       // its fold/nudge so both rebuild fresh: the fold never duplicates, the
       // nudge reflects THIS step's remaining budget.
@@ -486,6 +387,8 @@ export function createDebugAgent(options: DebugAgentOptions): ToolLoopAgent<neve
       }
     },
   });
+  stepsLeft.set(agent, () => maxSteps - started);
+  return agent;
 }
 
 /** How to run a built loop to its verdict. */
@@ -502,8 +405,20 @@ export interface RunDebugLoopOptions {
  * Run the loop to its verdict. Resolves with the agent's generate result once the
  * driver reports (or the step cap trips); rejects if aborted (fail loud — the
  * session decides what an aborted run means).
+ *
+ * A step with no tool call ends the SDK's loop, so while step budget remains the
+ * run re-enters with the transcript so far plus {@link NO_TOOL_CALL_NUDGE}. Each
+ * re-entry spends a step of the SAME run-long budget, so it can never spin.
  */
-export function runDebugLoop(options: RunDebugLoopOptions) {
+export async function runDebugLoop(options: RunDebugLoopOptions) {
   const { agent, abortSignal, prompt = KICKOFF_PROMPT } = options;
-  return agent.generate({ prompt, ...(abortSignal ? { abortSignal } : {}) });
+  const signal = abortSignal ? { abortSignal } : {};
+  const remaining = stepsLeft.get(agent) ?? (() => 0);
+  const messages: ModelMessage[] = [{ role: 'user', content: prompt }];
+  let result = await agent.generate({ messages, ...signal });
+  while (result.steps.at(-1)?.toolCalls.length === 0 && remaining() > 0) {
+    messages.push(...result.responseMessages, { role: 'user', content: NO_TOOL_CALL_NUDGE });
+    result = await agent.generate({ messages, ...signal });
+  }
+  return result;
 }

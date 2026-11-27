@@ -11,6 +11,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
+import { McpServerError } from '../errors.js';
 import { DebugService } from '../services/debug-service.js';
 import { SessionManager } from '../session/manager.js';
 import type { Session } from '../session/session.js';
@@ -79,6 +80,30 @@ describe('startStdioServer close hook', () => {
     stdin.end();
     await settle();
     expect(calls).toBe(1);
+  });
+
+  test('a transport that fails to connect leaves no listener behind on stdin', async () => {
+    // The EOF watchers are wired BEFORE connect; a connect that throws used to
+    // leave them on the caller's stream, armed to fire the hook for a dead boot.
+    const stdin = new PassThrough();
+    const realOn = stdin.on.bind(stdin);
+    stdin.on = ((event: string, listener: (...args: unknown[]) => void) => {
+      if (event === 'data') throw new McpServerError('stdin refused the transport');
+      return realOn(event, listener);
+    }) as typeof stdin.on;
+    const before = { end: stdin.listenerCount('end'), close: stdin.listenerCount('close') };
+    let hooks = 0;
+
+    await expect(
+      startStdioServer([], { stdin, stdout: sink(), onClose: () => hooks++ }),
+    ).rejects.toThrow('stdin refused the transport');
+
+    expect(stdin.listenerCount('end')).toBe(before.end);
+    expect(stdin.listenerCount('close')).toBe(before.close);
+    stdin.end();
+    stdin.destroy();
+    await settle();
+    expect(hooks).toBe(0);
   });
 
   test('EOF closes the server even with no hook wired', async () => {

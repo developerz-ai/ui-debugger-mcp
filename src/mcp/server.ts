@@ -84,6 +84,14 @@ export async function startStdioServer(
   stdin.once('end', clientGone);
   stdin.once('close', clientGone);
 
-  await server.connect(transport);
+  try {
+    await server.connect(transport);
+  } catch (error) {
+    // No server came up, so nothing owns these: left attached they would fire the
+    // close hook into a boot that already failed.
+    stdin.off('end', clientGone);
+    stdin.off('close', clientGone);
+    throw error;
+  }
   return server;
 }

@@ -76,7 +76,9 @@ export function providerApiKeyGuidance(): string {
 /**
  * Resolve the provider endpoint the same way `createOpenRouterProvider` does —
  * apiKey: provided value → OPENAI_API_KEY → OPENROUTER_API_KEY;
- * baseURL: provided value → OPENAI_BASE_URL → DEFAULT_BASE_URL.
+ * baseURL: provided value → DEFAULT_BASE_URL. `OPENAI_BASE_URL` is NOT read
+ * here: the config loader (`src/config/load.ts`) is its one, validated source
+ * and boot passes the result in.
  * Exported so capability probes hit the exact endpoint the models run against.
  * Throws ProviderError if no API key is found or if it's empty.
  */
@@ -88,7 +90,7 @@ export function resolveProviderConfig(options: ProviderOptions = {}): {
   if (!apiKey) {
     throw new ProviderError(providerApiKeyGuidance());
   }
-  const baseURL = options.baseURL || process.env.OPENAI_BASE_URL || DEFAULT_BASE_URL;
+  const baseURL = options.baseURL || DEFAULT_BASE_URL;
   return { apiKey, baseURL };
 }
 

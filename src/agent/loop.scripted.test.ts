@@ -19,6 +19,7 @@ import {
   type BeltTools,
   createDebugAgent,
   type LoopInbox,
+  NO_TOOL_CALL_NUDGE,
   type ProgressWriter,
   runDebugLoop,
 } from './loop.js';
@@ -528,3 +529,75 @@ test('crash/abort: findings.json keeps look issues, console bugs and a failed ac
 });
 
 // Mid-run instruction folding + abort-signal propagation live in `loop.inbox.test.ts`.
+
+/** A step of prose with NO tool call — the shape that ends the SDK's tool loop. */
+function textResponse(text: string) {
+  return {
+    ...toolCallsResponse(),
+    content: [{ type: 'text' as const, text }],
+    finishReason: { unified: 'stop' as const, raw: 'stop' },
+  };
+}
+
+test('a prose-only turn does not end the run — the driver is nudged and the verdict still lands', async () => {
+  const { written, writer } = findingsTracker();
+  const trail = createActTrail();
+  const prompts: string[] = [];
+  let callCount = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async ({ prompt }) => {
+      callCount++;
+      prompts.push(JSON.stringify(prompt));
+      if (callCount === 1)
+        return toolCallResponse('c1', 'act', { action: 'click', target: 'Save' });
+      if (callCount === 2) return textResponse('I will now check the result.');
+      return toolCallResponse('c3', 'report', { status: 'passed', summary: 'Saved.' });
+    },
+  });
+  const agent = createDebugAgent({
+    model,
+    tools: realBelt(writer, trail),
+    instructions: 'debug this app',
+    inbox: fakeInbox(),
+    progress: writer,
+    trail,
+    maxSteps: 10,
+  });
+
+  await runDebugLoop({ agent });
+
+  expect(callCount).toBe(3);
+  expect(written.at(-1)?.status).toBe('passed');
+  // The re-entry keeps the whole transcript: the act, its result, the prose, the nudge.
+  expect(prompts[2]).toContain('did click on Save');
+  expect(prompts[2]).toContain('I will now check the result.');
+  expect(prompts[2]).toContain(NO_TOOL_CALL_NUDGE);
+});
+
+test('a driver that only ever talks is bounded by the run-long step cap, never a fresh budget per re-entry', async () => {
+  const { written, writer } = findingsTracker();
+  const prompts: string[] = [];
+  let callCount = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async ({ prompt }) => {
+      callCount++;
+      prompts.push(JSON.stringify(prompt));
+      return textResponse('Thinking about it.');
+    },
+  });
+  const agent = createDebugAgent({
+    model,
+    tools: realBelt(writer),
+    instructions: 'debug this app',
+    inbox: fakeInbox(),
+    progress: writer,
+    maxSteps: 4,
+  });
+
+  await runDebugLoop({ agent });
+
+  expect(callCount).toBe(4);
+  expect(written).toEqual([]);
+  // The budget nudge counts across re-entries: the last turn is told it is the final step.
+  expect(prompts[3]).toContain('This is your final step');
+});

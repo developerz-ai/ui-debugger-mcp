@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ReplayError } from '../errors.js';
@@ -235,4 +235,26 @@ test('createReplayStep skips with a note and logs loud when ffmpeg is absent', a
   expect(logs).toHaveLength(1);
   expect(logs[0]).toContain('replay:'); // surfaced loud in agent.log
   expect(logs[0]).toContain('ffmpeg not found');
+});
+
+test('a failed encode removes the truncated clip it left behind', async () => {
+  // A stand-in ffmpeg that writes its output (the last arg) and then dies — what
+  // a killed or crashing encode leaves on disk.
+  const dir = mkdtempSync(join(tmpdir(), 'ui-dbg-replay-'));
+  try {
+    const bin = join(dir, 'ffmpeg');
+    writeFileSync(bin, '#!/bin/sh\nfor last; do :; done\necho partial > "$last"\nexit 1\n');
+    chmodSync(bin, 0o755);
+    const output = join(dir, 'replay.mp4');
+    const step = createReplayStep({
+      screenshots: { listScreenshots: async () => [FRAME] },
+      output,
+      ffmpegBin: bin,
+    });
+
+    await expect(step()).rejects.toThrow(ReplayError);
+    expect(existsSync(output)).toBe(false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

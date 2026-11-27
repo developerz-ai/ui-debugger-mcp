@@ -11,7 +11,7 @@
  */
 
 import { expect, test } from 'bun:test';
-import { SessionNotFoundError } from '../errors.js';
+import { SessionNotFoundError, SessionSettledError } from '../errors.js';
 import {
   CWD,
   fakeBuilder,
@@ -19,6 +19,7 @@ import {
   manager,
   NOW,
   partialRun,
+  spyState,
   tick,
   useTempWorkspace,
 } from './debug-service.test-helpers.js';
@@ -132,7 +133,9 @@ test('a timed-out run stays readable: get_findings serves its terminal snapshot'
   expect(findings.bugs).toHaveLength(1);
   expect(await svc.getFindings({ session_id, fields: ['status'] })).toEqual({ status: 'failed' });
   // Read-only: the retained snapshot never takes new work into a dead run.
-  expect(() => svc.send({ session_id, message: 'keep going' })).toThrow(SessionNotFoundError);
+  // It says SETTLED (and where the results are), not "no such session": the id is valid.
+  expect(() => svc.send({ session_id, message: 'keep going' })).toThrow(SessionSettledError);
+  expect(() => svc.send({ session_id, message: 'keep going' })).toThrow(/get_findings/);
 });
 
 test('a retained snapshot never blocks the next run, and the new run supersedes it', async () => {
@@ -151,7 +154,7 @@ test('a retained snapshot never blocks the next run, and the new run supersedes 
   expect((await svc.getFindings({ session_id: second.session_id })).status).toBe('running');
 });
 
-test('end_session forgets a timed-out run (acks once, then the id is unknown)', async () => {
+test('end_session forgets a timed-out run (acks once, then acks the repeat as already ended)', async () => {
   const { build, log } = fakeBuilder({ run: partialRun });
   const svc = makeService(build, { defaultTimeoutMs: 20 });
   const { session_id } = await svc.start({ target: 'web', goal: 'x' });
@@ -168,7 +171,13 @@ test('end_session forgets a timed-out run (acks once, then the id is unknown)', 
   expect(await svc.end({ session_id })).toEqual({ ok: true, session_id });
   expect(log.adapters[0]?.closeCalls).toBe(1); // already closed by the auto-end; not re-closed
   await expect(svc.getFindings({ session_id })).rejects.toThrow(SessionNotFoundError);
-  await expect(svc.end({ session_id })).rejects.toThrow(SessionNotFoundError);
+  // Idempotent: the repeat succeeds and says the run was already ended, with its status.
+  expect(await svc.end({ session_id })).toEqual({
+    ok: true,
+    session_id,
+    already_ended: { status: 'failed' },
+  });
+  expect(log.adapters[0]?.closeCalls).toBe(1);
 });
 
 test('an explicitly ended run is forgotten immediately (end_session is the forget)', async () => {
@@ -199,4 +208,33 @@ test('describe still names a run that auto-ended, so its findings stay reachable
   // …and the explicit forget clears it, exactly as it clears the snapshot.
   await svc.end({ session_id });
   expect(svc.describe({})).not.toHaveProperty('session');
+});
+
+test("a run's timeout ends that run only — it never aborts a replace start in flight", async () => {
+  // The takeover's first await (the foreign-run read) is held open across the
+  // old run's timeout. The timer used to run the SHUTDOWN path, which aborts any
+  // start in flight: the takeover failed with "this server is shutting down".
+  const gate = Promise.withResolvers<void>();
+  let reads = 0;
+  const spy = spyState();
+  const state = {
+    ...spy.state,
+    foreignRun: async () => {
+      if (reads++ === 1) await gate.promise;
+      return null;
+    },
+  };
+  const { build, log } = fakeBuilder();
+  const service = makeService(build, { state });
+  const first = await service.start({ target: 'web', goal: 'old', timeoutMs: 15 });
+
+  const takeover = service.start({ target: 'web', goal: 'new', replace: true });
+  await tick(50); // the old run's cap fires while the takeover is parked
+  expect(log.adapters[0]?.closeCalls).toBe(1);
+  gate.resolve();
+
+  const second = await takeover;
+  expect(second.session_id).not.toBe(first.session_id);
+  expect(manager.get(CWD).id).toBe(second.session_id);
+  await service.end(second);
 });

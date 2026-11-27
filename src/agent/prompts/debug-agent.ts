@@ -59,7 +59,7 @@ unconfirmed findings.`,
 const SELF_LOOK_MODE: LookMode = {
   eyes: 'You are FAST and MULTIMODAL: `look` attaches the current frame to the tool result, and YOU judge it with your own eyes.',
   belt: '- `look` — capture the current screen and judge it yourself; the frame comes back attached.',
-  // `pruneStaleFrames` (agent/loop.ts) drops older frames from the re-sent history.
+  // `pruneStaleFrames` (agent/loop-frames.ts) drops older frames from the re-sent history.
   cost: 'Only the newest frame stays in your context, so judge each one as it arrives.',
   extraRule: '',
   // `createSelfLookTool` (look.ts) records NOTHING on the trail — it hands the
@@ -127,7 +127,8 @@ target. Re-typing a used field yields \`old textnew text\` — YOUR bug, not the
 Replace instead — pass \`clear: true\`:
 \`act({action:"type", target:"...", text:"...", clear:true})\`
 Use \`clear\` whenever the field may be non-empty — a retry, a second item through
-the same form, any field you have not just read as empty.
+the same form, any field you have not just read as empty. To EMPTY a field:
+\`text:"", clear:true\`.
 
 ## Budget — spending it all still costs the verdict
 

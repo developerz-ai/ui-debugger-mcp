@@ -1,10 +1,16 @@
 import { expect, test } from 'bun:test';
-import type { ModelMessage } from 'ai';
-import { pruneStaleFrames, STALE_FRAME_NOTE } from './loop.js';
+import { type ModelMessage, tool } from 'ai';
+import { MockLanguageModelV3 } from 'ai/test';
+import { z } from 'zod';
+import type { Adapter } from '../adapters/contract.js';
+import { createSelfLookTool } from './belt/look.js';
+import { createReportTool } from './belt/report.js';
+import { createDebugAgent, runDebugLoop } from './loop.js';
+import { pruneStaleFrames, STALE_FRAME_NOTE } from './loop-frames.js';
 
 // --- pruneStaleFrames --------------------------------------------------------
 
-/** One self-look tool-result: a text part plus the frame itself (`file-data`). */
+/** One self-look tool-result: a text part plus the frame itself (`file`). */
 const lookResult = (id: string) => ({
   type: 'tool-result',
   toolCallId: id,
@@ -13,7 +19,7 @@ const lookResult = (id: string) => ({
     type: 'content',
     value: [
       { type: 'text', text: `screenshot saved: ${id}.png` },
-      { type: 'file-data', data: `FRAME-${id}`, mediaType: 'image/png' },
+      { type: 'file', data: { type: 'data', data: `FRAME-${id}` }, mediaType: 'image/png' },
     ],
   },
 });
@@ -27,7 +33,12 @@ function lookFrameMessage(...ids: string[]): ModelMessage {
 }
 
 /** One output value of a look tool-result — the text part or the frame itself. */
-type FrameValue = { type: string; text?: string; data?: string; mediaType?: string };
+type FrameValue = {
+  type: string;
+  text?: string;
+  data?: { type: string; data: string };
+  mediaType?: string;
+};
 
 /** The content parts of a message (empty for string content). */
 const partsOf = (message: ModelMessage) =>
@@ -44,9 +55,9 @@ const valuesOf = (part: unknown) => {
   return Array.isArray(value) ? (value as FrameValue[]) : [];
 };
 
-/** The frames still live in a message (every `file-data` output value). */
+/** The frames still live in a message (every `file` output value). */
 const liveFrames = (message: ModelMessage) =>
-  partsOf(message).flatMap((part) => valuesOf(part).filter((v) => v.type === 'file-data'));
+  partsOf(message).flatMap((part) => valuesOf(part).filter((v) => v.type === 'file'));
 
 test('pruneStaleFrames keeps only the newest look frame; older ones collapse to a note', () => {
   const user: ModelMessage = { role: 'user', content: 'go' };
@@ -62,7 +73,7 @@ test('pruneStaleFrames keeps only the newest look frame; older ones collapse to 
   // newest frame untouched
   expect(valuesOf(partsOf(pruned[2] as ModelMessage)[0]).map((v) => v.type)).toEqual([
     'text',
-    'file-data',
+    'file',
   ]);
   // untouched messages pass through by reference
   expect(pruned[0]).toBe(user);
@@ -78,8 +89,8 @@ test('pruneStaleFrames collapses the older frame when ONE message holds two look
   expect(valuesOf(parts[0]).map((v) => v.type)).toEqual(['text', 'text']);
   expect(valuesOf(parts[0])[1]?.text).toBe(STALE_FRAME_NOTE);
   // the newer result keeps its frame
-  expect(valuesOf(parts[1]).map((v) => v.type)).toEqual(['text', 'file-data']);
-  expect(valuesOf(parts[1])[1]?.data).toBe('FRAME-b');
+  expect(valuesOf(parts[1]).map((v) => v.type)).toEqual(['text', 'file']);
+  expect(valuesOf(parts[1])[1]?.data?.data).toBe('FRAME-b');
 });
 
 /** One look tool-result whose output value array holds TWO frames. */
@@ -91,26 +102,30 @@ const twoFrameLookResult = {
     type: 'content',
     value: [
       { type: 'text', text: 'screenshot saved: a.png' },
-      { type: 'file-data', data: 'FRAME-a-old', mediaType: 'image/png' },
-      { type: 'file-data', data: 'FRAME-a-new', mediaType: 'image/png' },
+      { type: 'file', data: { type: 'data', data: 'FRAME-a-old' }, mediaType: 'image/png' },
+      { type: 'file', data: { type: 'data', data: 'FRAME-a-new' }, mediaType: 'image/png' },
     ],
   },
 };
 
 test('pruneStaleFrames collapses the older frame when ONE look result holds two frames', () => {
   // Per-VALUE granularity: a single tool-result's output value array can carry
-  // several `file-data` values — only the older one may collapse to the note,
+  // several `file` values — only the older one may collapse to the note,
   // the newer must stay live. A per-tool-result collapse would take both.
   const pruned = pruneStaleFrames([
     { role: 'tool', content: [twoFrameLookResult] } as unknown as ModelMessage,
   ]);
 
   const values = valuesOf(partsOf(pruned[0] as ModelMessage)[0]);
-  expect(values.map((v) => v.type)).toEqual(['text', 'text', 'file-data']);
+  expect(values.map((v) => v.type)).toEqual(['text', 'text', 'file']);
   // the older frame collapses to the stale note
   expect(values[1]?.text).toBe(STALE_FRAME_NOTE);
   // the newer frame stays a live image
-  expect(values[2]).toEqual({ type: 'file-data', data: 'FRAME-a-new', mediaType: 'image/png' });
+  expect(values[2]).toEqual({
+    type: 'file',
+    data: { type: 'data', data: 'FRAME-a-new' },
+    mediaType: 'image/png',
+  });
   // the look result's own text part is untouched
   expect(values[0]).toEqual({ type: 'text', text: 'screenshot saved: a.png' });
 });
@@ -124,7 +139,7 @@ test('pruneStaleFrames leaves exactly ONE live frame across the whole transcript
   const live = pruned.flatMap((message) => liveFrames(message));
   expect(live).toHaveLength(1);
   // the survivor is the NEWEST frame
-  expect(live[0]?.data).toBe('FRAME-c');
+  expect(live[0]?.data?.data).toBe('FRAME-c');
   // untouched messages pass through by reference
   expect(pruned[0]).toBe(user);
 });
@@ -155,8 +170,8 @@ test('pruneStaleFrames leaves the look text and a sibling act result untouched',
   // the newer look result keeps its frame
   expect(valuesOf(parts[2])[0]).toEqual({ type: 'text', text: 'screenshot saved: b.png' });
   expect(valuesOf(parts[2])[1]).toEqual({
-    type: 'file-data',
-    data: 'FRAME-b',
+    type: 'file',
+    data: { type: 'data', data: 'FRAME-b' },
     mediaType: 'image/png',
   });
 });
@@ -190,4 +205,58 @@ test('pruneStaleFrames ignores non-look tool results and non-content outputs', (
   const messages = [actResult, lookFrameMessage('a'), lookFrameMessage('b')];
   const pruned = pruneStaleFrames(messages);
   expect(pruned[0]).toBe(actResult);
+});
+
+// --- end to end: the REAL self-look tool through the REAL loop ---------------
+
+test('two self-looks through the loop: the provider is sent ONE live frame, the older collapsed', async () => {
+  const usage = {
+    inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+    outputTokens: { total: 1, text: 1, reasoning: undefined },
+  };
+  const call = (id: string, toolName: string, args: unknown) => ({
+    content: [
+      { type: 'tool-call' as const, toolCallId: id, toolName, input: JSON.stringify(args) },
+    ],
+    finishReason: { unified: 'tool-calls' as const, raw: 'tool_calls' },
+    usage,
+    warnings: [] as [],
+  });
+  const prompts: string[] = [];
+  let calls = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async ({ prompt }) => {
+      prompts.push(JSON.stringify(prompt));
+      calls += 1;
+      if (calls <= 2) return call(`c${calls}`, 'look', { question: `q${calls}` });
+      return call('c3', 'report', { status: 'passed' });
+    },
+  });
+  let shot = 0;
+  const adapter = {
+    screenshot: async () => new TextEncoder().encode(`FRAME-${++shot}`),
+  } as unknown as Adapter;
+  const recorder = { saveScreenshot: async (label: string) => `screenshots/${label}.png` };
+  const writer = { writeFindings: async () => 'findings.json' };
+  const stub = tool({ inputSchema: z.object({}), execute: async () => 'ok' });
+  const agent = createDebugAgent({
+    model,
+    tools: {
+      observe: stub,
+      act: stub,
+      look: createSelfLookTool(adapter, recorder),
+      report: createReportTool(writer),
+    },
+    instructions: 'debug',
+    inbox: { drain: () => [] },
+    progress: writer,
+  });
+
+  await runDebugLoop({ agent });
+
+  const frame = (n: number) => Buffer.from(`FRAME-${n}`).toString('base64');
+  // Step 3's prompt holds both look results — only the newest frame is still an image.
+  expect(prompts[2]).toContain(frame(2));
+  expect(prompts[2]).not.toContain(frame(1));
+  expect(prompts[2]).toContain(STALE_FRAME_NOTE);
 });

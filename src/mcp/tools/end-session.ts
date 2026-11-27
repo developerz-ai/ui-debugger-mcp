@@ -28,7 +28,8 @@ export function endSessionTool(service: DebugApi): McpTool {
             'attached browser is only disconnected — web attach first returns its adopted tab to its ' +
             'pre-run URL, best-effort: skipped when the run never moved the tab and a failed navigation ' +
             'is swallowed), and free the project lock so a new start_debug can run. The last ' +
-            'get_findings snapshot remains on disk.',
+            'get_findings snapshot remains on disk. Safe to repeat: ending the run you just ended ' +
+            'succeeds with already_ended { status }; any other unknown id is an error.',
           annotations: {
             idempotentHint: true,
           },
