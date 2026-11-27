@@ -207,7 +207,8 @@ ship the password to the provider on each one. The prompt gets a NAME-only
 pre-run sign-in, with lengths where the values were.
 
 Fail loud, always before the run: unknown `as` (ConfigError listing valid names),
-unresolvable field/submit, a submit that left the run still on `path`, or a
+unresolvable field/submit, a submit that left the run still on `path` (the check
+when `expect` is omitted; with `expect`, the marker must show), or a
 login page that redirected away (AuthError). That redirect is accepted as
 "already signed in" ONLY for a sole persona whose `expect` shows on the landing
 page (no `expect` → AuthError saying to set one); the trail says so. NEVER a silently signed-out run — that reports every screen behind
@@ -216,8 +217,9 @@ the login as an empty page.
 **Redaction.** `createSecretRedactor` (`src/redact.ts` — the neutral home, a
 sibling of `errors.ts`) is bound per run to the persona's values and wraps every
 `logs/*.log` sink AND every model-bound belt output (observe network/tabs/tree
-`value`, act results + errors, vision `look`) — plain, percent-encoded,
-`+`/form-encoded and JSON-escaped spellings. Its signature is the named `Redactor` type, `(text: string) => string`,
+`value`, act results + errors, vision `look` text) — plain, percent-encoded,
+`+`/form-encoded and JSON-escaped spellings. TEXT only: a screenshot sent to the
+vision model can still show a secret rendered on screen. Its signature is the named `Redactor` type, `(text: string) => string`,
 which every redactor parameter is annotated with. `describe` exposes names only.
 
 ## Target `notes` — preconditions, not a goal

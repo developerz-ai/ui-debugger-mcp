@@ -11,7 +11,7 @@
     {
       "label": "test (unit)",
       "type": "shell",
-      "command": "SKIP_BROWSER_INTEGRATION=1 bun test",
+      "command": "SKIP_BROWSER_TESTS=1 SKIP_BROWSER_INTEGRATION=1 bun test",
       "group": { "kind": "test", "isDefault": true },
       "problemMatcher": []
     },

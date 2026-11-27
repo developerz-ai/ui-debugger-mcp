@@ -15,7 +15,7 @@
 
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -199,14 +199,32 @@ test('the script no longer claims apt / install-deps never runs', () => {
 
 const binFile = (name: string): string => readFileSync(join(REPO_ROOT, name), 'utf8');
 
-test('bin/dev and bin/check run the shared preflight before anything else', () => {
+test('bin/dev and bin/check stop at a failed preflight before any bun leg runs', () => {
   for (const name of ['bin/dev', 'bin/check']) {
-    const text = binFile(name);
-    expect(text).toContain('set -euo pipefail');
-    expect(text).toContain('. bin/lib/preflight.sh');
-    expect(text.indexOf('\npreflight\n')).toBeGreaterThan(text.indexOf('. bin/lib/preflight.sh'));
+    const root = preflightFixture('#!/usr/bin/env bash\nexit 1\n');
+    try {
+      for (const script of ['bin/dev', 'bin/check']) {
+        writeFileSync(join(root, script), binFile(script), { mode: 0o755 });
+      }
+      const stubs = join(root, 'stubs');
+      const log = join(root, 'bun-calls.log');
+      mkdirSync(stubs);
+      writeFileSync(join(stubs, 'bun'), `#!/usr/bin/env bash\necho "$*" >> "${log}"\n`, {
+        mode: 0o755,
+      });
+      const run = spawnSync('bash', [name], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${stubs}:${process.env.PATH ?? ''}` },
+      });
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain('X_PREFLIGHT_BUN');
+      // Any bun invocation (dev server, typecheck, lint, test) means the gate was skipped.
+      expect(existsSync(log) ? readFileSync(log, 'utf8') : '').toBe('');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
-  expect(binFile('bin/dev')).toContain('exec bun run dev');
 });
 
 /** A throwaway checkout holding the real preflight and a stub `bin/require-bun`. */
