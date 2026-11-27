@@ -3,7 +3,7 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import { AgentError, VisionUnavailableError } from '../../errors.js';
 import { createSecretRedactor } from '../../redact.js';
-import { redactStrings, withRedactedOutput } from './redact-output.js';
+import { redactStrings, withRedactedErrors, withRedactedOutput } from './redact-output.js';
 
 /** `hunter2` is a SYNTHETIC persona value, never a real credential. */
 const REDACT = createSecretRedactor(['hunter2']);
@@ -98,6 +98,42 @@ test('a redacted error keeps its class and name, and carries the secret nowhere 
     expect(error.cause).toBeUndefined();
     expect(`${error.message}\n${error.stack}\n${String(error)}`).not.toContain('hunter2');
   }
+});
+
+test('withRedactedErrors masks a thrown error but leaves the successful result BYTE-exact', async () => {
+  // The two consumers are observe (selector-bearing node names) and self-look
+  // (a base64 frame): a deep REDACT on their results would corrupt both.
+  const frame = 'QUJDRA=='; // base64 of ABCD, not a credential
+  const ok = withRedactedErrors(
+    tool({
+      inputSchema: z.object({}),
+      execute: async () => ({
+        frame,
+        tree: { nodes: [{ name: 'button "hunter2"', target: '#hunter2' }] },
+      }),
+    }),
+    REDACT,
+  );
+  expect(await call(ok)).toEqual({
+    frame,
+    tree: { nodes: [{ name: 'button "hunter2"', target: '#hunter2' }] },
+  });
+
+  const failing = withRedactedErrors(
+    tool({
+      inputSchema: z.object({}),
+      execute: async (): Promise<string> => {
+        throw new TypeError('adapter failed on hunter2');
+      },
+    }),
+    REDACT,
+  );
+  const error = (await call(failing).catch((e: unknown) => e)) as TypeError;
+  expect(error).toBeInstanceOf(TypeError);
+  expect(error.name).toBe('TypeError');
+  expect(error.message).toBe(`adapter failed on ${MASK}`);
+  expect(error.cause).toBeUndefined();
+  expect(`${error.message}\n${error.stack}`).not.toContain('hunter2');
 });
 
 test('a thrown NON-error carrying a secret becomes a redacted AgentError', async () => {

@@ -113,6 +113,8 @@ export class DebugService implements DebugApi {
   #ended: { session: Session; done: Promise<void> } | undefined;
   /** The teardown in flight (or the last one, settled) — a barrier, so it never rejects. */
   #tearing: Promise<void> = Promise.resolve();
+  /** Teardowns in flight, keyed by session id, so a repeat never double-closes. */
+  readonly #teardowns = new Map<string, Promise<void>>();
 
   constructor(deps: DebugServiceDeps) {
     this.#manager = deps.manager;
@@ -252,7 +254,10 @@ export class DebugService implements DebugApi {
         assertStartNotAborted(signal, id);
         this.#manager.start(cwd, built.session);
       } catch (err) {
-        await built.session.close().catch(() => undefined);
+        // Slot never taken: close directly (Session.close() is idempotent, so a
+        // concurrent `endActive` cannot double-close). The outer catch below
+        // clears this attempt's breadcrumb even if the close itself throws.
+        await this.#teardown(id).catch(() => undefined);
         throw err;
       }
       // This run owns the slot now — the previous run's retained snapshot is
@@ -264,7 +269,7 @@ export class DebugService implements DebugApi {
         assertStartNotAborted(signal, id);
         built.session.start(built.run);
       } catch (err) {
-        await this.#manager.end(cwd).catch(() => undefined);
+        await this.#teardown(id).catch(() => undefined);
         throw err;
       }
 
@@ -276,6 +281,8 @@ export class DebugService implements DebugApi {
       // Nobody holds this id, so nothing could ever end the run — leave no
       // `running` breadcrumb pointing the CLI at a gone run. Scoped to THIS
       // attempt's id: a successor that recorded itself meanwhile keeps its own.
+      // A failing log write is swallowed only so the original start error (open,
+      // login, cancelled build) is the one the caller sees.
       await this.#state.clear(id).catch(() => undefined);
       throw err;
     }
@@ -420,19 +427,32 @@ export class DebugService implements DebugApi {
   /**
    * Close the active run, then drop its breadcrumb — even when the close throws.
    * The ONE teardown, for every way a run ends, so {@link endActive} can wait on it.
+   * {@link end} may call it a second time for the same id; that repeats the close
+   * only in the session's sense (one shared promise) and still clears the crumb.
    */
   #teardown(session_id: string): Promise<void> {
+    const prior = this.#teardowns.get(session_id);
+    if (prior !== undefined) return prior;
     const done = (async () => {
       try {
         await this.#manager.end(this.#cwd);
       } finally {
         // The manager frees the slot before closing, so a stale `running` state.json
         // would make a later CLI `stop` SIGTERM a healthy server. Scoped to
-        // `session_id`: a successor recording itself mid-teardown is untouched.
+        // `session_id`: a successor recording itself mid-teardown is untouched. A
+        // failing log write still propagates, after the slot and adapter are released.
         await this.#state.clear(session_id);
       }
     })();
+    this.#teardowns.set(session_id, done);
     this.#tearing = done.catch(() => undefined);
+    // Forget on settle (success OR failure): a later `end_session` for the same id
+    // must not wait forever on a settled promise, and the manager's own idempotent
+    // `Session.close()` keeps a repeat from closing the adapter twice.
+    const forget = (): void => {
+      if (this.#teardowns.get(session_id) === done) this.#teardowns.delete(session_id);
+    };
+    done.then(forget, forget);
     return done;
   }
 

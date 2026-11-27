@@ -10,6 +10,27 @@ import { createSecretRedactor } from './redact.js';
 
 // --- credentials a persona TYPES --------------------------------------------
 
+test('the belt spellings are covered at the core: plain, JSON short escapes, percent, +', () => {
+  // Each belt boundary feeds `redact` the raw text an adapter/provider emits.
+  // Pin the spellings HERE so a boundary regression bisects against this core,
+  // not against an encoder assumption. All values are SYNTHETIC.
+  const plain = createSecretRedactor(['hunter2']);
+  expect(plain('typed hunter2')).toBe('typed <redacted, 7 chars>');
+
+  const quoted = createSecretRedactor(['a"b\\c/d']);
+  expect(quoted('res={"p":"a\\"b\\\\c\\/d"}')).toBe('res={"p":"<redacted, 10 chars>"}');
+  const unicode = createSecretRedactor(['hunter2']);
+  expect(unicode('res={"p":"\\u0068\\u0075\\u006E\\u0074\\u0065\\u0072\\u0032"}')).toBe(
+    'res={"p":"<redacted, 42 chars>"}',
+  );
+
+  const encoded = createSecretRedactor(['a b/c']);
+  // The marker counts the MATCHED spelling's characters (the percent form is
+  // nine), never the decoded secret: every caller redacts the text on the wire.
+  expect(encoded('url=/a%20b%2fc')).toBe('url=/<redacted, 9 chars>');
+  expect(encoded('url=/a+b/c')).toBe('url=/<redacted, 5 chars>');
+});
+
 test('createSecretRedactor keeps a persona value out of the durable trail', () => {
   const redact = createSecretRedactor(['hunter2', 'admin@dev.local']);
   expect(redact('act type {"text":"hunter2"}')).toBe('act type {"text":"<redacted, 7 chars>"}');
@@ -52,6 +73,19 @@ test('createSecretRedactor is the identity when the run has no persona', () => {
   const line = 'act type {"text":"hello"}';
   expect(redact(line)).toBe(line);
   expect(createSecretRedactor([''])(line)).toBe(line); // an empty value redacts nothing
+});
+
+test('overlapping secrets and a short secret after a long one mask whole', () => {
+  // A form body can carry two overlapping persona values; a short password can
+  // also occur inside the label the long one produced. One pass over the source
+  // handles both — sequential replacements leaked fragments here before.
+  const overlapping = createSecretRedactor(['abcXYZ', 'XYZdef']);
+  expect(overlapping('req={abcXYZdef}')).toBe('req={<redacted, 9 chars>}');
+
+  const short = createSecretRedactor(['re', 'supersecret']);
+  expect(short('typed supersecret then re')).toBe(
+    'typed <redacted, 11 chars> then <redacted, 2 chars>',
+  );
 });
 
 test('createSecretRedactor leaves no fragment of two secrets that overlap in a line', () => {

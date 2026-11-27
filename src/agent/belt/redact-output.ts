@@ -6,11 +6,13 @@
  * everything they return — a step label, tab urls/titles, reloaded urls, the
  * vision guy's description of a screen that may SHOW a credential — is prose the
  * driver reads and the SDK re-sends every step. {@link withRedactedOutput} masks
- * the run's secrets in all of it, and in the message of anything the tool throws
- * (the SDK feeds a tool error back to the model verbatim).
+ * the run's secrets in all of it.
  *
- * NOT for self-look: its result carries the frame as base64, where a short
- * secret can match by chance and corrupt the image.
+ * Self-look and `observe` cannot pass their RESULT through the deep redactor:
+ * self-look's frame is base64 (a short secret can match by chance and corrupt the
+ * image) and `observe` already redacts its own text columns. Both still need
+ * {@link withRedactedErrors}: the SDK feeds a thrown tool error back to the model
+ * verbatim, and an adapter/provider error can quote the persona value.
  */
 
 import type { Tool } from 'ai';
@@ -48,6 +50,40 @@ function redactedError(error: Error, redact: Redactor): Error {
   return copy;
 }
 
+/**
+ * Re-throw `error` with its message and stack masked. Called only when the
+ * message actually changed: a clean error keeps its identity (its class can be
+ * load-bearing, e.g. the vision-unavailable latch).
+ */
+function throwRedacted(error: unknown, redact: Redactor): never {
+  const message = error instanceof Error ? error.message : String(error);
+  if (redact(message) === message) throw error;
+  throw error instanceof Error ? redactedError(error, redact) : new AgentError(redact(message));
+}
+
+/**
+ * Wrap a belt tool so a thrown error carries no run secret to the MODEL.
+ *
+ * The successful result passes through untouched: `observe` redacts its own text
+ * columns (and must leave selector-bearing node names alone), self-look's base64
+ * frame must stay byte-exact. Only the error path is rewritten here. The durable
+ * log copy is still the caller's job (`withToolLog` in `session-builder.ts`).
+ */
+export function withRedactedErrors<T extends Tool>(tool: T, redact: Redactor): T {
+  const original = tool.execute;
+  if (!original) return tool;
+  return {
+    ...tool,
+    execute: async (input: unknown, options: Parameters<typeof original>[1]) => {
+      try {
+        return await original(input, options);
+      } catch (error) {
+        throwRedacted(error, redact);
+      }
+    },
+  } as T;
+}
+
 /** Wrap a belt tool so its result and its thrown error message carry no run secret. */
 export function withRedactedOutput<T extends Tool>(tool: T, redact: Redactor): T {
   const original = tool.execute;
@@ -58,12 +94,7 @@ export function withRedactedOutput<T extends Tool>(tool: T, redact: Redactor): T
       try {
         return redactStrings(await original(input, options), redact);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        // Untouched errors pass through as the same object.
-        if (redact(message) === message) throw error;
-        throw error instanceof Error
-          ? redactedError(error, redact)
-          : new AgentError(redact(message));
+        throwRedacted(error, redact);
       }
     },
   } as T;

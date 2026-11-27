@@ -136,6 +136,8 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
   /** The background loop run, set once by `start()`; `null` until then. */
   #run: Promise<void> | null = null;
   #status: SessionStatus = 'running';
+  /** The single teardown, shared by every caller of `close()`. */
+  #closing: Promise<void> | null = null;
 
   constructor(options: SessionOptions<A>) {
     this.id = options.id;
@@ -210,11 +212,21 @@ export class Session<A extends SessionAdapter = SessionAdapter> {
    * the target adapter. Called by the manager on `end_session`. A run still in
    * flight settles as `failed` (it never reached a verdict). Closing after a run
    * already concluded leaves its verdict untouched.
+   *
+   * Idempotent: concurrent and later calls share one teardown promise. The adapter
+   * is closed in a `finally` even when the awaited run rejects, so a failed loop
+   * never leaves the target (or its persistent profile lock) open.
    */
-  async close(): Promise<void> {
-    this.#abort.abort();
-    if (this.#run !== null) await this.#run;
-    await this.#adapter.close();
+  close(): Promise<void> {
+    this.#closing ??= (async () => {
+      try {
+        this.#abort.abort(); // abort first: the loop must see cancellation before we await it
+        if (this.#run !== null) await this.#run;
+      } finally {
+        await this.#adapter.close();
+      }
+    })();
+    return this.#closing;
   }
 
   /** Run the loop to settlement, then fold its outcome into `status` (+ findings on failure). */

@@ -23,7 +23,7 @@ import { createAdapter } from '../adapters/factory.js';
 import { createActTool } from '../agent/belt/act.js';
 import { createLookTool, createSelfLookTool } from '../agent/belt/look.js';
 import { createObserveTool } from '../agent/belt/observe.js';
-import { withRedactedOutput } from '../agent/belt/redact-output.js';
+import { withRedactedErrors, withRedactedOutput } from '../agent/belt/redact-output.js';
 import { createReportTool } from '../agent/belt/report.js';
 import { createActTrail } from '../agent/belt/trail.js';
 import { createDebugAgent, runDebugLoop } from '../agent/loop.js';
@@ -135,11 +135,10 @@ function compactInput(input: unknown): string {
 }
 
 /**
- * Wrap a belt tool so every call records its input to `logs/agent.log`, and any
- * thrown error is logged before it propagates — otherwise a belt failure (e.g. a
- * selector that resolves nothing) is invisible: the SDK feeds it back to the model
- * as a tool-error and the run just churns. The wrapper is transparent: same
- * input/output, it only observes.
+ * Log a belt tool's input and thrown errors to `logs/agent.log` before they
+ * propagate (a selector miss would otherwise be invisible). Transparent to I/O:
+ * it only observes. The model-bound error is masked separately by
+ * `withRedactedErrors`, which this wrapper does not replace.
  */
 export function withToolLog(name: string, t: Tool, log: (line: string) => void): Tool {
   const original = t.execute;
@@ -385,21 +384,23 @@ export async function buildSession(
   // `report` reads it through `settled()`, so evidence gathered in the SAME step
   // still makes the verdict.
   //
-  // Built HERE rather than inside `run` because the pre-run login (`open`, below)
-  // happens first and has to land on the same trail: the driver did not do it, but
-  // it did happen to the app, and a trail that omits it is a lie about the run.
+  // Built before `run`: the pre-run login (`open`, below) lands on this trail too.
   const trail = createActTrail();
 
   const run: LoopRunner = async ({ inbox, progress, signal }) => {
     const agent = createDebugAgent({
       model: models.driver,
       tools: {
-        observe: withToolLog('observe', createObserveTool(adapter, store, trail, redact), logAgent),
+        observe: withToolLog(
+          'observe',
+          withRedactedErrors(createObserveTool(adapter, store, trail, redact), redact),
+          logAgent,
+        ),
         act: withToolLog('act', createActTool(adapter, store, trail, origin, redact), logAgent),
         look: withToolLog(
           'look',
           selfLook
-            ? createSelfLookTool(adapter, store)
+            ? withRedactedErrors(createSelfLookTool(adapter, store), redact)
             : withRedactedOutput(
                 createLookTool(adapter, models.vision, store, trail, notes),
                 redact,
