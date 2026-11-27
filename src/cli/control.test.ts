@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Findings } from '../findings/schema.js';
 import { ownerLockPath } from '../session/owner-lock.js';
+import * as pidfd from '../session/pidfd.js';
 import { openPidfd } from '../session/pidfd.js';
 import { captureIdentity } from '../session/process-identity.js';
 import type { StateFile } from '../session/state-file.js';
@@ -80,6 +81,80 @@ test('stop uses a pidfd to signal the recorded live process', async () => {
     expect((await readState(stateJson))?.status).toBe('stopped');
   } finally {
     child.kill();
+  }
+});
+
+test('pidfd helper isolates Python and fails boundedly on invalid readiness', async () => {
+  if (process.platform !== 'linux') return;
+  const python = join(cwd, 'python3');
+  const args = join(cwd, 'args');
+  await writeFile(
+    python,
+    `#!/bin/sh\nprintf '%s\\n' "$1" > '${args}'\necho unexpected\nread line\n`,
+    { mode: 0o755 },
+  );
+  const path = process.env.PATH;
+  process.env.PATH = cwd;
+  try {
+    await expect(openPidfd(process.pid, 1)).rejects.toThrow('Cannot safely open pidfd');
+    expect(await Bun.file(args).text()).toBe('-I\n');
+  } finally {
+    process.env.PATH = path;
+  }
+});
+
+test('pidfd helper times out when readiness never arrives', async () => {
+  if (process.platform !== 'linux') return;
+  await writeFile(join(cwd, 'python3'), '#!/bin/sh\nread line\n', { mode: 0o755 });
+  const path = process.env.PATH;
+  process.env.PATH = cwd;
+  try {
+    await expect(openPidfd(process.pid, 1)).rejects.toThrow('Cannot safely open pidfd');
+  } finally {
+    process.env.PATH = path;
+  }
+}, 5000);
+
+test('pidfd signal rejects when the helper closes its input', async () => {
+  if (process.platform !== 'linux') return;
+  await writeFile(join(cwd, 'python3'), '#!/bin/sh\necho ready\nexec 0<&-\n/bin/sleep 1\n', {
+    mode: 0o755,
+  });
+  const path = process.env.PATH;
+  process.env.PATH = cwd;
+  try {
+    const handle = await openPidfd(process.pid, 1);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await expect(handle.signal()).rejects.toThrow('Cannot signal pidfd');
+    handle.close();
+  } finally {
+    process.env.PATH = path;
+  }
+});
+
+test('stop opens the recorded identity and signals through its handle', async () => {
+  const identity = captureIdentity(process.pid);
+  const calls: string[] = [];
+  const open = spyOn(pidfd, 'openPidfd').mockImplementation(async (pid, ticks) => {
+    expect(pid).toBe(process.pid);
+    expect(ticks).toBe(identity.startTicks);
+    calls.push('open');
+    return {
+      async signal() {
+        calls.push('signal');
+      },
+      close() {
+        calls.push('close');
+      },
+    };
+  });
+  try {
+    await seedState({ pid: process.pid, identity });
+    await runStop(cwd);
+    expect(calls).toEqual(['open', 'signal', 'close']);
+    expect(open).toHaveBeenCalledTimes(1);
+  } finally {
+    open.mockRestore();
   }
 });
 

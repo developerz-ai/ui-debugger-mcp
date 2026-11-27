@@ -1,6 +1,16 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionBusyError } from '../errors.js';
@@ -76,6 +86,17 @@ test('state lock is private, including an existing permissive lock', async () =>
   await chmod(`${path}.lock`, 0o666);
   await writeState(path, SAMPLE);
   expect((await stat(`${path}.lock`)).mode & 0o777).toBe(0o600);
+});
+
+test('state lock refuses a symlink without changing its target', async () => {
+  const path = join(dir, 'state.json');
+  const target = join(dir, 'target');
+  await writeFile(target, 'untouched');
+  await chmod(target, 0o644);
+  await symlink(target, `${path}.lock`);
+  await expect(writeState(path, SAMPLE)).rejects.toThrow();
+  expect((await stat(target)).mode & 0o777).toBe(0o644);
+  expect(await readFile(target, 'utf8')).toBe('untouched');
 });
 
 test('a held state lock fails with a bounded timeout', async () => {

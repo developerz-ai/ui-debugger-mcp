@@ -28,7 +28,7 @@
  * no-op port by default, the real {@link FileStatePort} wired at boot.
  */
 
-import { closeSync, fchmodSync, openSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fstatSync, openSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
@@ -88,9 +88,19 @@ async function writeStateUnlocked(path: string, state: StateFile): Promise<void>
 async function withStateLock<T>(path: string, task: () => Promise<T>): Promise<T> {
   await mkdir(dirname(path), { recursive: true });
   const backend = await loadBackend();
-  const fd = openSync(`${path}.lock`, 'a', 0o600);
+  const fd = openSync(
+    `${path}.lock`,
+    constants.O_WRONLY |
+      constants.O_CREAT |
+      constants.O_APPEND |
+      constants.O_NOFOLLOW |
+      constants.O_NONBLOCK,
+    0o600,
+  );
   let locked = false;
   try {
+    if (!fstatSync(fd).isFile())
+      throw new WorkspaceError(`State lock is not a regular file: ${path}.lock`);
     fchmodSync(fd, 0o600);
     const deadline = Date.now() + 2000;
     while (!locked) {
