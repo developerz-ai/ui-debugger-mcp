@@ -102,7 +102,7 @@ Talk to the running driver mid-run: add work, redirect it, or answer a question.
 | `session_id` | `string` | yes      | From `start_debug`.                                                              |
 | `message`    | `string` | yes      | Instruction in plain language (e.g. `"skip checkout, focus on the login form"`). |
 
-**Returns** — ack.
+**Returns** — ack. A run that already auto-ended is refused with `SessionSettledError`, not `SessionNotFoundError`.
 
 ---
 
@@ -129,7 +129,7 @@ Stop and tear down the active run. Aborts the agent loop, releases the target (m
 | ------------ | -------- | -------- | ------------------- |
 | `session_id` | `string` | yes      | From `start_debug`. |
 
-**Returns** — ack. The last `get_findings` snapshot remains on disk.
+**Returns** — ack. The last `get_findings` snapshot remains on disk. Repeating it for the run just ended returns `already_ended: { status }`; an unknown id is `SessionNotFoundError`. `send_message` to an auto-ended run is `SessionSettledError`.
 
 ---
 

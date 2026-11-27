@@ -12,8 +12,12 @@ pnpm-lock.yaml
 # launch config holds the model API key — never commit
 .mcp.json
 
-# editor
-.vscode/
+# editor — .vscode keeps only the shared, machine-neutral files
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
 .idea/
 
 # Claude Code runtime

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Boot the MCP server in watch mode (`bun run dev`) after a preflight, so a
+# fresh or stale checkout fails here with the fix named, not mid-run.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+. bin/lib/preflight.sh
+preflight
+
+exec bun run dev

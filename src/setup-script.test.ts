@@ -14,7 +14,9 @@
  */
 
 import { expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const REPO_ROOT = join(import.meta.dirname, '..');
@@ -191,4 +193,85 @@ test('the script no longer claims apt / install-deps never runs', () => {
   // libraries when it can. A stale comment would mislead the next reader.
   expect(setupScript).not.toContain('NO apt / install-deps on any path');
   expect(setupScript).not.toContain('the system libs are already on the stock');
+});
+
+// --- DX entry points: bin/dev, bin/check and the shared preflight -----------
+
+const binFile = (name: string): string => readFileSync(join(REPO_ROOT, name), 'utf8');
+
+test('bin/dev and bin/check stop at a failed preflight before any bun leg runs', () => {
+  for (const name of ['bin/dev', 'bin/check']) {
+    const root = preflightFixture('#!/usr/bin/env bash\nexit 1\n');
+    try {
+      for (const script of ['bin/dev', 'bin/check']) {
+        writeFileSync(join(root, script), binFile(script), { mode: 0o755 });
+      }
+      const stubs = join(root, 'stubs');
+      const log = join(root, 'bun-calls.log');
+      mkdirSync(stubs);
+      writeFileSync(join(stubs, 'bun'), `#!/usr/bin/env bash\necho "$*" >> "${log}"\n`, {
+        mode: 0o755,
+      });
+      const run = spawnSync('bash', [name], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${stubs}:${process.env.PATH ?? ''}` },
+      });
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain('X_PREFLIGHT_BUN');
+      // Any bun invocation (dev server, typecheck, lint, test) means the gate was skipped.
+      expect(existsSync(log) ? readFileSync(log, 'utf8') : '').toBe('');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+/** A throwaway checkout holding the real preflight and a stub `bin/require-bun`. */
+function preflightFixture(requireBun: string): string {
+  const root = mkdtempSync(join(tmpdir(), 'preflight-'));
+  mkdirSync(join(root, 'bin/lib'), { recursive: true });
+  writeFileSync(join(root, 'bin/lib/preflight.sh'), binFile('bin/lib/preflight.sh'));
+  writeFileSync(join(root, 'bin/require-bun'), requireBun, { mode: 0o755 });
+  return root;
+}
+
+function runPreflight(root: string): { status: number | null; stderr: string } {
+  const run = spawnSync('bash', ['-c', '. bin/lib/preflight.sh; preflight'], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  return { status: run.status, stderr: run.stderr };
+}
+
+const BUN_OK = `#!/usr/bin/env bash\nprintf 'BUN_VERSION=0\\nBUN_PATH=%s\\n' "$(command -v bun)"\n`;
+
+test('preflight names bin/setup when bun is not at the pinned version', () => {
+  const root = preflightFixture('#!/usr/bin/env bash\nexit 1\n');
+  try {
+    const run = runPreflight(root);
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain('X_PREFLIGHT_BUN');
+    expect(run.stderr).toContain('bin/setup');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('preflight names bin/setup when deps are missing, then when dummy/web is unbuilt', () => {
+  const root = preflightFixture(BUN_OK);
+  try {
+    const noDeps = runPreflight(root);
+    expect(noDeps.status).not.toBe(0);
+    expect(noDeps.stderr).toContain('X_PREFLIGHT_DEPS');
+    expect(noDeps.stderr).toContain('bin/setup');
+
+    mkdirSync(join(root, 'node_modules/playwright-core'), { recursive: true });
+    const noDummy = runPreflight(root);
+    expect(noDummy.status).not.toBe(0);
+    expect(noDummy.stderr).toContain('X_PREFLIGHT_DUMMY');
+    expect(noDummy.stderr).toContain('bin/setup');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

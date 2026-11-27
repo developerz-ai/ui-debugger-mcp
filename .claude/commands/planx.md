@@ -67,7 +67,7 @@ $ARGUMENTS
 
 ## Tests
 
-- What to add/run. Tests written with the code. Commands: `bun test`, `bun run typecheck`, `bun run lint`, `bun run build`. Browser e2e needs `dummy/web` built + Chromium.
+- What to add/run. Tests written with the code. Commands: `bin/check` (typecheck, lint, test), `bun run build`; `bin/setup` first on a fresh checkout. Browser e2e needs `dummy/web` built + Chromium.
 
 ## Done when
 

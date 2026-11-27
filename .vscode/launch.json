@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "MCP server (stdio)",
+      "type": "bun",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/main.ts",
+      "cwd": "${workspaceFolder}",
+      "stopOnEntry": false
+    },
+    {
+      "name": "Test: current file",
+      "type": "bun",
+      "request": "launch",
+      "program": "${file}",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "runtimeArgs": ["test"],
+      "stopOnEntry": false
+    }
+  ]
+}

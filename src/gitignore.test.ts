@@ -246,3 +246,24 @@ test('REAL git: a global ignore in the ambient HOME cannot decide the negative c
     rmSync(poison, { recursive: true, force: true });
   }
 });
+
+test('REAL git: the shared .vscode files are tracked, machine-local ones are ignored', () => {
+  requireGit(); // the oracle must be present — never a silent skip
+  const shared = [
+    '.vscode/settings.json',
+    '.vscode/tasks.json',
+    '.vscode/launch.json',
+    '.vscode/extensions.json',
+  ];
+  const local = ['.vscode/ipch/cache.bin', '.vscode/settings.local.json'];
+  withFixtureRepo((repo, env) => {
+    const results = [...shared, ...local].map((p) => {
+      touch(repo, p);
+      return { path: p, ignored: gitIgnores(env, repo, p) };
+    });
+    expect(results).toEqual([
+      ...shared.map((path) => ({ path, ignored: false })),
+      ...local.map((path) => ({ path, ignored: true })),
+    ]);
+  });
+});

@@ -127,13 +127,13 @@ shape MCP tools should have."_ So: a handful of verbs, lots of composable params
 
 Push composition into params, like a `SELECT`:
 
-| Param              | Like               | Use                                                                                      |
-| ------------------ | ------------------ | ---------------------------------------------------------------------------------------- |
-| `query`            | `WHERE` / selector | target a node: CSS/role/text (web), a11y role+name (desktop), resource-id/text (android) |
-| `fields`           | `SELECT cols`      | sparse reads — ask only for role/name/bounds, not the whole tree                         |
-| `filters`          | `WHERE field_op`   | `{ visible_eq: true, role_in: ["button","link"] }`                                       |
-| `limit` / `within` | `LIMIT` / scope    | cap tree size; scope to a subtree/region                                                 |
-| `kind`             | table              | `tree \| screenshot \| console \| network \| tabs`                                       |
+| Param              | Like               | Use                                                                                             |
+| ------------------ | ------------------ | ----------------------------------------------------------------------------------------------- |
+| `query`            | `WHERE` / selector | target a node: CSS/role/text (web), a11y role+name (desktop), resource-id/text (android)        |
+| `fields`           | `SELECT cols`      | sparse reads — ask only for role/name/bounds, not the whole tree                                |
+| `filters`          | `WHERE field_op`   | `{ visible_eq: true, role_in: ["button","link"] }`; network: `{ pending_eq: true }` = in flight |
+| `limit` / `within` | `LIMIT` / scope    | cap tree size; scope to a subtree/region                                                        |
+| `kind`             | table              | `tree \| screenshot \| console \| network \| tabs`                                              |
 
 One `observe({kind:"tree", query:"role=button[name=Checkout]", fields:["bounds","enabled"]})`
 beats a dozen `get_*` tools. The model composes the call; that's what it's good at.
