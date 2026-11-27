@@ -22,8 +22,8 @@ const PASSWORD_INPUT = 'css=input[type="password" i]';
  * The marker is checked FIRST and is the whole proof — which is why it should
  * identify the ACCOUNT (the username shown), not just "someone is signed in". A
  * password input does not veto it (a dashboard has a change-password form); it
- * only decides which failure this is once the marker is absent, and then the
- * marker gets a single read instead of a wait: that page is a login form.
+ * only decides which failure this is once the marker has been waited for and is
+ * absent — the wait is the same either way, since a marker renders late too.
  *
  * A persona with no `expect` is never reused. The ABSENCE of a login form proves
  * nothing: `/login` also redirects to a public error or maintenance page, which
@@ -37,20 +37,16 @@ export async function assertAlreadySignedIn(
   waitMs: number,
 ): Promise<void> {
   const marker = solePersona === true ? persona.expect : undefined;
-  const asksForPassword = (await adapter.find({ query: PASSWORD_INPUT })) !== null;
   if (marker !== undefined) {
-    if (asksForPassword) {
-      if ((await adapter.find({ query: marker })) !== null) return;
-    } else {
-      try {
-        await adapter.waitFor({ query: marker, timeout: waitMs });
-        return;
-      } catch {
-        // absent — diagnosed below
-      }
+    try {
+      await adapter.waitFor({ query: marker, timeout: waitMs });
+      return;
+    } catch {
+      // absent — diagnosed below
     }
   }
 
+  const asksForPassword = (await adapter.find({ query: PASSWORD_INPUT })) !== null;
   const landed = `auth persona '${name}': opening ${loginUrl} landed on ${url}`;
   if (asksForPassword) {
     throw new AuthError(

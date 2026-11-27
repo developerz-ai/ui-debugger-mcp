@@ -381,6 +381,29 @@ test('a signed-in page that happens to have a password field is still accepted o
   expect(calls.some((c) => c.fn === 'type' || c.fn === 'click')).toBe(false);
 });
 
+test('the marker is WAITED for on a page with a password field too — it may render late', async () => {
+  // The marker is not in the tree yet (`find` misses) but arrives within the wait.
+  const { adapter, calls } = bounced((q) => q.includes('type="password"'));
+  const steps = await performLogin(adapter, { ...PROVABLE, timeoutMs: 400 });
+  expect(steps.at(-1)?.step).toContain('profile already signed in as "admin"');
+  expect(calls.some((c) => c.fn === 'waitFor' && c.arg === '#account-menu')).toBe(true);
+});
+
+test('a redirected page with a password field and NO marker is a login page, not a session', async () => {
+  const { adapter, calls } = fakeAdapter({
+    matches: (q) => q.includes('type="password"'),
+    opensOn: 'http://localhost:5173/dashboard',
+    waitFails: true,
+  });
+  const error = await performLogin(adapter, { ...PROVABLE, timeoutMs: 400 }).catch(
+    (e: unknown) => e,
+  );
+  expect(error).toBeInstanceOf(AuthError);
+  expect((error as AuthError).message).toMatch(/still shows a password field/);
+  expect((error as AuthError).message).toMatch(/no input matching field 'email'/);
+  expect(calls.some((c) => c.fn === 'type' || c.fn === 'click')).toBe(false);
+});
+
 test('a session whose `expect` marker is already showing is accepted without sitting out the render window', async () => {
   // Every run on a signed-in profile takes this path: the marker is the proof, so
   // there is nothing left to wait for once it shows on the redirected page.

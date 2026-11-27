@@ -934,7 +934,8 @@ test('observe resolves an opaque reference passed back as query or within', asyn
   expect(rec.readState?.within).toBe('role=button[name="Account hunter2" i]');
 });
 
-test('issuing references stays cheap and stable across many distinct selectors', async () => {
+// Correctness only: this does NOT prove the O(1) issuance (a linear scan would pass too).
+test('references stay distinct, stable and resolvable across many selectors', async () => {
   const { adapter } = fakeAdapter({});
   const refs = Array.from({ length: 2000 }, (_, i) => targetRefFor(adapter, `text=secret ${i}`));
   expect(new Set(refs).size).toBe(2000);
