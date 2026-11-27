@@ -430,7 +430,8 @@ on-disk findings — so you can tell a live run from one that settled and is jus
 waiting to be closed. To take the project over: `ui-debugger-mcp stop`.
 
 Stopping a live process requires Linux with pidfd support and Python 3.9 or newer
-available as `python3`. The command fails without signaling if it cannot verify
+at `/usr/bin/python3` or `/bin/python3` (resolved independently of `PATH`). The
+command fails without signaling if it cannot verify
 the process or obtain a pidfd, rather than risk signaling a reused PID.
 
 **Run ends `failed` with no bugs and no explanation**

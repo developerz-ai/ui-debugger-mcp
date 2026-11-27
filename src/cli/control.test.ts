@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -84,53 +84,41 @@ test('stop uses a pidfd to signal the recorded live process', async () => {
   }
 });
 
-test('pidfd helper isolates Python and fails boundedly on invalid readiness', async () => {
+test('pidfd helper never executes a project-local python3 on PATH', async () => {
   if (process.platform !== 'linux') return;
-  const python = join(cwd, 'python3');
-  const args = join(cwd, 'args');
-  await writeFile(
-    python,
-    `#!/bin/sh\nprintf '%s\\n' "$1" > '${args}'\necho unexpected\nread line\n`,
-    { mode: 0o755 },
-  );
-  const path = process.env.PATH;
-  process.env.PATH = cwd;
-  try {
-    await expect(openPidfd(process.pid, 1)).rejects.toThrow('Cannot safely open pidfd');
-    expect(await Bun.file(args).text()).toBe('-I\n');
-  } finally {
-    process.env.PATH = path;
-  }
-});
-
-test('pidfd helper times out when readiness never arrives', async () => {
-  if (process.platform !== 'linux') return;
-  await writeFile(join(cwd, 'python3'), '#!/bin/sh\nread line\n', { mode: 0o755 });
-  const path = process.env.PATH;
-  process.env.PATH = cwd;
-  try {
-    await expect(openPidfd(process.pid, 1)).rejects.toThrow('Cannot safely open pidfd');
-  } finally {
-    process.env.PATH = path;
-  }
-}, 5000);
-
-test('pidfd signal rejects when the helper closes its input', async () => {
-  if (process.platform !== 'linux') return;
-  await writeFile(join(cwd, 'python3'), '#!/bin/sh\necho ready\nexec 0<&-\n/bin/sleep 1\n', {
+  const marker = join(cwd, 'attacker-ran');
+  await writeFile(join(cwd, 'python3'), `#!/bin/sh\ntouch '${marker}'\necho ready\nread line\n`, {
     mode: 0o755,
   });
   const path = process.env.PATH;
   process.env.PATH = cwd;
   try {
-    const handle = await openPidfd(process.pid, 1);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    await expect(handle.signal()).rejects.toThrow('Cannot signal pidfd');
+    const identity = captureIdentity(process.pid);
+    if (identity.startTicks === null) throw new Error('missing Linux process identity');
+    const handle = await openPidfd(process.pid, identity.startTicks);
     handle.close();
+    await expect(handle.signal()).rejects.toThrow('Cannot signal pidfd');
+    expect(existsSync(marker)).toBe(false);
   } finally {
     process.env.PATH = path;
   }
-});
+}, 5000);
+
+test('pidfd helper resolves the interpreter from trusted absolute paths', async () => {
+  if (process.platform !== 'linux') return;
+  // A `python3` in the project directory must not affect the helper, even
+  // when it is the only thing PATH names and it emits the expected readiness.
+  await writeFile(join(cwd, 'python3'), '#!/bin/sh\necho ready\nread line\n', {
+    mode: 0o755,
+  });
+  const path = process.env.PATH;
+  process.env.PATH = cwd;
+  try {
+    await expect(openPidfd(process.pid, 1)).rejects.toThrow('identity changed');
+  } finally {
+    process.env.PATH = path;
+  }
+}, 5000);
 
 test('stop opens the recorded identity and signals through its handle', async () => {
   const identity = captureIdentity(process.pid);

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
 import {
   chmod,
+  link,
   mkdir,
   mkdtemp,
   readdir,
@@ -86,6 +87,17 @@ test('state lock is private, including an existing permissive lock', async () =>
   await chmod(`${path}.lock`, 0o666);
   await writeState(path, SAMPLE);
   expect((await stat(`${path}.lock`)).mode & 0o777).toBe(0o600);
+});
+
+test("state lock refuses a hard link without changing the other name's mode", async () => {
+  const path = join(dir, 'state.json');
+  const other = join(dir, 'other');
+  await writeFile(other, 'untouched', { mode: 0o644 });
+  await chmod(other, 0o644);
+  await link(other, `${path}.lock`);
+  await expect(writeState(path, SAMPLE)).rejects.toThrow(/multiple links/);
+  expect((await stat(other)).mode & 0o777).toBe(0o644);
+  expect(await readFile(other, 'utf8')).toBe('untouched');
 });
 
 test('state lock refuses a symlink without changing its target', async () => {

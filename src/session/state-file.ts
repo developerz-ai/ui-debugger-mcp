@@ -99,8 +99,12 @@ async function withStateLock<T>(path: string, task: () => Promise<T>): Promise<T
   );
   let locked = false;
   try {
-    if (!fstatSync(fd).isFile())
-      throw new WorkspaceError(`State lock is not a regular file: ${path}.lock`);
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new WorkspaceError(`State lock is not a regular file: ${path}.lock`);
+    // `fchmod` on a hard link changes EVERY name for that inode, including a
+    // file elsewhere in the project the caller never chose. Only a private
+    // inode is safe to chmod; check the descriptor, not a racy path lookup.
+    if (stat.nlink !== 1) throw new WorkspaceError(`State lock has multiple links: ${path}.lock`);
     fchmodSync(fd, 0o600);
     const deadline = Date.now() + 2000;
     while (!locked) {

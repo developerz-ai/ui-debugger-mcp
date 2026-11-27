@@ -1,6 +1,34 @@
 import { spawn } from 'node:child_process';
+import { accessSync, constants as fsConstants, realpathSync, statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { WorkspaceError } from '../errors.js';
+
+/**
+ * Absolute system locations for the pidfd helper, probed in order.
+ *
+ * `PATH` is attacker-controlled for a CLI run inside a project: a checked-in
+ * `python3` in the current directory would otherwise run with the CLI user's
+ * privileges on `stop`. Only these trusted locations are ever executed.
+ */
+const PYTHON_CANDIDATES = ['/usr/bin/python3', '/bin/python3'];
+
+/** Resolve a real, executable interpreter without ever consulting `PATH`. */
+function trustedPython(): string {
+  for (const candidate of PYTHON_CANDIDATES) {
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+      const real = realpathSync(candidate);
+      const stat = statSync(real);
+      if (!real.startsWith('/') || !stat.isFile() || (stat.mode & 0o111) === 0) continue;
+      return candidate;
+    } catch {
+      // Try the next trusted location.
+    }
+  }
+  throw new WorkspaceError(
+    `Cannot safely stop a process: no Python 3 interpreter at ${PYTHON_CANDIDATES.join(' or ')}.`,
+  );
+}
 
 /** Hold a Linux pidfd across the state update; never signal a recycled numeric PID. */
 export async function openPidfd(
@@ -13,7 +41,7 @@ export async function openPidfd(
     );
   }
   const script = `import os, signal, sys\npid, ticks = map(int, sys.argv[1:])\ntry:\n fd = os.pidfd_open(pid)\n with open('/proc/%d/stat' % pid) as f: stat = f.read()\n if int(stat[stat.rfind(')')+1:].split()[19]) != ticks: raise RuntimeError('process identity changed')\n print('ready', flush=True)\n if sys.stdin.readline() == 'signal\\n': signal.pidfd_send_signal(fd, signal.SIGTERM)\n os.close(fd)\nexcept Exception as e:\n print(str(e), file=sys.stderr, flush=True)\n sys.exit(1)\n`;
-  const child = spawn('python3', ['-I', '-c', script, String(pid), String(startTicks)], {
+  const child = spawn(trustedPython(), ['-I', '-c', script, String(pid), String(startTicks)], {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   let error = '';

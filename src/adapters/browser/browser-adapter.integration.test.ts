@@ -698,7 +698,14 @@ const FRAME2_HTML = `<!DOCTYPE html>
     const before = await adapter.tabs();
     await adapter.click('#popup');
     await adapter.waitFor({ networkIdle: true, timeout: 5_000 });
-    const after = await adapter.tabs();
+    // The popup is created asynchronously by Chrome: `networkidle` on the
+    // ORIGINAL page can settle before the new target is registered. Poll the
+    // tab list until the popup appears instead of racing the browser process.
+    let after = await adapter.tabs();
+    for (let i = 0; i < 40 && after.length === before.length; i++) {
+      await Bun.sleep(25);
+      after = await adapter.tabs();
+    }
     expect(after.length).toBe(before.length + 1);
     // Still driving the original tab — the new one is not stolen silently.
     expect(after.find((t) => t.active)?.index).toBe(before.find((t) => t.active)?.index);
