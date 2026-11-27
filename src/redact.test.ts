@@ -109,3 +109,40 @@ test('createSecretRedactor keeps literal secret characters case-sensitive', () =
   expect(literal('res={"p":"\\\\u0061"}')).toBe('res={"p":"\\\\u0061"}');
   expect(literal('res={"p":"\\\\u0041"}')).toBe('res={"p":"<redacted, 7 chars>"}');
 });
+
+test('createSecretRedactor matches ANY per-character JSON escaping, not a list of encoders', () => {
+  // System.Text.Json writes `&` `<` `'` as \u0026 \u003C \u0027; others escape `/` as `\/`;
+  // an encoder may escape some characters and not others.
+  const redact = createSecretRedactor(["a&b<c'd/e\u{1F600}synthetic"]);
+  const leaks = (line: string) => redact(line).includes('synthetic');
+  expect(leaks('{"p":"a\\u0026b\\u003Cc\\u0027d/e\\uD83D\\uDE00synthetic"}')).toBe(false);
+  expect(leaks('{"p":"a&b\\u003cc\'d\\/e\\ud83d\\ude00synthetic"}')).toBe(false);
+  expect(leaks('{"p":"\\u0061&b<c\'d\\u002Fe\u{1F600}synthetic"}')).toBe(false);
+});
+
+test('createSecretRedactor matches ANY per-character percent-encoding, either hex case', () => {
+  const redact = createSecretRedactor(['a b/c\u00e9synthetic']);
+  const leaks = (line: string) => redact(line).includes('synthetic');
+  expect(leaks('p=a+b%2fc%C3%a9synthetic')).toBe(false);
+  expect(leaks('p=a%20b/c%c3%A9synthetic')).toBe(false);
+  expect(leaks('p=%61 b%2Fc\u00e9synthetic')).toBe(false);
+});
+
+test('createSecretRedactor stays linear on a 1 MB line (no pathological backtracking)', () => {
+  // Backslash- and percent-heavy secrets are where an ambiguous alternation would explode.
+  const redact = createSecretRedactor([
+    '\\\\\\\\\\\\\\\\\\\\x',
+    '%%%%%%%%%%x',
+    'admin@example.test',
+  ]);
+  const line = '\\'.repeat(500_000) + '%'.repeat(500_000);
+  const started = performance.now();
+  expect(redact(line)).toBe(line);
+  expect(performance.now() - started).toBeLessThan(5_000);
+});
+
+test('createSecretRedactor redacts an astral character bare, in both encoded families', () => {
+  const redact = createSecretRedactor(['pw\u{1F600}synthetic']);
+  expect(redact('typed pw\u{1F600}synthetic')).toBe('typed <redacted, 13 chars>');
+  expect(redact('p=pw%F0%9F%98%80synthetic')).toBe('p=<redacted, 23 chars>');
+});

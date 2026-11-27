@@ -21,63 +21,47 @@ export type Redactor = (text: string) => string;
  *
  * Same posture as the other two: presence stays diagnostic (`<redacted, N chars>`
  * still tells you a password of the right length was typed), the secret itself
- * never reaches the durable trail. Form-encoded and JSON-escaped spellings are
- * redacted too — a password with an `@` rides a form POST as `%40`, and matching
- * only the plain text would leave the real body in `logs/network.log`. Both
- * percent-encoders (`encodeURIComponent` and the stricter `<form>` serializer)
- * and ASCII-only `\uXXXX` JSON are covered.
+ * never reaches the durable trail.
  *
- * Hex digits INSIDE a generated escape (`%2F`, `\u00e9`) match in either case —
- * both are case-insensitive by spec and encoders/loggers disagree — while the
- * secret's literal characters stay case-sensitive. Escapes are recognised by
- * tokenizing each encoded spelling, never by scanning it for a pattern, so a
- * secret that literally contains `%2F` or `\u0041` keeps them literal.
+ * Encoded spellings are matched as a CLASS, not as a list of encoders (every
+ * encoder escapes a different subset: System.Text.Json writes `&` as `&`,
+ * Python escapes all non-ASCII, PHP writes `\/`). Per secret, three patterns:
+ *  - plain — the exact text;
+ *  - JSON family — each character as itself, its short escape (`\"` `\\` `\/`
+ *    `\b` `\f` `\n` `\r` `\t`), or `\u` + its UTF-16 code unit in hex;
+ *  - percent family — each character as itself, or its UTF-8 bytes as `%XX`
+ *    (a space also as `+`).
+ * Escape hex digits match in either case; literal characters stay
+ * case-sensitive. A literal `\` (JSON) or `%` (percent) is NOT an alternative
+ * there — encoded text never carries one bare, and dropping it makes every
+ * alternation decidable from its first two characters, so matching is linear
+ * (no backtracking blow-up). The plain pattern still matches them bare.
  *
- * One pass over the ORIGINAL line: every occurrence of every spelling is
- * located first, overlapping spans are merged, and each merged span is replaced
- * once. Replacing value by value instead leaked the tail of a secret that
- * overlapped an already-blanked one, and let a short secret re-match inside an
- * earlier `<redacted, N chars>` label.
+ * One pass over the ORIGINAL line: every match is located in offset order,
+ * overlapping spans are merged, and each merged span is replaced once.
+ * Replacing value by value instead leaked the tail of a secret that overlapped
+ * an already-blanked one, and let a short secret re-match inside an earlier
+ * `<redacted, N chars>` label.
  */
 export function createSecretRedactor(secrets: readonly string[]): Redactor {
-  const patterns = new Map<string, number>(); // regex source → match length
-  const add = (source: string, length: number) => patterns.set(source, length);
+  const sources = new Set<string>();
   for (const secret of secrets) {
     if (secret.length === 0) continue;
-    add(literal(secret), secret.length);
-    // A lone surrogate has no UTF-8 form: `encodeURIComponent` throws on it, so
-    // that spelling can never occur on the wire — skip it deliberately. The
-    // `<form>` serializer below still covers what a browser actually sends (U+FFFD).
-    if (!/\p{Cs}/u.test(secret)) {
-      const encoded = encodeURIComponent(secret);
-      add(percentPattern(encoded), encoded.length);
-      const plus = encoded.replaceAll('%20', '+'); // hand-built form body: space as `+`
-      add(percentPattern(plus), plus.length);
-    }
-    // A browser `<form>` POST (the urlencoded serializer) ALSO escapes `!'()~`,
-    // which `encodeURIComponent` leaves bare — without it such a password ships in clear.
-    const form = new URLSearchParams({ v: secret }).toString().slice(2);
-    add(percentPattern(form), form.length);
-    const json = JSON.stringify(secret).slice(1, -1);
-    add(jsonPattern(json), json.length); // JSON body escaping
-    // ASCII-only JSON (`é` — e.g. Python's `json.dumps` default) in a response
-    // body. Python escapes everything outside space..`~`, so DEL (U+007F) too.
-    const ascii = json.replace(/\\.|[\u007f-￿]/g, (c) =>
-      c.length === 2 ? c : `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
-    );
-    add(jsonPattern(ascii), ascii.length);
+    sources.add(literal(secret));
+    sources.add(jsonPattern(secret));
+    sources.add(percentPattern(secret));
   }
-  if (patterns.size === 0) return (line) => line;
-  // Every pattern matches a FIXED length (an escape is fixed-width in either case).
-  const lengths = [...patterns.values()];
-  const regexes = [...patterns.keys()].map((source) => new RegExp(source, 'g'));
+  if (sources.size === 0) return (line) => line;
+  const regexes = [...sources].map((source) => new RegExp(source, 'g'));
   return (line) => {
-    // A k-way merge over each pattern's NEXT match, in offset order: no per-match
-    // allocation, and matches wholly inside the current span are skipped.
-    const find = (j: number, from: number): number => {
+    // A k-way merge over each pattern's NEXT match, in offset order — no
+    // per-match allocation. `end` of a match comes from the match itself:
+    // escaped and bare characters differ in length.
+    const find = (j: number, from: number): [number, number] => {
       const re = regexes[j] as RegExp;
       re.lastIndex = from;
-      return re.exec(line)?.index ?? -1;
+      const m = re.exec(line);
+      return m ? [m.index, m.index + m[0].length] : [-1, -1];
     };
     const next = regexes.map((_, j) => find(j, 0));
     let out = '';
@@ -87,39 +71,55 @@ export function createSecretRedactor(secrets: readonly string[]): Redactor {
     for (;;) {
       let k = -1;
       for (let j = 0; j < next.length; j++) {
-        const at = next[j] as number;
-        if (at !== -1 && (k === -1 || at < (next[k] as number))) k = j;
+        const at = (next[j] as [number, number])[0];
+        if (at !== -1 && (k === -1 || at < (next[k] as [number, number])[0])) k = j;
       }
       if (k === -1) break;
-      const at = next[k] as number;
-      const length = lengths[k] as number;
+      const [at, to] = next[k] as [number, number];
       if (at < end) {
-        end = Math.max(end, at + length);
+        end = Math.max(end, to);
       } else {
         if (start !== -1) {
           out += `${line.slice(cursor, start)}<redacted, ${end - start} chars>`;
           cursor = end;
         }
         start = at;
-        end = at + length;
+        end = to;
       }
-      // A later match starting before `end - length` would end inside the span.
-      next[k] = find(k, Math.max(at + 1, end - length + 1));
+      next[k] = find(k, at + 1);
     }
     if (start === -1) return line;
     return `${out}${line.slice(cursor, start)}<redacted, ${end - start} chars>${line.slice(end)}`;
   };
 }
 
-/**
- * Regex source matching `text` exactly. Every non-alphanumeric code unit is
- * written as a `\uXXXX` escape — no metacharacter list to get wrong.
- */
+/** JSON's two-character escapes. */
+const JSON_SHORT: Record<string, string> = {
+  '"': '\\"',
+  '\\': '\\\\',
+  '/': '\\/',
+  '\b': '\\b',
+  '\f': '\\f',
+  '\n': '\\n',
+  '\r': '\\r',
+  '\t': '\\t',
+};
+
+/** Regex source for one UTF-16 code unit, literally — never a metacharacter. */
+function unit(c: string): string {
+  return /[0-9A-Za-z]/.test(c) ? c : `\\u${hex4(c.charCodeAt(0))}`;
+}
+
+/** Regex source matching `text` exactly, code unit by code unit. */
 function literal(text: string): string {
-  return text.replace(
-    /[^0-9A-Za-z]/g,
-    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
-  );
+  let out = '';
+  for (let i = 0; i < text.length; i++) out += unit(text.charAt(i)); // code units, not points
+  return out;
+}
+
+/** A code unit as four hex digits. */
+function hex4(code: number): string {
+  return code.toString(16).padStart(4, '0');
 }
 
 /** Hex digits of an escape, either case. */
@@ -129,22 +129,33 @@ function hexDigits(hex: string): string {
     .join('');
 }
 
-/** A percent-encoded spelling: every `%` there IS an escape (a literal `%` is `%25`). */
-function percentPattern(encoded: string): string {
-  return encoded
-    .split(/(%[0-9A-Fa-f]{2})/)
-    .map((part, i) => (i % 2 === 1 ? `%${hexDigits(part.slice(1))}` : literal(part)))
-    .join('');
+/** Each code unit: bare (not `\`), its short escape, or `\uXXXX` in either case. */
+function jsonPattern(secret: string): string {
+  let out = '';
+  for (let i = 0; i < secret.length; i++) {
+    const c = secret.charAt(i);
+    const alts = [`${literal('\\u')}${hexDigits(hex4(c.charCodeAt(0)))}`];
+    const short = JSON_SHORT[c];
+    if (short !== undefined) alts.push(literal(short));
+    if (c !== '\\') alts.push(unit(c));
+    out += `(?:${alts.join('|')})`;
+  }
+  return out;
 }
 
-/** A JSON-escaped spelling, tokenized left to right so `\\` never starts a `\u`. */
-function jsonPattern(json: string): string {
-  return json
-    .split(/(\\u[0-9A-Fa-f]{4}|\\.)/)
-    .map((part, i) =>
-      i % 2 === 1 && part.startsWith('\\u')
-        ? `${literal('\\u')}${hexDigits(part.slice(2))}`
-        : literal(part),
-    )
-    .join('');
+/**
+ * Each code point: bare (not `%`), or its UTF-8 bytes as `%XX` in either case; a
+ * space also as `+`. A lone surrogate has no UTF-8 form — a browser sends U+FFFD.
+ */
+function percentPattern(secret: string): string {
+  const encoder = new TextEncoder();
+  let out = '';
+  for (const c of secret) {
+    const bytes = encoder.encode(c); // a lone surrogate encodes as U+FFFD's bytes
+    const alts = [[...bytes].map((b) => `%${hexDigits(b.toString(16).padStart(2, '0'))}`).join('')];
+    if (c === ' ') alts.push('\\+');
+    if (c !== '%') alts.push(literal(c));
+    out += `(?:${alts.join('|')})`;
+  }
+  return out;
 }
