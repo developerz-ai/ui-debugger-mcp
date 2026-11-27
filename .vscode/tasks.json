@@ -1,0 +1,44 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "dev",
+      "type": "shell",
+      "command": "bin/dev",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "test (unit)",
+      "type": "shell",
+      "command": "SKIP_BROWSER_INTEGRATION=1 bun test",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "lint:fix",
+      "type": "shell",
+      "command": "bun run lint:fix",
+      "problemMatcher": []
+    },
+    {
+      "label": "typecheck",
+      "type": "shell",
+      "command": "bun run typecheck",
+      "problemMatcher": ["$tsc"]
+    },
+    {
+      "label": "check (full gate)",
+      "type": "shell",
+      "command": "bin/check",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "setup",
+      "type": "shell",
+      "command": "bin/setup",
+      "problemMatcher": []
+    }
+  ]
+}

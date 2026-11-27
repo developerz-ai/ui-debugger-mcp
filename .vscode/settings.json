@@ -1,0 +1,21 @@
+{
+  "editor.defaultFormatter": "biomejs.biome",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.fixAll.biome": "explicit"
+  },
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "bun.test.filePattern": "**/*.test.ts",
+  "search.exclude": {
+    "tmp": true,
+    "dist": true,
+    "bun.lock": true,
+    "dummy/web/dist": true
+  },
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/dist/**": true,
+    "**/tmp/**": true
+  }
+}

@@ -218,13 +218,13 @@ It's a **conversation**, not a remote control — five fat tools, not one-per-cl
 | Tool           | What it does                                                                                                                                                                                                                                                                              |
 | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `start_debug`  | Open a run: `{ target, goal, url?, as?, replace?, criteria?, timeout? }`. `url` is required when the target has no configured url; `as` names a login persona; `replace: true` takes over a project with a run already open. The small agent drives autonomously. Returns the session id. |
-| `get_findings` | Poll status + structured findings (functional bugs + visual issues) + evidence. Long-poll with `wait`. A whole-object read caps each list at 20 and says so in `truncated` (`{returned, total}` per field) — pass `fields` for the full lists.                                            |
+| `get_findings` | Poll status + structured findings (functional bugs + visual issues) + evidence. Long-poll with `wait` (ms, max 120000). A whole-object read caps each list at 20 and says so in `truncated` (`{returned, total}` per field) — pass `fields` for the full lists.                           |
 | `send_message` | Talk to the running agent mid-flight — add work, redirect, or answer a question.                                                                                                                                                                                                          |
-| `describe`     | List the configured targets + models for this project — including each target's auth `personas[]` and `notes` — plus `session`: the run this project currently holds.                                                                                                                     |
+| `describe`     | List the configured targets + models for this project — including each target's auth `personas[]` and `notes` — plus `session`: the run this project currently holds. `target` narrows to one entry; an unknown name fails loud.                                                          |
 | `end_session`  | Close the run, free the browser/profile.                                                                                                                                                                                                                                                  |
 
 A run is **always time-capped**: `start_debug`'s `timeout` (seconds) overrides the
-default 300s, so a session can never hang forever — it auto-ends and frees the
+default 300s (max 2147483s), so a session can never hang forever — it auto-ends and frees the
 profile lock when the cap fires.
 
 ### Logging in — named personas
@@ -345,8 +345,8 @@ ui-debugger-mcp stop     # gracefully end the run (frees the browser + profile)
 ## Troubleshooting
 
 **Chrome not found**
-The web adapter launches Chrome via the system PATH. Install Chrome/Chromium, or
-set `executablePath` in the project config (`.dz/…` or root):
+The web adapter uses `executablePath`, else the Playwright-managed Chromium
+(`bin/setup` installs it), else system Google Chrome. Install one, or set `executablePath` in the project config (`.dz/…` or root):
 
 ```jsonc
 "web": { "adapter": "browser", "url": "...", "executablePath": "/usr/bin/chromium-browser" }

@@ -10,7 +10,10 @@ bin/setup
 
 The one-command entry point is `bin/setup` — installs root + dummy/web deps and
 builds the e2e fixture's `dist/`. `bin/check` runs the local typecheck, lint, and
-test gate from any cwd; CI runs those legs directly.
+test gate from any cwd; CI runs those legs directly. `bin/dev` boots the server in
+watch mode. Both run a shared preflight (`bin/lib/preflight.sh`: pinned bun, deps,
+dummy/web build, Chromium launch) and name `bin/setup` when something is missing.
+`.vscode/` carries matching tasks and launch configs, with Biome as the formatter.
 
 `bin/setup` selects and verifies the Bun version CI pins and fails loud when
 that version cannot be obtained, so setup never runs on an arbitrary ambient bun.

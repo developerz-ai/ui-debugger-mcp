@@ -46,9 +46,11 @@ const AuthPersonaSchema = z.strictObject({
   /** The control that submits the form — a button/link label, or a selector. */
   submit: z.string().min(1),
   /**
-   * Proof the login WORKED — a selector/text that only exists once signed in.
-   * Omit and the run instead requires that submitting left `path`; an app that
-   * signs in without navigating must set this, or the login reads as a failure.
+   * Proof the login WORKED — a selector/text that only exists once signed in AS
+   * THIS account (e.g. the username shown). Omit and the run instead requires that
+   * submitting left `path`; an app that signs in without navigating must set this,
+   * or the login reads as a failure. It is also the only thing that lets a run reuse
+   * an already-signed-in profile.
    */
   expect: z.string().min(1).optional(),
 });

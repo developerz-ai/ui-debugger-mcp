@@ -171,7 +171,7 @@ console + network) AND to the android adapter (logcat rows,
 `src/adapters/factory.ts`). The web half is PUSH-based: the page's console
 streams as it happens. The android half is READ-driven —
 `AndroidAdapter.console()` streams the logcat rows it parses
-(`src/adapters/android/android-adapter.ts:553`) — so a mobile run writes
+(`src/adapters/android/android-adapter.ts` `console()`) — so a mobile run writes
 `logs/console.log` only when the driver observes the console, and never writes
 `logs/network.log` (ADB has no network channel). A desktop run writes neither.
 `agent` is the agent sink (`src/services/session-builder.ts`).
@@ -207,14 +207,17 @@ ship the password to the provider on each one. The prompt gets a NAME-only
 pre-run sign-in, with lengths where the values were.
 
 Fail loud, always before the run: unknown `as` (ConfigError listing valid names),
-unresolvable field/submit, or a submit that left the run still on `path`
-(AuthError). NEVER a silently signed-out run — that reports every screen behind
+unresolvable field/submit, a submit that left the run still on `path`, or a
+login page that redirected away (AuthError). That redirect is accepted as
+"already signed in" ONLY for a sole persona whose `expect` shows on the landing
+page (no `expect` → AuthError saying to set one); the trail says so. NEVER a silently signed-out run — that reports every screen behind
 the login as an empty page.
 
 **Redaction.** `createSecretRedactor` (`src/redact.ts` — the neutral home, a
 sibling of `errors.ts`) is bound per run to the persona's values and wraps every
-`logs/*.log` sink — plain, percent-encoded, `+`-for-space and JSON-escaped
-spellings. Its signature is the named `Redactor` type, `(text: string) => string`,
+`logs/*.log` sink AND every model-bound belt output (observe network/tabs/tree
+`value`, act results + errors, vision `look`) — plain, percent-encoded,
+`+`/form-encoded and JSON-escaped spellings. Its signature is the named `Redactor` type, `(text: string) => string`,
 which every redactor parameter is annotated with. `describe` exposes names only.
 
 ## Target `notes` — preconditions, not a goal
@@ -252,21 +255,18 @@ caller is watching. The refusal names the id + `get_findings`/`end_session`/
 ## Commands
 
 ```
-bun install
-bun run dev            # boot server, watch
-bun test               # unit tests < 10s
+bin/setup              # fresh checkout: deps, dummy/web build, pinned Chromium + lib/launch checks
+bin/dev                # preflight, then boot server in watch mode (bun run dev)
+bin/check              # preflight + typecheck, lint, test (+ isolated BrowserAdapter integration)
+bun test <file>        # unit tests < 10s
 bun run lint:fix       # biome auto-fix
 ```
 
-`bin/setup` prepares a fresh checkout: `bun install` (root) + builds the
-dummy/web e2e fixture, downloads the pinned Chromium, then verifies shared libraries
-for both full Chromium (used by the adapter) and the headless shell
-(`bun src/cli/chromium-libs.ts`)
-— apt remediation only when libraries are actually missing and noninteractive
-elevation is available, otherwise a loud failure naming every missing one, then
-real headless launch checks of both binaries, closing each before reporting ready.
-That library check runs inside `bin/setup` only; it is NOT
-a public CLI subcommand (`main.ts` dispatches only init/status/stop).
+`bin/dev`/`bin/check` share `bin/lib/preflight.sh`: pinned bun, deps, dummy/web
+build, Chromium launch. A miss names `bin/setup`. VS Code: `.vscode/` has tasks
+(dev, test, lint:fix, typecheck, check, setup), launch configs (stdio server, current
+test file) and Biome-on-save. The `chromium-libs` check runs inside `bin/setup`
+only; it is NOT a public CLI subcommand (`main.ts` dispatches only init/status/stop).
 
 ## Coding Rules
 
@@ -320,6 +320,9 @@ otherwise invisible to page-level locators.
 A failing request without its response body is a dead end — that is why this exists.
 Credential header values are redacted to `<redacted, N chars>`: presence is
 diagnostic, the secret must NEVER enter the model's context or the logs.
+Body values under credential-shaped keys (password, token, secret, …) are masked
+too, and password-field `value`s read as `<redacted, N chars>`. In-flight requests
+read `pending: true` (filter `pending_eq`).
 
 ## See also
 

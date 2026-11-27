@@ -12,6 +12,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Fail here, naming `bin/setup`, rather than as a mystery inside `bun test`.
+. bin/lib/preflight.sh
+preflight
+
 # `&&` not `;`: set -e + `&&` fails on the FIRST red leg, so the captured
 # tail names the stage that broke instead of a downstream error masking it.
 echo "==> typecheck"
