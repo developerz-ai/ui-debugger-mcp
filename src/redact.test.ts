@@ -87,3 +87,25 @@ test('createSecretRedactor merges dense overlapping matches into one label', () 
   const redact = createSecretRedactor(['ab', 'ba', 'aba']);
   expect(redact(line)).toBe(`x<redacted, ${line.length - 2} chars>y`);
 });
+
+test('createSecretRedactor matches the hex digits of generated escapes in either case', () => {
+  // Escapes are case-insensitive by spec (RFC 3986 `%2f` == `%2F`, JSON `\u007F` ==
+  // `\u007f`); encoders and loggers differ, and the other case leaked the secret.
+  const del = createSecretRedactor(['pw\u007fsynthetic']);
+  expect(del('res={"password":"pw\\u007Fsynthetic"}')).not.toContain('synthetic');
+  const accent = createSecretRedactor(['cafésynthetic']);
+  expect(accent('res={"password":"caf\\u00E9synthetic"}')).not.toContain('synthetic');
+  const slash = createSecretRedactor(['a/bsynthetic']);
+  expect(slash('req="password=a%2fbsynthetic"')).not.toContain('synthetic');
+});
+
+test('createSecretRedactor keeps literal secret characters case-sensitive', () => {
+  const redact = createSecretRedactor(['Hunter2', 'x%2Fy']);
+  expect(redact('typed hunter2')).toBe('typed hunter2');
+  // A literal `%2F` typed in the secret is text, not an escape: `x%2fy` is another value.
+  expect(redact('typed x%2fy')).toBe('typed x%2fy');
+  // A literal backslash-u in the secret is text too — its JSON spelling is `\\u0041`.
+  const literal = createSecretRedactor(['\\u0041']);
+  expect(literal('res={"p":"\\\\u0061"}')).toBe('res={"p":"\\\\u0061"}');
+  expect(literal('res={"p":"\\\\u0041"}')).toBe('res={"p":"<redacted, 7 chars>"}');
+});
