@@ -454,40 +454,20 @@ test('markStatus re-validation preserves a concurrent successor status', async (
     };
     await writeFile(statePath, JSON.stringify(running), 'utf8');
 
-    // A concurrent reader (the fix reads twice). We capture its first read and
-    // let a concurrent writer publish `stopped` before we release it.
-    let releaseFirst: ((v: import('./state-file.js').StateFile | null) => void) | undefined;
-    let releaseSecond: ((v: import('./state-file.js').StateFile | null) => void) | undefined;
+    // The snapshots model a successor publishing between the two reads.
     let reads = 0;
     let published: import('./state-file.js').StateFile | undefined;
     const io: StateIo = {
-      read: async () => {
-        reads += 1;
-        return new Promise<import('./state-file.js').StateFile | null>((resolve) => {
-          if (reads === 1) releaseFirst = resolve;
-          else releaseSecond = resolve;
-        });
-      },
+      read: async () => (++reads === 1 ? running : { ...running, status: 'stopped' }),
       write: async (_p, state) => {
         published = state;
       },
     };
 
-    const mark = markStatus(
-      statePath,
-      'ended',
-      new Date('2026-07-01T01:00:00.000Z'),
-      undefined,
-      io,
-    );
-    // Concurrent write lands while markStatus's first read is pending.
     await writeFile(statePath, JSON.stringify({ ...running, status: 'stopped' }), 'utf8');
-    releaseFirst?.(running);
-    await new Promise((r) => setTimeout(r, 50));
-    releaseSecond?.({ ...running, status: 'stopped' });
-    await mark;
-
+    await markStatus(statePath, 'ended', new Date('2026-07-01T01:00:00.000Z'), undefined, io);
     // Pre-fix implementation would have overwritten `stopped` with `ended`.
+    expect(reads).toBe(2);
     expect(published?.status).toBe('stopped');
     const final = JSON.parse(await readFile(statePath, 'utf8'));
     expect(final.status).toBe('stopped');

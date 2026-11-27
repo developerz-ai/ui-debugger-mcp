@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Findings } from '../findings/schema.js';
 import { ownerLockPath } from '../session/owner-lock.js';
+import { openPidfd } from '../session/pidfd.js';
 import { captureIdentity } from '../session/process-identity.js';
 import type { StateFile } from '../session/state-file.js';
 import { FileStatePort, readState, writeState } from '../session/state-file.js';
@@ -53,6 +54,34 @@ async function seedState(overrides: Partial<StateFile> = {}): Promise<string> {
   await writeState(ws.stateJson, state);
   return ws.stateJson;
 }
+
+test('pidfd signals only its verified process and rejects a mismatched identity', async () => {
+  if (process.platform !== 'linux') return;
+  const child = Bun.spawn(['sleep', '30']);
+  try {
+    const ticks = captureIdentity(child.pid).startTicks;
+    if (ticks === null) throw new Error('missing Linux process identity');
+    await expect(openPidfd(child.pid, ticks + 1)).rejects.toThrow('identity changed');
+    const handle = await openPidfd(child.pid, ticks);
+    await handle.signal();
+    expect(await child.exited).not.toBe(0);
+  } finally {
+    child.kill();
+  }
+});
+
+test('stop uses a pidfd to signal the recorded live process', async () => {
+  if (process.platform !== 'linux') return;
+  const child = Bun.spawn(['sleep', '30']);
+  try {
+    const stateJson = await seedState({ pid: child.pid, identity: captureIdentity(child.pid) });
+    await runStop(cwd);
+    expect(await child.exited).not.toBe(0);
+    expect((await readState(stateJson))?.status).toBe('stopped');
+  } finally {
+    child.kill();
+  }
+});
 
 test('status reports no run when there is no state file', async () => {
   await runStatus(cwd);
@@ -217,6 +246,24 @@ test('stop does not mark or signal a successor replacing the selected run', asyn
       ),
     ).rejects.toThrow('recorded run changed');
     expect(kills).toEqual([]);
+    expect(await readState(stateJson)).toEqual(successor);
+  }
+});
+
+test('stop rejects a successor replacing a dead or stale owner', async () => {
+  for (const owner of [{}, { pid: process.pid, identity: { startTicks: 1 } }]) {
+    if (owner.pid && process.platform !== 'linux') continue;
+    const stateJson = await seedState(owner);
+    const original = await readState(stateJson);
+    if (!original) throw new Error('missing test state');
+    const successor = { ...original, sessionId: 'successor' };
+    await expect(
+      runStop(
+        cwd,
+        () => {},
+        () => writeState(stateJson, successor),
+      ),
+    ).rejects.toThrow('recorded run changed');
     expect(await readState(stateJson)).toEqual(successor);
   }
 });

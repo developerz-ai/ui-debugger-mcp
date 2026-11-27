@@ -28,11 +28,11 @@
  * no-op port by default, the real {@link FileStatePort} wired at boot.
  */
 
-import { closeSync, openSync } from 'node:fs';
+import { closeSync, fchmodSync, openSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
-import { SessionBusyError } from '../errors.js';
+import { SessionBusyError, WorkspaceError } from '../errors.js';
 import { writeFileAtomic } from './atomic-write.js';
 import { loadBackend } from './flock-backend.js';
 import { writeLivePointer } from './live-pointer.js';
@@ -88,12 +88,16 @@ async function writeStateUnlocked(path: string, state: StateFile): Promise<void>
 async function withStateLock<T>(path: string, task: () => Promise<T>): Promise<T> {
   await mkdir(dirname(path), { recursive: true });
   const backend = await loadBackend();
-  const fd = openSync(`${path}.lock`, 'a');
+  const fd = openSync(`${path}.lock`, 'a', 0o600);
   let locked = false;
   try {
+    fchmodSync(fd, 0o600);
+    const deadline = Date.now() + 2000;
     while (!locked) {
       locked = await backend.tryLock(fd);
       if (locked) break;
+      if (Date.now() >= deadline)
+        throw new WorkspaceError(`Timed out acquiring state lock for ${path}`);
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     return await task();

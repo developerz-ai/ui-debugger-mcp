@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionBusyError } from '../errors.js';
@@ -69,6 +69,30 @@ test('writeState + readState round-trips', async () => {
   await writeState(path, SAMPLE);
   expect(await readState(path)).toEqual(SAMPLE);
 });
+
+test('state lock is private, including an existing permissive lock', async () => {
+  const path = join(dir, 'state.json');
+  await writeFile(`${path}.lock`, '', { mode: 0o666 });
+  await chmod(`${path}.lock`, 0o666);
+  await writeState(path, SAMPLE);
+  expect((await stat(`${path}.lock`)).mode & 0o777).toBe(0o600);
+});
+
+test('a held state lock fails with a bounded timeout', async () => {
+  const path = join(dir, 'state.json');
+  const child = Bun.spawn(
+    ['flock', '-x', `${path}.lock`, 'sh', '-c', 'echo ready; exec sleep 30'],
+    {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+  );
+  children.push(child);
+  expect(new TextDecoder().decode((await child.stdout.getReader().read()).value)).toContain(
+    'ready',
+  );
+  await expect(writeState(path, SAMPLE)).rejects.toThrow(/timed out.*state.*lock/i);
+}, 10000);
 
 test('a successor cannot publish between a status check and its write', async () => {
   const path = join(dir, 'state.json');
@@ -762,20 +786,10 @@ test('markStatus re-reads and revalidates before writing — a concurrent write 
   const running = { ...SAMPLE, status: 'running' as const };
   const stopped = { ...SAMPLE, status: 'stopped' as const };
 
-  // markStatus's first read is held pending until we release it. While it waits,
-  // a concurrent writer publishes `stopped`. The fixed markStatus must re-read,
-  // observe `stopped`, and keep it — never overwrite with `ended`.
-  let releaseFirst: ((v: StateFile | null) => void) | undefined;
-  let releaseSecond: ((v: StateFile | null) => void) | undefined;
+  // The snapshots differ, so omitting either read fails without polling.
   let reads = 0;
   const io: StateIo = {
-    read: async () => {
-      reads += 1;
-      return new Promise<StateFile | null>((resolve) => {
-        if (reads === 1) releaseFirst = resolve;
-        else releaseSecond = resolve;
-      });
-    },
+    read: async () => (++reads === 1 ? running : stopped),
     write: async (_p, state) => {
       latest = state;
     },
@@ -784,13 +798,9 @@ test('markStatus re-reads and revalidates before writing — a concurrent write 
 
   await writeState(path, running);
   await writeState(path, stopped);
-  const mark = markStatus(path, 'ended', new Date('2026-07-01T00:00:00.000Z'), undefined, io);
-  while (!releaseFirst) await new Promise((r) => setTimeout(r, 1));
-  releaseFirst?.(running);
-  while (!releaseSecond) await new Promise((r) => setTimeout(r, 1));
-  releaseSecond?.(stopped);
-  await mark;
+  await markStatus(path, 'ended', new Date('2026-07-01T00:00:00.000Z'), undefined, io);
 
+  expect(reads).toBe(2);
   expect(latest?.status).toBe('stopped');
   expect(await readState(path)).toMatchObject({ status: 'stopped' });
 });
