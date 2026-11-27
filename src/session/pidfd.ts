@@ -1,6 +1,7 @@
-import { spawn } from 'node:child_process';
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { accessSync, constants as fsConstants, realpathSync, statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import type { Readable, Writable } from 'node:stream';
 import { WorkspaceError } from '../errors.js';
 
 /**
@@ -12,21 +13,48 @@ import { WorkspaceError } from '../errors.js';
  */
 const PYTHON_CANDIDATES = ['/usr/bin/python3', '/bin/python3'];
 
-/** Resolve a real, executable interpreter without ever consulting `PATH`. */
+/** A helper process that speaks the pidfd readiness/signal protocol. */
+export type PidfdHelper = ChildProcess & {
+  stdin: Writable;
+  stdout: Readable;
+  stderr: Readable;
+};
+
+/** The exact command and argv production uses to launch the helper. */
+export type HelperInvocation = { command: string; args: string[] };
+
+/** Seam for tests: production always launches a trusted, probed interpreter. */
+export type HelperLauncher = (invocation: HelperInvocation) => PidfdHelper;
+
+/**
+ * Resolve a real interpreter that actually has the pidfd APIs, without ever
+ * consulting `PATH`. An older Python at the first trusted path is skipped in
+ * favour of a newer one at the next path.
+ */
 function trustedPython(): string {
+  const probe =
+    'import os, signal, sys\nsys.exit(0 if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal") else 1)';
+  let lastFailure = '';
   for (const candidate of PYTHON_CANDIDATES) {
     try {
       accessSync(candidate, fsConstants.X_OK);
       const real = realpathSync(candidate);
       const stat = statSync(real);
       if (!real.startsWith('/') || !stat.isFile() || (stat.mode & 0o111) === 0) continue;
-      return candidate;
-    } catch {
+      const result = spawnSync(candidate, ['-I', '-B', '-c', probe], {
+        encoding: 'utf8',
+        timeout: 2000,
+      });
+      if (result.error) throw result.error;
+      if (result.status === 0) return candidate;
+      lastFailure = result.stderr.trim() || `${candidate} lacks the pidfd APIs`;
+    } catch (err) {
+      lastFailure = err instanceof Error ? err.message : String(err);
       // Try the next trusted location.
     }
   }
   throw new WorkspaceError(
-    `Cannot safely stop a process: no Python 3 interpreter at ${PYTHON_CANDIDATES.join(' or ')}.`,
+    `Cannot safely stop a process: no Python 3 with pidfd support at ${PYTHON_CANDIDATES.join(' or ')}. ${lastFailure}`.trim(),
   );
 }
 
@@ -34,6 +62,8 @@ function trustedPython(): string {
 export async function openPidfd(
   pid: number,
   startTicks: number | null,
+  launch: HelperLauncher = (invocation) =>
+    spawn(invocation.command, invocation.args, { stdio: ['pipe', 'pipe', 'pipe'] }),
 ): Promise<{ signal(): Promise<void>; close(): void }> {
   if (process.platform !== 'linux' || startTicks === null) {
     throw new WorkspaceError(
@@ -41,9 +71,13 @@ export async function openPidfd(
     );
   }
   const script = `import os, signal, sys\npid, ticks = map(int, sys.argv[1:])\ntry:\n fd = os.pidfd_open(pid)\n with open('/proc/%d/stat' % pid) as f: stat = f.read()\n if int(stat[stat.rfind(')')+1:].split()[19]) != ticks: raise RuntimeError('process identity changed')\n print('ready', flush=True)\n if sys.stdin.readline() == 'signal\\n': signal.pidfd_send_signal(fd, signal.SIGTERM)\n os.close(fd)\nexcept Exception as e:\n print(str(e), file=sys.stderr, flush=True)\n sys.exit(1)\n`;
-  const child = spawn(trustedPython(), ['-I', '-c', script, String(pid), String(startTicks)], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  // One argv builder for production and tests: the injected launcher sees the
+  // real `-I` isolation flag, so a test fails if the flag is ever dropped.
+  const invocation: HelperInvocation = {
+    command: trustedPython(),
+    args: ['-I', '-B', '-c', script, String(pid), String(startTicks)],
+  };
+  const child = launch(invocation);
   let error = '';
   let inputError: Error | undefined;
   child.stdin.on('error', (err: Error) => {
@@ -71,8 +105,10 @@ export async function openPidfd(
     void exit.then(() => finish(false));
   });
   if (!ready) {
+    // A helper that never answers must not wedge `stop`: kill it, then bound
+    // the close wait (Bun may delay the close event past the helper's exit).
     child.kill('SIGKILL');
-    await exit;
+    await Promise.race([exit, new Promise<void>((resolve) => setTimeout(resolve, 200))]);
     lines.close();
     throw new WorkspaceError(`Cannot safely open pidfd for ${pid}: ${error.trim()}`);
   }
