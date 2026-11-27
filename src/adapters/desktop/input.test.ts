@@ -40,7 +40,15 @@ test('mapKeyChord passes unknown keysyms through verbatim', () => {
 test('mapKeyChord throws on an empty key', () => {
   expect(() => mapKeyChord('')).toThrow(AdapterError);
   expect(() => mapKeyChord('  ')).toThrow(AdapterError);
-  expect(() => mapKeyChord('+')).toThrow(AdapterError);
+  expect(() => mapKeyChord('++')).not.toThrow();
+});
+
+test('mapKeyChord keeps the literal plus/minus key instead of dropping it', () => {
+  // `Control++` used to collapse to a bare `ctrl` press that reported success.
+  expect(mapKeyChord('Control++')).toBe('ctrl+plus');
+  expect(mapKeyChord('+')).toBe('plus');
+  expect(mapKeyChord('Control+-')).toBe('ctrl+minus');
+  expect(mapKeyChord('-')).toBe('minus');
 });
 
 // --- scrollButton -----------------------------------------------------------
@@ -97,7 +105,9 @@ test('typeArgs guards dash-leading text with --', () => {
 });
 
 test('keyArgs maps the chord', () => {
-  expect(keyArgs('Control+a')).toEqual(['key', '--clearmodifiers', 'ctrl+a']);
+  expect(keyArgs('Control+a')).toEqual(['key', '--clearmodifiers', '--', 'ctrl+a']);
+  // A `-`-led token must not be parseable as an xdotool option.
+  expect(keyArgs('-h').slice(0, 3)).toEqual(['key', '--clearmodifiers', '--']);
 });
 
 test('scrollArgs repeats the wheel button N times', () => {

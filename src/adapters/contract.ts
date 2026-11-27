@@ -146,6 +146,8 @@ export interface WaitOptions {
   networkIdle?: boolean;
   /** Hard cap in ms; on expiry the adapter throws (never resolves silently). */
   timeout?: number;
+  /** Abort the wait early (run ended/timed out); the adapter rejects with an AbortError-named error. */
+  signal?: AbortSignal;
 }
 
 /** Cardinal direction for {@link Adapter.scroll}; each adapter maps it to wheel/gesture deltas. */
@@ -188,9 +190,15 @@ export interface NetworkEntry {
   method: string;
   /** Request URL. */
   url: string;
-  /** HTTP status code; `0` when the request failed/aborted before a response. */
+  /**
+   * HTTP status code; `0` when there is no response — the request failed/aborted
+   * (`error` set) OR is still in flight (`pending: true`, no `error`).
+   */
   status: number;
-  /** `true` for a settled `2xx`/`3xx`; `false` for `4xx`/`5xx` or a failure. */
+  /**
+   * `true` for a settled `2xx`/`3xx`; `false` for `4xx`/`5xx`, a failure, or a
+   * {@link NetworkEntry.pending} row (not ok YET — `error` tells a failure apart).
+   */
   ok: boolean;
   /** Resource kind — `'fetch' | 'xhr' | 'document' | 'image' | …` — for filtering. */
   resourceType?: string;
@@ -199,9 +207,10 @@ export interface NetworkEntry {
   /** Capture time, ms since epoch. */
   timestamp: number;
   /**
-   * Wall-clock ms from the request leaving the page to its response arriving.
-   * Absent when the request never produced a response, or when it was already
-   * in flight before capture started.
+   * Wall-clock ms from the request leaving the page to its response arriving —
+   * or, on a {@link NetworkEntry.pending} row, the time in flight SO FAR (it
+   * grows on every read). Absent when a request failed without a timed start,
+   * or when it was already in flight before capture started.
    */
   durationMs?: number;
   /**
@@ -233,6 +242,14 @@ export interface NetworkEntry {
    * have switched tabs. Same rationale as {@link ConsoleEntry.tab}.
    */
   tab?: string;
+  /**
+   * `true` when the request was SENT but had neither a response nor a failure
+   * at read time — the hung call behind a spinner that never stops. Such a row
+   * carries `status: 0`, `ok: false` (not ok YET) and no `error` (not failed),
+   * `timestamp` is when it was sent, and `durationMs` the time in flight so far.
+   * Absent on every settled exchange.
+   */
+  pending?: boolean;
 }
 
 /**

@@ -77,6 +77,7 @@ const fakeResponse = (url: string) => {
     resourceType: () => 'fetch',
     postData: () => null,
     allHeaders: async () => ({}),
+    headers: () => ({}),
   };
   return {
     status: () => 200,
@@ -84,6 +85,7 @@ const fakeResponse = (url: string) => {
     url: () => url,
     text: async () => '{}',
     allHeaders: async () => ({}),
+    headers: () => ({}),
     request: () => request,
   };
 };

@@ -20,6 +20,7 @@ export const NETWORK_FILTER_KEYS = [
   'status_lt',
   'ok_eq',
   'failed_eq',
+  'pending_eq',
   'method_eq',
   'resource_in',
   'url_contains',
@@ -94,32 +95,42 @@ export function filterConsole(entries: ConsoleEntry[], filters?: Filters): Conso
  */
 export function filterNetwork(entries: NetworkEntry[], filters?: Filters): NetworkEntry[] {
   if (!filters) return entries;
+  // An in-flight row's `status: 0` / `ok: false` mean "no answer YET", not a
+  // failure — so status/ok predicates skip it unless the caller names
+  // `pending_eq`, or `status_lt: 400` would file a slow request as a failed one.
+  const settled = 'pending_eq' in filters ? () => true : (e: NetworkEntry) => e.pending !== true;
   let out = entries;
   for (const [key, value] of Object.entries(filters)) {
     switch (key) {
       case 'status_eq': {
         const want = expectNumber(key, value);
-        out = out.filter((e) => e.status === want);
+        out = out.filter((e) => settled(e) && e.status === want);
         break;
       }
       case 'status_gte': {
         const want = expectNumber(key, value);
-        out = out.filter((e) => e.status >= want);
+        out = out.filter((e) => settled(e) && e.status >= want);
         break;
       }
       case 'status_lt': {
         const want = expectNumber(key, value);
-        out = out.filter((e) => e.status < want);
+        out = out.filter((e) => settled(e) && e.status < want);
         break;
       }
       case 'ok_eq': {
         const want = expectBoolean(key, value);
-        out = out.filter((e) => e.ok === want);
+        out = out.filter((e) => settled(e) && e.ok === want);
         break;
       }
       case 'failed_eq': {
         const want = expectBoolean(key, value);
         out = out.filter((e) => (e.error !== undefined) === want);
+        break;
+      }
+      case 'pending_eq': {
+        // In flight at read time — never `failed` (no error) and never `ok` yet.
+        const want = expectBoolean(key, value);
+        out = out.filter((e) => (e.pending === true) === want);
         break;
       }
       case 'method_eq': {

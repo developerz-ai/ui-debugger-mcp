@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import * as errors from './errors.js';
 import {
   AdapterError,
   AdbError,
@@ -148,4 +149,14 @@ test('AdbError, McpServerError, ReplayError, VisionUnavailableError do not cross
   expect(replay instanceof McpServerError).toBe(false);
   expect(vision instanceof AdapterError).toBe(false);
   expect(vision instanceof AdbError).toBe(false);
+});
+
+test('every error class keeps a `cause` passed through the constructor', () => {
+  const cause = new Error('root');
+  for (const [name, value] of Object.entries(errors)) {
+    const ctor = value as new (message: string, options?: ErrorOptions) => Error;
+    const e = new ctor('wrapped', { cause });
+    expect(e.cause, name).toBe(cause);
+    expect(e.name, name).toBe(name);
+  }
 });

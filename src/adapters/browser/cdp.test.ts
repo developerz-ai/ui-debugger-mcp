@@ -1,125 +1,22 @@
 /**
  * `CdpCapture` — the live console/network observers. The pure pieces it leans on
  * are covered next door: rendering + redaction in `log-format.test.ts`, the
- * whitelisted `filters` in `log-filters.test.ts`.
+ * whitelisted `filters` in `log-filters.test.ts`; payload capture (bodies, size
+ * and binary caps, in-flight rows) in `cdp.exchange.test.ts`.
  */
 
 import { expect, test } from 'bun:test';
 import type { Page } from 'playwright-core';
-import { BODY_UNFINISHED, type CaptureSink, CdpCapture } from './cdp.js';
+import { BODY_UNFINISHED, CdpCapture } from './cdp.js';
+import {
+  FakeEmitter,
+  fakeConsole,
+  fakeFailed,
+  fakeResponse,
+  flush,
+  setup,
+} from './cdp.test-helpers.js';
 import { TabContext } from './tab-context.js';
-
-// --- Fakes ------------------------------------------------------------------
-
-type Listener = (arg: unknown) => void;
-
-/** Minimal event emitter standing in for a Playwright `Page`. */
-class FakeEmitter {
-  readonly #listeners = new Map<string, Listener[]>();
-
-  on(event: string, listener: Listener): this {
-    const arr = this.#listeners.get(event) ?? [];
-    arr.push(listener);
-    this.#listeners.set(event, arr);
-    return this;
-  }
-
-  off(event: string, listener: Listener): this {
-    const arr = this.#listeners.get(event) ?? [];
-    this.#listeners.set(
-      event,
-      arr.filter((l) => l !== listener),
-    );
-    return this;
-  }
-
-  emit(event: string, arg: unknown): void {
-    for (const l of this.#listeners.get(event) ?? []) l(arg);
-  }
-
-  count(): number {
-    let n = 0;
-    for (const arr of this.#listeners.values()) n += arr.length;
-    return n;
-  }
-}
-
-const fakeConsole = (type: string, text: string, url = 'app.js', line = 10, column = 5) => ({
-  type: () => type,
-  text: () => text,
-  location: () => ({ url, line, column, lineNumber: line, columnNumber: column }),
-});
-
-const fakeResponse = (o: {
-  method?: string;
-  url: string;
-  status: number;
-  ok: boolean;
-  resourceType?: string;
-  body?: string;
-  postData?: string;
-  requestHeaders?: Record<string, string>;
-  responseHeaders?: Record<string, string>;
-}) => {
-  // One request object per response: duration keys off request IDENTITY, so a
-  // fake that minted a fresh one per call could never be timed.
-  const request = {
-    method: () => o.method ?? 'GET',
-    url: () => o.url,
-    resourceType: () => o.resourceType ?? 'fetch',
-    postData: () => o.postData ?? null,
-    allHeaders: async () => o.requestHeaders ?? {},
-  };
-  return {
-    status: () => o.status,
-    ok: () => o.ok,
-    url: () => o.url,
-    text: async () => {
-      if (o.body === undefined) throw new Error('body unavailable');
-      return o.body;
-    },
-    allHeaders: async () => o.responseHeaders ?? {},
-    request: () => request,
-  };
-};
-
-/**
- * Let the async response capture settle. The row is buffered synchronously, but
- * its bodies/headers (and its log line) land behind an await.
- */
-const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-const fakeFailed = (o: {
-  method?: string;
-  url: string;
-  resourceType?: string;
-  errorText: string | null;
-}) => ({
-  method: () => o.method ?? 'GET',
-  url: () => o.url,
-  resourceType: () => o.resourceType ?? 'fetch',
-  failure: () => (o.errorText === null ? null : { errorText: o.errorText }),
-});
-
-function setup(opts?: {
-  now?: () => number;
-  cap?: number;
-  sink?: CaptureSink;
-  bodyWaitMs?: number;
-}) {
-  const page = new FakeEmitter();
-  const tabs = new TabContext();
-  const cap = new CdpCapture({
-    page: page as unknown as Page,
-    tabs,
-    now: opts?.now ?? (() => 1000),
-    cap: opts?.cap,
-    sink: opts?.sink,
-    bodyWaitMs: opts?.bodyWaitMs,
-  });
-  cap.start();
-  return { page, cap, tabs };
-}
 
 // --- CdpCapture -------------------------------------------------------------
 
@@ -356,7 +253,7 @@ test('streams formatted lines to the sink as entries arrive', async () => {
 
 test('stop detaches every listener', () => {
   const { page, cap } = setup();
-  expect(page.count()).toBe(5);
+  expect(page.count()).toBe(7);
   cap.stop();
   expect(page.count()).toBe(0);
   page.emit('console', fakeConsole('log', 'late'));
@@ -366,7 +263,7 @@ test('stop detaches every listener', () => {
 test('start is idempotent (no double subscription)', () => {
   const { page, cap } = setup();
   cap.start();
-  expect(page.count()).toBe(5);
+  expect(page.count()).toBe(7);
 });
 
 // --- rebind (tab switch) ----------------------------------------------------
@@ -380,7 +277,7 @@ test('rebind moves listeners to the new page and keeps what was captured', async
 
   // Old page is fully detached; the new one is live.
   expect(page.count()).toBe(0);
-  expect(next.count()).toBe(5);
+  expect(next.count()).toBe(7);
 
   next.emit('console', fakeConsole('error', 'from tab 1'));
   page.emit('console', fakeConsole('error', 'ignored'));
@@ -593,21 +490,4 @@ test('a REAL failure after the response amends the exchange instead of vanishing
   expect(entries[0]?.status).toBe(200);
   // The durable log carries the amended verdict too, not just the clean line.
   expect(lines.some((l) => l.includes('FAILED net::ERR_CONNECTION_RESET'))).toBe(true);
-});
-
-test('a credential-bearing URL never reaches the buffer or the log verbatim', async () => {
-  const lines: string[] = [];
-  const { page, cap } = setup({ sink: (_ch, line) => lines.push(line) });
-  const url = 'https://app/oauth?access_token=ya29.SECRET';
-  page.emit('response', fakeResponse({ url, status: 200, ok: true, body: '{}' }));
-  page.emit(
-    'requestfailed',
-    fakeFailed({ url: 'https://app/reset?token=SECRET2', errorText: 'net::ERR_FAILED' }),
-  );
-  await flush();
-  const urls = cap.network().map((e) => e.url);
-  expect(urls.some((u) => u.includes('ya29.SECRET'))).toBe(false);
-  expect(urls.some((u) => u.includes('SECRET2'))).toBe(false);
-  expect(urls).toContain('https://app/oauth?access_token=<redacted, 11 chars>');
-  expect(lines.some((l) => l.includes('SECRET'))).toBe(false);
 });

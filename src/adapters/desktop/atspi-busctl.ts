@@ -107,7 +107,8 @@ export class BusctlAtspi implements AtspiSource {
           !query ||
           matchesQuery({ role, name, bounds: UNMEASURED_BOUNDS, enabled: false }, query)
         ) {
-          out.push(await this.#describeRest(ref, role, name, deadline));
+          const described = await this.#describeRest(ref, role, name, deadline);
+          if (!opts.visibleOnly || described.visible) out.push(described);
         }
         next.push(...(await this.#children(ref, deadline)));
       }

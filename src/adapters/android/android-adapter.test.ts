@@ -87,3 +87,11 @@ describe('applyLogFilters', () => {
     expect(() => applyLogFilters(entries, { level_in: 'error' })).toThrow(AdapterError);
   });
 });
+
+describe('parseLogcat malformed time', () => {
+  test('an unrepresentable timestamp fails loud as AdapterError, not a bare RangeError', () => {
+    const row = '99999999999999999.000  1000  1000 I Tag: hi';
+    expect(() => parseLogcat(row)).toThrow(AdapterError);
+    expect(() => parseLogcat(`1${'0'.repeat(400)}.000  1  1 I Tag: x`)).toThrow(AdapterError);
+  });
+});

@@ -110,3 +110,23 @@ test('filterNetwork narrows by duration_gte and body_contains', () => {
   expect(filterNetwork(entries, { duration_gte: 500 }).map((e) => e.url)).toEqual(['slow']);
   expect(filterNetwork(entries, { body_contains: 'ERROR' }).map((e) => e.url)).toEqual(['boom']);
 });
+
+test('status/ok predicates skip in-flight rows unless pending_eq names them', () => {
+  const pending = n({ url: 'pending', status: 0, ok: false, pending: true });
+  const refused = n({ url: 'refused', status: 0, ok: false, error: 'net::ERR_CONNECTION_REFUSED' });
+  const served = n({ url: 'served', status: 500, ok: false });
+  const entries = [pending, refused, served];
+  const urls = (filters: Parameters<typeof filterNetwork>[1]) =>
+    filterNetwork(entries, filters).map((e) => e.url);
+
+  expect(urls({ status_eq: 0 })).toEqual(['refused']);
+  expect(urls({ status_lt: 400 })).toEqual(['refused']);
+  expect(urls({ status_gte: 0 })).toEqual(['refused', 'served']);
+  expect(urls({ ok_eq: false })).toEqual(['refused', 'served']);
+  expect(urls({ failed_eq: true })).toEqual(['refused']);
+  // Naming `pending_eq` is the opt-in: the caller asked about in-flight rows.
+  expect(urls({ pending_eq: true, status_eq: 0 })).toEqual(['pending']);
+  expect(urls({ pending_eq: false, ok_eq: false })).toEqual(['refused', 'served']);
+  // No filters → every row, pending included (the default read's diagnosis).
+  expect(urls(undefined)).toEqual(['pending', 'refused', 'served']);
+});

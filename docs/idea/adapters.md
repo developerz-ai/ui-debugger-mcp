@@ -28,24 +28,24 @@ The story names the target: _"on **mobile**, log in and …"_.
 Every adapter implements the same small interface so the agent loop is
 adapter-blind:
 
-| Op                                      | Web (CDP)                                                                                           | Desktop (X11/XWayland)                      | Mobile (ADB)                                        |
-| --------------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------- | --------------------------------------------------- |
-| `selectorDialect`                       | `"web"` — Playwright engines                                                                        | `"native"` — role "name" / bare name        | `"native"` — role "name" / bare name or resource-id |
-| `open`                                  | navigate to url                                                                                     | launch / focus the window                   | boot (managed) + launch activity / app              |
-| `find`                                  | DOM selector                                                                                        | a11y node                                   | uiautomator node                                    |
-| `click`                                 | CDP input                                                                                           | synthesized pointer event                   | `input tap`                                         |
-| `type`                                  | CDP input                                                                                           | synthesized key event                       | `input text`                                        |
-| `pressKey`                              | CDP input                                                                                           | synthesized key event                       | `input keyevent`                                    |
-| `scroll`                                | mouse wheel                                                                                         | wheel, optionally inside a region           | `input swipe`                                       |
-| `readState`                             | DOM snapshot                                                                                        | AT-SPI a11y tree                            | uiautomator dump                                    |
-| `screenshot`                            | CDP capture                                                                                         | X11/Xvfb or grim (Wayland)                  | `screencap`                                         |
-| `waitFor`                               | DOM / network idle                                                                                  | poll a11y (networkIdle unsupported)         | poll hierarchy (networkIdle unsupported)            |
-| `console`                               | CDP capture                                                                                         | unsupported — fails loud                    | logcat tail                                         |
-| `network`                               | CDP exchanges (bodies/headers)                                                                      | unsupported — fails loud                    | unsupported over ADB — fails loud                   |
-| `close`                                 | managed: stop Chrome · attach: restore the adopted tab's pre-run URL (best-effort), then disconnect | managed: stop the launched app · else no-op | managed: kill our emulator · attach: disconnect     |
-| `tabs` — optional (web)                 | list open tabs                                                                                      | —                                           | —                                                   |
-| `selectTab` — optional (web)            | drive another tab                                                                                   | —                                           | —                                                   |
-| `takeUnrequestedLoads` — optional (web) | drained surprise full-document loads                                                                | —                                           | —                                                   |
+| Op                                      | Web (CDP)                                                                                                                 | Desktop (X11/XWayland)                      | Mobile (ADB)                                        |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- | --------------------------------------------------- |
+| `selectorDialect`                       | `"web"` — Playwright engines                                                                                              | `"native"` — role "name" / bare name        | `"native"` — role "name" / bare name or resource-id |
+| `open`                                  | navigate to url                                                                                                           | launch / focus the window                   | boot (managed) + launch activity / app              |
+| `find`                                  | DOM selector                                                                                                              | a11y node                                   | uiautomator node                                    |
+| `click`                                 | CDP input                                                                                                                 | synthesized pointer event                   | `input tap`                                         |
+| `type`                                  | CDP input                                                                                                                 | synthesized key event                       | `input text`                                        |
+| `pressKey`                              | CDP input                                                                                                                 | synthesized key event                       | `input keyevent`                                    |
+| `scroll`                                | mouse wheel                                                                                                               | wheel, optionally inside a region           | `input swipe`                                       |
+| `readState`                             | DOM snapshot                                                                                                              | AT-SPI a11y tree                            | uiautomator dump                                    |
+| `screenshot`                            | CDP capture                                                                                                               | X11/Xvfb or grim (Wayland)                  | `screencap`                                         |
+| `waitFor`                               | DOM / network idle; aborts with the run (`WaitOptions.signal`)                                                            | poll a11y (networkIdle unsupported)         | poll hierarchy (networkIdle unsupported)            |
+| `console`                               | CDP capture                                                                                                               | unsupported — fails loud                    | logcat tail                                         |
+| `network`                               | CDP exchanges (bodies/headers)                                                                                            | unsupported — fails loud                    | unsupported over ADB — fails loud                   |
+| `close`                                 | managed: stop Chrome · attach: restore the adopted tab's pre-run URL (or close a tab attach had to open), then disconnect | managed: stop the launched app · else no-op | managed: kill our emulator · attach: disconnect     |
+| `tabs` — optional (web)                 | list open tabs                                                                                                            | —                                           | —                                                   |
+| `selectTab` — optional (web)            | drive another tab                                                                                                         | —                                           | —                                                   |
+| `takeUnrequestedLoads` — optional (web) | drained surprise full-document loads                                                                                      | —                                           | —                                                   |
 
 Web is precise (DOM). Desktop reads the **accessibility tree**; mobile the
 **view hierarchy**. There is **no automatic vision/OCR fallback** — the adapter
@@ -89,7 +89,7 @@ The browser adapter runs Chrome one of two ways:
   live/staging/containerised or remote Chrome.
 
 Attach adopts the **first tab in the first available browser context** —
-`attachHandles` in `src/adapters/browser/lifecycle.ts:138-139` — creating a
+`attachHandles` in `src/adapters/browser/lifecycle.ts:160-162` — creating a
 context or tab only if missing. This is **not active-tab or URL-based
 selection**. `start_debug` navigates that tab to the effective target URL (the
 per-run `url` override, otherwise the configured target URL). When `as` selects a

@@ -11,9 +11,30 @@
 
 import type { ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
 import type { Adb } from './adb.js';
 import { AndroidAdapter, type AndroidAdapterInit } from './android-adapter.js';
 import type { AndroidNode, UiAutomatorSource } from './uiautomator.js';
+
+/**
+ * True while `pid` is a live process; false once it is gone OR a zombie. A container
+ * whose PID 1 never reaps orphans leaves killed processes as zombies, for which
+ * `kill(pid, 0)` still succeeds — so read the state from `/proc` when it exists.
+ */
+export function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // `pid (comm) S …` — comm may hold spaces/parens, so take the state after the LAST ')'.
+    return stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) !== 'Z';
+  } catch {
+    return true; // no /proc (or the process vanished between the calls): kill(0) said alive
+  }
+}
 
 /** Sleep helper — the fakes use it to simulate a slow device round-trip. */
 export const fakeDelay = (ms: number): Promise<void> =>
@@ -93,7 +114,7 @@ export class FakeAdb implements Adb {
     await this.#linger(key);
     const v = this.responses.get(key);
     if (v instanceof Uint8Array) return v;
-    return new Uint8Array([1, 2, 3]);
+    return new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
   }
 
   async adb(args: string[], deadline?: number): Promise<string> {

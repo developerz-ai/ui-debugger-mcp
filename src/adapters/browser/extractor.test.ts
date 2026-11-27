@@ -28,6 +28,7 @@ interface ElementSpec {
   attrs?: Record<string, string>;
   textContent?: string | null;
   readOnly?: boolean;
+  value?: string;
   labels?: FakeElement[] | null;
   parentElement?: FakeElement | null;
   disabled?: boolean;
@@ -64,6 +65,7 @@ function createWorld() {
       tagName: spec.tagName,
       textContent: spec.textContent ?? null,
       readOnly: spec.readOnly,
+      value: spec.value,
       labels: spec.labels ?? null,
       parentElement: spec.parentElement ?? null,
       ownerDocument: doc,
@@ -292,6 +294,20 @@ test('enabled: a readonly input reads enabled:false; a plain one reads enabled:t
   ]);
   expect(plain?.enabled).toBe(true);
   expect(locked?.enabled).toBe(false);
+});
+
+// --- live value: a password field never reports its secret ----------------------
+
+test('value: a password field reports only its length — any type casing — a text field its value', () => {
+  const world = createWorld();
+  const [password, shouted, text] = NODE_EXTRACTOR([
+    world.el({ tagName: 'input', attrs: { type: 'password' }, value: 'hunter2' }),
+    world.el({ tagName: 'input', attrs: { type: 'PASSWORD' }, value: 'hunter2' }),
+    world.el({ tagName: 'input', attrs: { type: 'text' }, value: 'hunter2' }),
+  ]);
+  expect(password?.value).toBe('<redacted, 7 chars>');
+  expect(shouted?.value).toBe('<redacted, 7 chars>');
+  expect(text?.value).toBe('hunter2');
 });
 
 // --- contrast/style path -------------------------------------------------------

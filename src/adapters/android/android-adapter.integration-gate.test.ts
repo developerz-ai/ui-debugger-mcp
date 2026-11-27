@@ -82,6 +82,12 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 /**
+ * Env vars that make bun switch to its compact agent reporter (the report then omits the
+ * file name this guard parses). Stripped so the child's output is the same whoever runs it.
+ */
+const AGENT_ENV = /^(CLAUDECODE|AI_AGENT|AGENT|CLAUDE_CODE_.*)$/;
+
+/**
  * Child env: the outer env with every android knob stripped (hermetic even
  * when the guard itself runs under `ANDROID_INTEGRATION_TESTS=1`), the stub
  * `adb` shadowing any real one, and the probe log wired for the stub.
@@ -93,7 +99,7 @@ function childEnv(opts: {
 }): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
+    if (value === undefined || AGENT_ENV.test(key)) continue;
     if (key === 'ANDROID_INTEGRATION_TESTS' || key === 'ANDROID_SERIAL' || key === PROBE_LOG_VAR)
       continue;
     env[key] = value;

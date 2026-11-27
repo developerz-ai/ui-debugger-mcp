@@ -52,13 +52,18 @@ import {
 import {
   appendDebugLogin,
   NAV_TIMEOUT_MS,
-  RESTORE_TIMEOUT_MS,
   resolveTargetUrl,
   unreachableFailure,
 } from './launch.js';
-import type { AdapterHandles, BrowserAdapterInit } from './lifecycle.js';
-import { openBrowserHandles } from './lifecycle.js';
-import { locateAcrossFrames, regionAcrossFrames, waitAcrossFrames } from './locate.js';
+import type { AdapterHandles, BrowserAdapterInit, TabHandBack } from './lifecycle.js';
+import { handBackTab, openBrowserHandles } from './lifecycle.js';
+import {
+  abortError,
+  locateAcrossFrames,
+  raceAbort,
+  regionAcrossFrames,
+  waitAcrossFrames,
+} from './locate.js';
 import { redactUrl } from './log-format.js';
 import { normalizeQuery } from './query.js';
 import type { TabContext } from './tab-context.js';
@@ -127,15 +132,16 @@ export class BrowserAdapter implements Adapter {
   readonly #tabs: TabContext;
 
   /**
-   * The adopted tab and the URL it carried when we ATTACHED, or `null` for a
-   * managed context (whose profile we own — nothing to hand back).
+   * What attach teardown owes the tab it took over ({@link TabHandBack}), or
+   * `null` for a managed context (whose profile we own — nothing to hand back).
    *
    * Snapshotted in the constructor, which runs BEFORE `open()`, the persona
    * login and every driver step: that is the one moment that predates everything
    * the run navigates, so `close()` can return an adopted tab to where its
    * owner left it instead of on the last screen the driver happened to reach.
+   * Cleared on first use: `close()` may run twice, and must hand back once.
    */
-  #restore: { page: Page; url: string } | null = null;
+  #handBack: TabHandBack | null = null;
 
   /**
    * Full-document loads the page performed on its own, oldest first — see
@@ -167,7 +173,9 @@ export class BrowserAdapter implements Adapter {
     // run moves it (open(), persona login, driver steps) so close() can hand
     // the tab back. Managed owns its profile — there is nothing to restore.
     if (handles.mode === 'attach') {
-      this.#restore = { page: handles.page, url: handles.page.url() };
+      this.#handBack = handles.createdPage
+        ? { page: handles.page, close: true }
+        : { page: handles.page, url: handles.page.url() };
     }
     // First sight of the run's first tab: it is `tab-1` from the start, even if
     // it never logs anything — the label names the PAGE, it is not a reward for
@@ -322,21 +330,24 @@ export class BrowserAdapter implements Adapter {
     }
     // `timeout` caps the WHOLE wait, not each phase — with both `query` and
     // `networkIdle` set, the second wait only gets what's left of the budget.
+    const { signal } = opts;
+    // Already over: never start a poller for a run that has ended.
+    if (signal?.aborted) throw abortError(signal);
     const deadline = opts.timeout === undefined ? undefined : Date.now() + opts.timeout;
-    await this.#run('waitFor', async () => {
+    const work = this.#run('waitFor', async () => {
       if (opts.query) {
-        // The wait gets the REMAINING budget, not a fresh full-length one. A
-        // per-test setup that already spent time loading leaves less than the
-        // requested timeout; granting the full amount again lets one uncancelled
-        // Playwright poll outlive its test and fire against the page after
-        // teardown closed it ("Target page, context or browser has been closed")
-        // and leaves a dangling process behind.
-        await waitAcrossFrames(this.#page, opts.query, remainingTimeout(deadline));
+        // The REMAINING budget, not a fresh full-length one: an uncancelled poll
+        // granted the full amount again outlives its caller and fires against a
+        // page teardown already closed ("Target … has been closed").
+        await waitAcrossFrames(this.#page, opts.query, remainingTimeout(deadline), signal);
       }
       if (opts.networkIdle) {
         await this.#page.waitForLoadState('networkidle', { timeout: remainingTimeout(deadline) });
       }
     });
+    // An abort rejects AT ONCE; the frame poll stops at its next slice. Playwright's
+    // networkidle wait is uncancellable — it runs out its run-capped timeout unobserved.
+    await (signal ? raceAbort(work, signal) : work);
   }
 
   async console(opts?: LogQuery): Promise<ConsoleEntry[]> {
@@ -348,47 +359,23 @@ export class BrowserAdapter implements Adapter {
   }
 
   async close(): Promise<void> {
-    // Detach capture first so no events fire mid-teardown.
+    // Detach every page listener first (capture AND load watch): no events mid-
+    // teardown, and none left on an attached page that outlives the run.
+    this.#page.off('load', this.#onLoad);
     this.#capture.stop();
     await this.#run('close', async () => {
       if (this.#mode === 'attach') {
-        // Attach: return the adopted tab to its pre-run URL (best-effort), then
-        // disconnect — never stop a browser we did not start.
-        await this.#restoreAdoptedTab();
+        // Attach: hand the tab back (best-effort), then disconnect — never stop
+        // a browser we did not start.
+        const handBack = this.#handBack;
+        this.#handBack = null;
+        await handBackTab(handBack);
         if (this.#browser) await this.#browser.close();
         return;
       }
       // Managed: close the persistent context we own (stops the browser).
       await this.#context.close();
     });
-  }
-
-  /**
-   * Return the adopted tab to the URL it carried when we attached (attach only).
-   *
-   * Runs ONCE: `close()` may be called twice, and the second call must not
-   * re-navigate. A tab the run never moved already sits on the snapshot, so it
-   * is not reloaded — navigating it again would only flash the owner's screen.
-   * A failure is swallowed on purpose: the browser was never ours, the run is
-   * already over, and neither a wedged `goto` nor a tab the owner closed
-   * mid-run — reading a dead handle's address throws — must fail the teardown
-   * or skip the disconnect (same best-effort posture as `closeOnFailure` in
-   * `launch.ts`).
-   * `RESTORE_TIMEOUT_MS` caps the wait — teardown has no run budget to shorten.
-   */
-  async #restoreAdoptedTab(): Promise<void> {
-    const restore = this.#restore;
-    this.#restore = null;
-    try {
-      // The `url()` read lives inside the swallow: on a live attached browser
-      // the tab can already be gone (the owner closed it, Chrome quit) and
-      // reading a dead handle's address throws — which would reject close()
-      // AND skip the disconnect below, leaking the CDP connection.
-      if (!restore || restore.page.url() === restore.url) return;
-      await restore.page.goto(restore.url, { timeout: RESTORE_TIMEOUT_MS });
-    } catch {
-      // Best-effort only — the disconnect below must still happen.
-    }
   }
 
   /**

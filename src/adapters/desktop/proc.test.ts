@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ExecTimeoutError } from '../../errors.js';
 import { desktopEnv, isEnoent, makeExec, terminateGroup } from './proc.js';
+import { isAlive } from './process-alive.test-helpers.js';
 
 /** Patch `process.env` for one assertion block, always restoring afterwards. */
 function withEnv(patch: Record<string, string | undefined>, fn: () => void): void {
@@ -138,16 +139,6 @@ test('makeExec resolves normally when the deadline is still in the future', asyn
 });
 
 // --- terminateGroup (real detached process groups) ----------------------------
-
-/** True while `pid` is alive (`kill -0`); false once it's gone (ESRCH). */
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /** Spawn a detached `/bin/sh` group running `script`, and hand back its pid. */
 function spawnGroup(script: string): number {

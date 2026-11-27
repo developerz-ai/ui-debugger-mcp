@@ -161,6 +161,11 @@ function signalGroup(pid: number, signal: NodeJS.Signals | 0): boolean {
   }
 }
 
+/** True while any process still sits in the detached group `pid` leads (a `kill -0` probe). */
+export function groupAlive(pid: number): boolean {
+  return signalGroup(pid, 0);
+}
+
 /**
  * Tear a managed target down: SIGTERM its group, wait for it to actually die, escalate
  * to SIGKILL after `graceMs`.
