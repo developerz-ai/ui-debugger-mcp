@@ -1,6 +1,6 @@
 {
   "name": "@developerz.ai/ui-debugger-mcp",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "description": "Autonomous UI debugging MCP server. Give a goal; a fast agent drives the browser/desktop, finds bugs + visual issues, and reports back.",
   "mcpName": "io.github.developerz-ai/ui-debugger-mcp",
   "license": "MIT",
@@ -40,16 +40,16 @@
     "format": "biome format --write ."
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@openrouter/ai-sdk-provider": "^3.1.0",
-    "ai": "^7.0.143",
-    "playwright-core": "^1.61.1",
-    "zod": "^4.4.3"
+    "ai": "^7.0.183",
+    "playwright-core": "^1.65.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.15",
-    "@types/bun": "^1.2.0",
-    "ajv": "^8.17.1",
+    "@biomejs/biome": "^2.6.9",
+    "@types/bun": "^1.4.5",
+    "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "typescript": "^7.0.2"
   }
