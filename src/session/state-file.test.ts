@@ -522,6 +522,37 @@ test("the owner's own clear() ends the run and releases the claim", async () => 
   expect(await readState(ws.stateJson)).toMatchObject({ sessionId: 'next-run' });
 });
 
+test('clear() releases the claim even when state.json is gone — an idle server never wedges the project', async () => {
+  // Someone deleted (or corrupted) state.json mid-run. The breadcrumb names no
+  // successor, so the id guard has nothing to protect — but the old early
+  // return kept the kernel lock: every other server on this project was refused
+  // until this idle one exited, and `stop` (which reads state.json) could not reach it.
+  const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
+  const owner = new FileStatePort(ws, { pid: process.pid });
+  await owner.record({ sessionId: 'owner-run', target: 'web', goal: 'first' });
+  await rm(ws.stateJson);
+
+  await owner.clear('owner-run');
+
+  expect(await readFile(ownerLockPath(ws), 'utf8')).toBe('');
+  const successor = new FileStatePort(ws, { pid: spawnLivePid() });
+  await successor.record({ sessionId: 'next-run', target: 'web', goal: 'next' });
+  expect(await readState(ws.stateJson)).toMatchObject({ sessionId: 'next-run' });
+});
+
+test('clear() with state.json gone keeps a claim taken for a DIFFERENT run', async () => {
+  const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
+  const owner = new FileStatePort(ws, { pid: process.pid });
+  await owner.record({ sessionId: 'owner-run', target: 'web', goal: 'first' });
+  const claimBefore = await readFile(ownerLockPath(ws), 'utf8');
+  await rm(ws.stateJson);
+
+  await owner.clear('some-other-run');
+
+  expect(await readFile(ownerLockPath(ws), 'utf8')).toBe(claimBefore);
+  await owner.clear('owner-run'); // test hygiene: give the kernel lock back
+});
+
 test('a failed second record does not release the claim held by the first record', async () => {
   const ws = workspacePaths(join(dir, 'proj'), join(dir, 'ws'));
   let writes = 0;

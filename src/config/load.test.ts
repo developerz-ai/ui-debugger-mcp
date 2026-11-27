@@ -102,6 +102,30 @@ test('blank OPENAI_BASE_URL falls back to the OpenRouter default', () => {
   expect(cfg.provider.baseUrl).toBe(OPENROUTER_BASE_URL);
 });
 
+test('a malformed OPENAI_BASE_URL fails at boot, naming the variable — not on the first model call', () => {
+  for (const OPENAI_BASE_URL of ['openrouter.ai/api/v1', 'localhost:8080/v1', 'ftp://x/v1']) {
+    expect(() =>
+      loadConfig({ cwd: tmpProject(minimal), env: { ...key, OPENAI_BASE_URL } }),
+    ).toThrow(/OPENAI_BASE_URL/);
+  }
+  const local = { ...key, OPENAI_BASE_URL: 'http://localhost:8080/v1' };
+  expect(loadConfig({ cwd: tmpProject(minimal), env: local }).provider.baseUrl).toBe(
+    'http://localhost:8080/v1',
+  );
+});
+
+test('a malformed OPENAI_BASE_URL never echoes its value — it may carry credentials', () => {
+  const OPENAI_BASE_URL = 'user:s3cr3t-token@openrouter.ai/api/v1';
+  let message = '';
+  try {
+    loadConfig({ cwd: tmpProject(minimal), env: { ...key, OPENAI_BASE_URL } });
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e);
+  }
+  expect(message).toContain('OPENAI_BASE_URL');
+  expect(message).not.toContain('s3cr3t-token');
+});
+
 test('missing provider API key throws ConfigError', () => {
   expect(() => loadConfig({ cwd: tmpProject(minimal), env: {} })).toThrow(ConfigError);
   expect(() => loadConfig({ cwd: tmpProject(minimal), env: { OPENAI_API_KEY: '  ' } })).toThrow(

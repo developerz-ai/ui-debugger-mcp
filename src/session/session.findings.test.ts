@@ -343,6 +343,41 @@ test('close is not blocked by a hung summary model (teardown wins the abort race
   expect((await store.readFindings()).summary).toBeUndefined(); // hung summary never written
 });
 
+test('a summary that resolves AFTER close never writes into the torn-down run', async () => {
+  // A summarizer that ignores the abort signal and settles late: `close()` has
+  // already resolved, so its write-back would land on a run that no longer exists.
+  const store = makeStore();
+  let finish: (summary: string) => void = () => undefined;
+  let enterSummary: () => void = () => undefined;
+  const entered = new Promise<void>((resolve) => {
+    enterSummary = resolve;
+  });
+  const session = new Session({
+    id: 's1',
+    story: 'x',
+    adapter: new FakeAdapter(),
+    findingsStore: store,
+    summarize: () => {
+      enterSummary();
+      return new Promise<string>((resolve) => {
+        finish = resolve;
+      });
+    },
+  });
+
+  const run = session.start(async (ctx) => {
+    await ctx.progress.writeFindings({ status: 'passed', steps: [], bugs: [], visual: [] });
+  });
+
+  await entered;
+  await session.close();
+  finish('late prose');
+  await run;
+  await new Promise((resolve) => setTimeout(resolve, 20)); // let the abandoned write-back run
+
+  expect((await store.readFindings()).summary).toBeUndefined();
+});
+
 test('summarize digests the reported verdict when the driver left the prose out', async () => {
   const store = makeStore();
   let digestedStatus: Findings['status'] | undefined;
@@ -404,6 +439,8 @@ test('a run that never reported gets the facts, never a model-invented cause', a
   const findings = await store.readFindings();
   expect(findings.status).toBe('failed');
   expect(findings.summary).toContain('WITHOUT a verdict');
+  expect(findings.summary).toContain('finished without calling `report`');
+  expect(findings.summary).not.toContain('used up its step budget'); // cause is unknown here
   expect(findings.summary).toContain('no findings were recorded'); // true here: the run is truly empty
   expect(findings.summary).toContain('1 step(s) ran');
   expect(findings.summary).not.toContain('crashed');

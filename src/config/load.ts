@@ -24,6 +24,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { z } from 'zod';
 import {
   type ProviderEnv,
   providerApiKeyPrecedence,
@@ -46,6 +47,9 @@ export const CONFIG_CANDIDATES = ['.dz/ui-debugger/ui-debugger-mcp.json', CONFIG
 
 /** Default base url — OpenRouter. Override with env `OPENAI_BASE_URL`. */
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+
+/** A provider base url: absolute, http(s) only. */
+const BaseUrlSchema = z.url({ protocol: /^https?$/ });
 
 /** Default workspace dir (per-project sessions, profiles, logs). */
 export const DEFAULT_WORKSPACE = './tmp/ui-debugger-mcp';
@@ -237,5 +241,13 @@ function resolveProvider(env: ProviderEnv): ProviderConfig {
     );
   }
   const baseUrl = env.OPENAI_BASE_URL?.trim() || OPENROUTER_BASE_URL;
+  // Env is a boundary too: `openrouter.ai/api/v1` (no scheme) otherwise boots fine
+  // and only fails as an opaque fetch error on the run's first model call.
+  if (!BaseUrlSchema.safeParse(baseUrl).success) {
+    throw new ConfigError(
+      // Never echo the value: a base url can carry `user:token@` credentials.
+      `OPENAI_BASE_URL must be an absolute http(s) URL (e.g. ${OPENROUTER_BASE_URL}).`,
+    );
+  }
   return { apiKey, baseUrl };
 }

@@ -343,6 +343,17 @@ function locateCachedBinary(
 }
 
 /**
+ * Cap on each diagnostic probe (`ldd`, `sudo -n -l…`). Both answer in
+ * milliseconds; one that has not answered in 30s is hung, not slow.
+ */
+export const PROBE_TIMEOUT_MS = 30_000;
+
+/** Did `execFileSync` kill the child for exceeding its `timeout`? */
+function timedOut(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | null)?.code === 'ETIMEDOUT';
+}
+
+/**
  * The captured output of a failed `execFileSync` run. `execFileSync` throws on
  * a non-zero exit and puts the piped stdout/stderr on the error object.
  */
@@ -373,10 +384,23 @@ function capturedOutput(err: unknown): { stdout: string; stderr: string } {
  * found`) is printed on stdout even when `ldd` exits non-zero, and the
  * diagnostics land on stderr — hence both streams, combined.
  */
-export const runLdd: LddRunner = (binary) => {
+export function runLdd(binary: string, timeoutMs = PROBE_TIMEOUT_MS): string {
   try {
-    return execFileSync('ldd', [binary], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return execFileSync('ldd', [binary], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+    });
   } catch (err) {
+    // A timeout is checked FIRST: the partial listing a killed `ldd` leaves
+    // behind may already hold `=>` lines, and parsing it would be a false healthy.
+    if (timedOut(err)) {
+      throw new ChromiumLibsMissingError(
+        `${MISSING_LIBS_MARKER} \`ldd ${binary}\` timed out after ${timeoutMs / 1000}s — ` +
+          'the shared-library check could not complete.',
+      );
+    }
     const { stdout, stderr } = capturedOutput(err);
     const combined = `${stdout}${stderr}`;
     // `ldd` failed without producing a library listing at all (e.g. "not a
@@ -394,7 +418,7 @@ export const runLdd: LddRunner = (binary) => {
     }
     return combined;
   }
-};
+}
 
 /** Split a fixed, repo-owned command string on whitespace (never user input). */
 function splitCommand(command: string): { bin: string; args: string[] } | null {
@@ -414,10 +438,14 @@ function isRoot(): boolean {
  */
 function sudoListing(argv: string[]): string | null {
   try {
+    // Capped: a sudo stuck on a slow NSS/LDAP lookup would otherwise hang
+    // `bin/setup` forever. A probe that does not answer proves no elevation.
     return execFileSync('sudo', ['-n', ...argv], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+      timeout: PROBE_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
     });
   } catch {
     return null;

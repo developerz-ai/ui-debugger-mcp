@@ -4,8 +4,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
-import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { access, mkdir } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { WorkspaceError } from '../errors.js';
 
 // --- ID generator -----------------------------------------------------------
 // Counter+injected-time avoids both Date.now-only collisions and non-determinism in tests.
@@ -44,6 +45,13 @@ export function generateSessionId(now: number): string {
   const time = `${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
   return `${date}_${time}-${pad(_counter, 4)}`;
 }
+
+/**
+ * A directory name that IS a run: a {@link generateSessionId} id, or the legacy
+ * epoch-ms form (`1784985071909-0001`) older servers wrote. Anything else under
+ * `sessions/` is not ours to prune.
+ */
+export const SESSION_DIR_PATTERN = /^(?:\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}|\d+)-\d{4}$/;
 
 // --- Path types -------------------------------------------------------------
 
@@ -163,10 +171,66 @@ export async function ensureWorkspace(paths: WorkspacePaths): Promise<void> {
 }
 
 /**
- * Ensure a session's directories exist.
- * Creates `screenshots/` and `logs/` (mkdir -p).
+ * Create a NEW session's directories: the session root (exclusively), then
+ * `screenshots/` and `logs/`.
+ *
+ * The root must not exist yet. The id counter is per process, so a server
+ * restarted within the same wall-clock second can hand out an id a previous
+ * process already used — reusing that dir would mix two runs' evidence, and a
+ * run that never reports would inherit the old run's verdict.
+ *
+ * @throws {WorkspaceError} when the session dir already exists.
  */
 export async function ensureSession(paths: SessionPaths): Promise<void> {
+  await mkdir(dirname(paths.root), { recursive: true });
+  try {
+    await mkdir(paths.root);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    throw new WorkspaceError(
+      `Session directory '${paths.root}' already exists — another run was given the same id ` +
+        '(a server restarted within the same second). Start the run again.',
+    );
+  }
   await mkdir(paths.screenshots, { recursive: true });
   await mkdir(paths.logs, { recursive: true });
+}
+
+/** How many ids {@link allocateSessionId} tries before giving up. */
+export const SESSION_ID_ATTEMPTS = 100;
+
+/**
+ * Hand out a session id whose directory does not exist yet — the self-healing
+ * front of {@link ensureSession}'s exclusive create.
+ *
+ * The counter is per process: a server restarted within the same wall-clock
+ * second hands out `...-0001` again. A taken id just advances the counter to the
+ * next one (still fixed-width, still byte-ordered) instead of failing the start.
+ * The check runs before the run claims the workspace lock; a rival process that
+ * could take the same id between check and create is refused by that lock, and
+ * {@link ensureSession} stays the loud backstop.
+ *
+ * @param now - injected epoch ms
+ * @throws {WorkspaceError} after {@link SESSION_ID_ATTEMPTS} taken ids in a row.
+ */
+export async function allocateSessionId(workspace: WorkspacePaths, now: number): Promise<string> {
+  for (let attempt = 0; attempt < SESSION_ID_ATTEMPTS; attempt += 1) {
+    const id = generateSessionId(now);
+    if (!(await exists(sessionPaths(workspace, id).root))) return id;
+  }
+  throw new WorkspaceError(
+    `No free session id under '${workspace.sessions}' after ${SESSION_ID_ATTEMPTS} attempts — ` +
+      'every candidate directory already exists.',
+  );
+}
+
+/** Whether `path` exists; only "not found" is a no — any other error is rethrown. */
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
 }

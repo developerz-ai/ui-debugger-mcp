@@ -107,6 +107,21 @@ test('loose files in sessions/ are left alone — only directories are runs', as
   expect(existsSync(join(workspace.sessions, 'README.txt'))).toBe(true);
 });
 
+test('only run-shaped dirs are runs — a foreign dir is never deleted nor holds a slot', async () => {
+  // A dir that is not a session id (a hand-made `keep-me/`, a profile pointed at
+  // `sessions/Default`) is not ours to delete, and must not push real runs out:
+  // 'k' sorts above every dated id, so it read as the "newest" run forever.
+  const ids = ['2026-07-24_10-00-00-0001', '2026-07-25_10-00-00-0001', '2026-07-26_10-00-00-0001'];
+  await seed(...ids, 'keep-me', '0-archive');
+
+  const removed = await pruneSessions(workspace, { keep: 2 });
+
+  expect(removed).toEqual(['2026-07-24_10-00-00-0001']);
+  for (const dir of ['keep-me', '0-archive', ...ids.slice(1)]) {
+    expect(existsSync(join(workspace.sessions, dir))).toBe(true);
+  }
+});
+
 test('a missing sessions dir prunes nothing (no run has happened here yet)', async () => {
   await rm(workspace.sessions, { recursive: true, force: true });
   expect(await pruneSessions(workspace)).toEqual([]);

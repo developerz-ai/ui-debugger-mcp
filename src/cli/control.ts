@@ -14,14 +14,14 @@
  * Neither needs the model API key — they resolve only the workspace dir.
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { loadWorkspaceDir } from '../config/load.js';
-import { ConfigError } from '../errors.js';
+import { ConfigError, WorkspaceError } from '../errors.js';
 import { FindingsSchema } from '../findings/schema.js';
 import { readLivePointer } from '../session/live-pointer.js';
 import { ownerAlive } from '../session/process-identity.js';
-import { markStatus, readState, restoreRunning } from '../session/state-file.js';
+import { markStatus, readState, restoreRunning, type StateFile } from '../session/state-file.js';
 import { resolveProject, workspacePaths } from '../session/workspace.js';
 
 /** Read + validate a session's `findings.json`; `null` when absent/malformed. */
@@ -33,6 +33,34 @@ async function readFindings(sessionDir: string) {
   } catch {
     return null;
   }
+}
+
+/**
+ * `state.json`, or `null` only when the file is ABSENT (`ENOENT`). A present file that does
+ * not parse (hand-edited, or written by an incompatible server version) is a
+ * `WorkspaceError` — reporting "no debug run" there would hide a live run from
+ * `status` and make `stop` a no-op while the server keeps the profile locked.
+ */
+async function readRecordedState(stateJson: string): Promise<StateFile | null> {
+  try {
+    // `stat`, not `existsSync`: that is false on EACCES too, so an unreadable
+    // workspace read as "no run". Only ENOENT means absent.
+    await stat(stateJson);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return null;
+    throw new WorkspaceError(
+      `Cannot access ${stateJson}: ${code ?? (err instanceof Error ? err.message : String(err))}.`,
+    );
+  }
+  const state = await readState(stateJson);
+  if (state === null) {
+    throw new WorkspaceError(
+      `${stateJson} exists but is not a valid run breadcrumb (unreadable, not JSON, or from an incompatible server version). ` +
+        'If no server is running for this project, delete it; otherwise stop the server process directly.',
+    );
+  }
+  return state;
 }
 
 /** The workspace the CURRENT config resolves to; `null` when the config is unreadable/invalid. */
@@ -66,7 +94,7 @@ async function resolveState(
   const liveRoot = await readLivePointer(cwd);
   if (liveRoot !== null) {
     const stateJson = join(liveRoot, 'state.json');
-    if ((await readState(stateJson)) === null) {
+    if ((await readRecordedState(stateJson)) === null) {
       throw new ConfigError(
         `Config drift: recorded live workspace ${liveRoot} has no readable state breadcrumb at ${stateJson}. ` +
           'The config may have changed since the server started; restore the live workspace or restart the server.',
@@ -86,7 +114,7 @@ async function resolveState(
 /** `ui-debugger-mcp status` — print the active run's state + findings summary. */
 export async function runStatus(cwd = process.cwd()): Promise<void> {
   const { project, stateJson, drift } = await resolveState(cwd);
-  const state = await readState(stateJson);
+  const state = await readRecordedState(stateJson);
   if (!state) {
     console.log(`ui-debugger-mcp: no debug run recorded for '${project}'.`);
     return;
@@ -134,7 +162,7 @@ export async function runStop(
   },
 ): Promise<void> {
   const { project, stateJson } = await resolveState(cwd);
-  const state = await readState(stateJson);
+  const state = await readRecordedState(stateJson);
   if (!state) {
     console.log(`ui-debugger-mcp: no active debug run to stop for '${project}'.`);
     return;

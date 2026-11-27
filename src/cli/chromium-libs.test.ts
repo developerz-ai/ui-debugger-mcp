@@ -704,6 +704,30 @@ test('runLdd: ldd exiting 1 still yields the "=> not found" lines', () => {
   }
 });
 
+test('runLdd: a hung ldd times out loud — its partial listing is never read as healthy', () => {
+  const dir = join(TMP, 'hung-ldd');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  // Prints one resolved line, then hangs: parsing that as the answer would report
+  // "every library resolves" off a listing that never finished.
+  writeFileSync(
+    join(dir, 'ldd'),
+    '#!/bin/sh\necho "libc.so.6 => /lib/libc.so.6 (0x1)"\nexec sleep 30\n',
+    'utf8',
+  );
+  chmodSync(join(dir, 'ldd'), 0o755);
+  const previous = process.env.PATH ?? '';
+  process.env.PATH = `${dir}:${previous}`;
+  const started = Date.now();
+  try {
+    expect(() => runLdd('/bin/true', 200)).toThrow(/timed out after 0\.2s/);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  } finally {
+    process.env.PATH = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('checkChromiumLibs: the REAL ldd runner reports the missing library', () => {
   const dir = join(TMP, 'real-ldd-check');
   rmSync(dir, { recursive: true, force: true });
