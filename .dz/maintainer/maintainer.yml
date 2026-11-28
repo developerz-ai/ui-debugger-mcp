@@ -65,11 +65,10 @@ escalate:
 scout:
   survey: broken_only
 
-# devops: advisories (decision of record 2026-11-28): the package ships to npm users, so the platform
-# watches published advisories itself; this replaces the retired daily security-release schedule.
-# Dependabot still groups the dependency bumps (.github/dependabot.yml).
+# devops: off (owner, 2026-11-26): one PR per advisory was noise. Dependabot security updates
+# (.github/dependabot.yml `*-security` groups, one PR per ecosystem) are the advisory lane.
 devops:
-  watch: advisories
+  watch: off
 
 # care: docs_drift off (47 tasks -> 8 docs-only merges, 33 failed over 30 days, both accounts).
 care:
