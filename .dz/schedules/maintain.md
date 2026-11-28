@@ -1,6 +1,6 @@
 # Brief: weekly maintenance
 
-Fired every Monday at 07:00 UTC by `schedules: maintain` (`mode: devops`, `outcome: pr`): one task with a shell that delivers **at most one pull request**, or a stated reason none was owed. Reporting-only signals (red `main`, a missing publish, stuck Dependabot, the release judgement) belong to `health` and `release-due`; do not repeat them here. Dependency bumps belong to Dependabot; this brief only touches pins it cannot see.
+Fired every Monday at 07:00 UTC by `schedules: maintain` (`mode: devops`, `outcome: pr`): one task with a shell that delivers **at most one pull request**, or a stated reason none was owed. Reporting-only signals (red `main`, a missing publish, stuck Dependabot, the release judgement) belong to the platform's red-main ask and `release-due`; do not repeat them here. Dependency bumps belong to Dependabot; this brief only touches pins it cannot see.
 
 `CLAUDE.md` binds every change.
 
@@ -21,7 +21,7 @@ gh run list --workflow ci.yml --branch main --event push --limit 1 --json conclu
 bin/setup
 ```
 
-If the newest push run of `ci.yml` on the `origin/main` tip did not conclude `success`, stop: no PR is owed, `health` files a red `main`. If an open pull request titled `chore(maintain): weekly maintenance …` exists, stop: last week's run is still in review.
+If the newest push run of `ci.yml` on the `origin/main` tip did not conclude `success`, stop: no PR is owed, the platform's red-main ask files a red `main`. If an open pull request titled `chore(maintain): weekly maintenance …` exists, stop: last week's run is still in review.
 
 ## Tasks, in order
 

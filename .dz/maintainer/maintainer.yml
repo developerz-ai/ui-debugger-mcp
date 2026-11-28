@@ -65,35 +65,31 @@ escalate:
 scout:
   survey: broken_only
 
-# devops: off (owner, 2026-11-26): one PR per advisory was noise. Dependabot security updates
-# (.github/dependabot.yml `*-security` groups, one PR per ecosystem) are the advisory lane.
+# devops: advisories (decision of record 2026-11-28): the package ships to npm users, so the platform
+# watches published advisories itself; this replaces the retired daily security-release schedule.
+# Dependabot still groups the dependency bumps (.github/dependabot.yml).
 devops:
-  watch: off
+  watch: advisories
+
+# care: docs_drift off (47 tasks -> 8 docs-only merges, 33 failed over 30 days, both accounts).
+care:
+  docs_drift: "off"
 
 # The checkups nothing else triggers (owner, 2026-11-26: releases weekly and judged, routine
-# maintenance weekly, improvement monthly). Hours offset from the rest of the fleet.
+# maintenance weekly, improvement twice a month). Hours offset from the rest of the fleet.
 schedules:
   - name: release-due
     days: [mon]
     hours_utc: [5]
     brief_file: .dz/schedules/release-due.md
-  # The one exception: a published high/critical advisory fix that reaches users. Files an ask only.
-  - name: security-release
-    days: [tue, wed, thu, fri, sat, sun]
-    hours_utc: [6]
-    brief_file: .dz/schedules/security-release.md
   - name: maintain
     days: [mon]
     hours_utc: [7]
     brief_file: .dz/schedules/maintain.md
     mode: devops
     outcome: pr
-  - name: health
-    days: [mon]
-    hours_utc: [9]
-    brief_file: .dz/schedules/health.md
   - name: improve
     days: [mon]
-    weeks_of_month: [1]
+    weeks_of_month: [1, 3]
     hours_utc: [11]
     brief_file: .dz/schedules/improve.md
