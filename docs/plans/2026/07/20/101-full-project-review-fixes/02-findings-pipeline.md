@@ -13,7 +13,7 @@ Tests: `src/agent/belt/report.test.ts:114` (driver `ok:false` + note survive), `
 
 ### F2 · mid-run findings flush (HIGH) — SHIPPED
 
-`progressForStep` flushes a snapshot COPY of steps+bugs+visual whenever any stream grew past the last flush (`src/agent/loop.ts:262`), wired into `onStepFinish` (`src/agent/loop.ts:430`). The belt records at tool time: `look` → `trail.recordVisual` (`src/agent/belt/look.ts:462`), error-level console rows → `trail.recordBug` (`src/agent/belt/observe.ts:574`; the only `recordBug` call site — failed network requests are not recorded). An aborted run carries the streamed evidence over via `#persistAbortedVerdict` (`src/session/session.ts:268`); a step-capped run's leads survive via `#writeUnreportedSummary` (`src/session/session.ts:339`) writing back the loop's flushed run — so mid-run `get_findings` shows accumulating findings instead of empty arrays.
+`progressForStep` flushes a snapshot COPY of steps+bugs+visual whenever any stream grew past the last flush (`src/agent/loop.ts:189`), wired into `onStepFinish` (`src/agent/loop.ts:372`). The belt records at tool time: `look` → `trail.recordVisual` (`src/agent/belt/look.ts:462`), error-level console rows → `trail.recordBug` (`src/agent/belt/observe.ts:375`; the only `recordBug` call site — failed network requests are not recorded). An aborted run carries the streamed evidence over via `#persistAbortedVerdict` (`src/session/session.ts:208`) — so mid-run `get_findings` shows accumulating findings instead of empty arrays.
 Tests: `src/agent/loop.test.ts:176` (bugs/visual-only growth), `:275` (failed act still flushed), `:294` (snapshots are copies); `src/session/session.findings.test.ts:412` (step-capped run keeps streamed leads).
 
 ### F3 · same-step act+report keeps the act — SHIPPED
@@ -23,10 +23,10 @@ Tests: `src/agent/belt/report.test.ts:471` (awaits an async trail read before wr
 
 ### F4 · `describeStep` surfaces tool errors — SHIPPED
 
-Errors are read from `tool-error` content parts of `step.content` — AI SDK 6 never puts a rejected call in `toolResults` (`src/agent/loop.ts:324`; shape documented at `src/agent/loop.ts:74`). The dead `step.toolResults` branch is gone.
+Errors are read from `tool-error` content parts of `step.content` — AI SDK 6 never puts a rejected call in `toolResults` (`src/agent/loop.ts:251`; shape documented at `src/agent/loop.ts:84`). The dead `step.toolResults` branch is gone.
 Tests: `src/agent/loop.test.ts:354` (`tool-error` part surfaced as `— ERROR act: …`), `:369` (no content / no errors → clean line).
 
 ### F5 · `#surfaceAgentError` appends — SHIPPED
 
-A crash appends `Debug run failed: …` to a prior driver summary instead of overwriting it, with prior evidence and fields layered (`src/session/session.ts:451`, the append at `:462`).
+A crash appends `Debug run failed: …` to a prior driver summary instead of overwriting it, with prior evidence and fields layered (`src/session/session.ts:278`, the append at `:289`).
 Test: `src/session/session.test.ts:381` ("preserves prior evidence and appends to the prior summary").
